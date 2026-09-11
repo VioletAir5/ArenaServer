@@ -1,7 +1,7 @@
 #include<os/FileDescriptor.h>
 #include <unistd.h>
 
-namespace service::file
+namespace service
 {
 
     FileDescriptor::FileDescriptor(int fd): _fd(fd) 

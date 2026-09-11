@@ -7,7 +7,7 @@
 
 #include <os/FileDescriptor.h>
 
-using service::file::FileDescriptor;
+using service::FileDescriptor;
 
 namespace {
 

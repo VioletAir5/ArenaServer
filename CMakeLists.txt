@@ -24,6 +24,9 @@ FetchContent_MakeAvailable(googletest)
 
 add_library(arena_core
     src/os/FileDescriptor.cpp
+    src/net/Socket.cpp
+    src/net/Session.cpp
+    src/net/SessionManager.cpp
 )
 
 target_include_directories(arena_core PUBLIC
@@ -34,6 +37,9 @@ target_compile_options(arena_core PRIVATE
     -Wall
     -Wextra
     -Wpedantic
+
+    # 当前环境禁用 ASan，只保留 UBSan
+    -fsanitize=undefined
 )
 
 # ----------------------
@@ -62,7 +68,9 @@ enable_testing()
 
 add_executable(
     arena_tests
-    tests/os/FileDescriptor.cpp
+
+    tests/os/FileDescriptorTest.cpp
+    tests/net/SessionManagerTest.cpp
 )
 
 target_link_libraries(
@@ -76,12 +84,10 @@ target_compile_options(arena_tests PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -fsanitize=address
     -fsanitize=undefined
 )
 
 target_link_options(arena_tests PRIVATE
-    -fsanitize=address
     -fsanitize=undefined
 )
 

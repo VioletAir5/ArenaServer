@@ -1,9 +1,7 @@
 #pragma once
 
-
-
 // my abstract for file decriptor 
-namespace service::file 
+namespace service
 {
     class FileDescriptor 
     {
