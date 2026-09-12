@@ -1,0 +1,6 @@
+target_sources(arena_core PRIVATE
+    Socket.cpp
+    Session.cpp
+    SessionManager.cpp
+    PacketBuffer.cpp
+)
