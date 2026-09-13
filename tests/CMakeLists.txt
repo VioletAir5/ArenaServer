@@ -20,6 +20,7 @@ target_link_options(arena_tests PRIVATE
 
 add_subdirectory(os)
 add_subdirectory(net)
+add_subdirectory(concurrent)
 
 include(GoogleTest)
 gtest_discover_tests(arena_tests)

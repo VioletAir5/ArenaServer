@@ -13,3 +13,4 @@ target_compile_options(arena_core PRIVATE
 
 add_subdirectory(os)
 add_subdirectory(net)
+add_subdirectory(concurrent)
