@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <concurrent/BlockingQueue.h>
+#include "concurrent/BlockingQueue.h"
 
 #include <atomic>
 #include <chrono>
