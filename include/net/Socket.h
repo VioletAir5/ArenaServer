@@ -1,34 +1,34 @@
 #pragma once
 
 #include "os/FileDescriptor.h"
+#include "net/InetAddress.h"
 
 namespace service
 {
 
-class Socket
-{
-private:
-    FileDescriptor fd_;
-
+class Socket {
 public:
-    Socket() = default;
-
     explicit Socket(FileDescriptor fd) noexcept;
 
-    ~Socket() = default;
-
-    Socket(const Socket&) = delete;
-    Socket& operator=(const Socket&) = delete;
-
-    Socket(Socket&&) noexcept = default;
-    Socket& operator=(Socket&&) noexcept = default;
-
     static Socket createTcp();
+    static Socket createTcpNonBlocking();
 
     int get() const noexcept;
     bool valid() const noexcept;
 
-    void shutdown();
+    void bind(const InetAddress& addr);
+    void listen(int backlog = SOMAXCONN);
+
+    Socket accept(InetAddress* peer = nullptr);
+
+    void shutdownWrite();
+
+    void setReuseAddr(bool on);
+    void setReusePort(bool on);
+    void setTcpNoDelay(bool on);
+
+private:
+    FileDescriptor fd_;
 };
 
 } // namespace service

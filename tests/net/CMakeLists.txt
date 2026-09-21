@@ -3,4 +3,5 @@
 target_sources(arena_tests PRIVATE
     SessionManagerTest.cpp
     PacketBufferTest.cpp
+    SocketTest.cpp
 )

@@ -3,4 +3,5 @@ target_sources(arena_core PRIVATE
     Session.cpp
     SessionManager.cpp
     PacketBuffer.cpp
+    InetAddress.cpp
 )
