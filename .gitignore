@@ -71,3 +71,5 @@ Testing/
 
 # note in local
 local-notes
+.clang-format
+.clangd

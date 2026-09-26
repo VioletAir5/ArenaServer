@@ -1,20 +1,17 @@
 #pragma once
 
-#include<cstdint>
-#include<cstddef>
-#include<string>
-#include<vector>
-
+#include <cstddef>
+#include <vector>
 
 namespace service
 {
-static constexpr size_t kInitialBufferSize = 4 * 1024;       // 4 KB
-static constexpr size_t kMaxBufferSize     = 1024 * 1024;    // 1 MB
-static constexpr size_t kMaxPacketSize     = 256 * 1024;     // 256 KB
+static constexpr size_t kInitialBufferSize = 4 * 1024; // 4 KB
+static constexpr size_t kMaxBufferSize = 1024 * 1024;  // 1 MB
+static constexpr size_t kMaxPacketSize = 256 * 1024;   // 256 KB
 
-class PacketBuffer {
+class PacketBuffer
+{
 public:
-
     PacketBuffer();
     PacketBuffer(size_t, size_t);
     ~PacketBuffer() = default;
@@ -44,4 +41,3 @@ private:
     size_t _writePos{};
 };
 } // namespace service
-

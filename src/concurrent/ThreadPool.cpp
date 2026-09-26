@@ -1,11 +1,11 @@
-#include<concurrent/ThreadPool.h>
+#include <concurrent/ThreadPool.h>
 
 namespace service
 {
 
 ThreadPool::ThreadPool(size_t threadCount, size_t queueSize)
-    : _threadCount(threadCount),
-    _tasks(queueSize)
+    : _threadCount(threadCount)
+    , _tasks(queueSize)
 {
     if (threadCount == 0)
     {
@@ -24,42 +24,38 @@ void ThreadPool::start()
 {
 
     std::lock_guard<std::mutex> lock(_stateMutex);
-    
+
     State s = _state.load();
     switch (s)
     {
-        case State::Created:
-            try
+    case State::Created:
+        try
+        {
+            for (size_t i = 0; i < _threadCount; i++)
             {
-                for(size_t i = 0; i < _threadCount; i++)
-                {
-                    _workers.emplace_back([this]
-                    {
-                        workerLoop();
-                    });
-                }
-                _state.store(State::Running);
-                break;
+                _workers.emplace_back([this] { workerLoop(); });
             }
-            catch(...)
+            _state.store(State::Running);
+            break;
+        }
+        catch (...)
+        {
+            _tasks.close();
+            for (auto& work : _workers)
             {
-                _tasks.close();
-                for(auto& work: _workers)
-                {
-                    if(work.joinable())
-                        work.join();
-                }
-                
-                _state = State::Stopped;
+                if (work.joinable())
+                    work.join();
+            }
 
-                throw;
-            }
-        case State::Running:
-            throw std::runtime_error("can't restart thread pool");
-        case State::Stopped:
-            throw std::runtime_error("thread pool has stopped");
+            _state = State::Stopped;
+
+            throw;
+        }
+    case State::Running:
+        throw std::runtime_error("can't restart thread pool");
+    case State::Stopped:
+        throw std::runtime_error("thread pool has stopped");
     }
-
 }
 
 void ThreadPool::shutdown()
@@ -85,7 +81,6 @@ void ThreadPool::shutdown()
         break;
     }
 }
-
 
 void ThreadPool::workerLoop()
 {

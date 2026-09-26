@@ -1,12 +1,13 @@
 #pragma once
 
-#include "os/FileDescriptor.h"
 #include "net/InetAddress.h"
+#include "os/FileDescriptor.h"
 
 namespace service
 {
 
-class Socket {
+class Socket
+{
 public:
     explicit Socket(FileDescriptor fd) noexcept;
 

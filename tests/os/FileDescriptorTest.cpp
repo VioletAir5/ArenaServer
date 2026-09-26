@@ -1,21 +1,24 @@
-#include <gtest/gtest.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <cerrno>
-#include <fcntl.h>
 #include <type_traits>
-#include <unistd.h>
+
+#include <gtest/gtest.h>
 
 #include <os/FileDescriptor.h>
 
 using service::FileDescriptor;
 
-namespace {
+namespace
+{
 
 bool isFdOpen(int fd)
 {
     errno = 0;
 
-    if (fcntl(fd, F_GETFD) != -1) {
+    if (fcntl(fd, F_GETFD) != -1)
+    {
         return true;
     }
 
@@ -24,25 +27,19 @@ bool isFdOpen(int fd)
 
 } // namespace
 
-
 // 1. 验证 FileDescriptor 不可复制、可以移动
 TEST(FileDescriptorTest, CopyDisabledMoveEnabled)
 {
-    static_assert(
-        !std::is_copy_constructible_v<FileDescriptor>);
+    static_assert(!std::is_copy_constructible_v<FileDescriptor>);
 
-    static_assert(
-        !std::is_copy_assignable_v<FileDescriptor>);
+    static_assert(!std::is_copy_assignable_v<FileDescriptor>);
 
-    static_assert(
-        std::is_move_constructible_v<FileDescriptor>);
+    static_assert(std::is_move_constructible_v<FileDescriptor>);
 
-    static_assert(
-        std::is_move_assignable_v<FileDescriptor>);
+    static_assert(std::is_move_assignable_v<FileDescriptor>);
 
     SUCCEED();
 }
-
 
 // 2. 无效 fd 不应该导致异常行为
 TEST(FileDescriptorTest, InvalidDescriptor)
@@ -52,7 +49,6 @@ TEST(FileDescriptorTest, InvalidDescriptor)
     EXPECT_FALSE(fd.valid());
     EXPECT_EQ(fd.get(), -1);
 }
-
 
 // 3. 析构函数应该自动 close fd
 TEST(FileDescriptorTest, DestructorClosesDescriptor)
@@ -76,7 +72,6 @@ TEST(FileDescriptorTest, DestructorClosesDescriptor)
     // 另外一个 fd 没有交给 RAII，需要测试自己清理
     close(pipeFds[1]);
 }
-
 
 // 4. 移动构造应该转移所有权
 TEST(FileDescriptorTest, MoveConstructorTransfersOwnership)
@@ -110,7 +105,6 @@ TEST(FileDescriptorTest, MoveConstructorTransfersOwnership)
 
     close(pipeFds[1]);
 }
-
 
 // 5. 移动赋值需要释放旧资源，再接管新资源
 TEST(FileDescriptorTest, MoveAssignmentReleasesOldDescriptor)
@@ -152,7 +146,6 @@ TEST(FileDescriptorTest, MoveAssignmentReleasesOldDescriptor)
     close(pipeA[1]);
     close(pipeB[1]);
 }
-
 
 // 6. 自移动赋值不能把自己的 fd 关闭
 TEST(FileDescriptorTest, SelfMoveAssignmentIsSafe)
