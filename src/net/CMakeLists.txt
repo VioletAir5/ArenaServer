@@ -5,4 +5,5 @@ target_sources(arena_core PRIVATE
     PacketBuffer.cpp
     InetAddress.cpp
     Channel.cpp
+    EpollPoller.cpp
 )
