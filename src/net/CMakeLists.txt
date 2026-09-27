@@ -6,4 +6,5 @@ target_sources(arena_core PRIVATE
     InetAddress.cpp
     Channel.cpp
     EpollPoller.cpp
+    EventLoop.cpp
 )

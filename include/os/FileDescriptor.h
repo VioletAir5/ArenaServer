@@ -10,7 +10,7 @@ private:
 
 public:
     explicit FileDescriptor(int);
-    FileDescriptor();
+    FileDescriptor() = default;
     ~FileDescriptor();
 
     // forbid copying
