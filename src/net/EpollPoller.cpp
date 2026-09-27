@@ -87,6 +87,8 @@ void EpollPoller::poll(
     int timeoutMs, std::vector<Channel*>& activeChannels
 )
 {
+    activeChannels.clear();
+
     int ready = ::epoll_wait(
         m_epollFd.get(),
         m_events.data(),
@@ -108,7 +110,6 @@ void EpollPoller::poll(
         );
     }
 
-    activeChannels.clear();
     activeChannels.reserve(ready);
 
     for (int i = 0; i < ready; ++i)
