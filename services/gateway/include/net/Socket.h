@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "net/InetAddress.h"
 #include "os/FileDescriptor.h"
 
@@ -20,7 +22,7 @@ public:
     void bind(const InetAddress& addr);
     void listen(int backlog = SOMAXCONN);
 
-    Socket accept(InetAddress* peer = nullptr);
+    std::optional<Socket> accept(InetAddress* peer = nullptr);
 
     void shutdownWrite();
 
