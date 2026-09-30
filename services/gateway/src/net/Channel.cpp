@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace service
+namespace service::gateway
 {
 Channel::Channel(int fd)
     : m_fd(fd)
@@ -83,4 +83,4 @@ void Channel::handleEvent()
     }
 }
 
-}; // namespace service
+}; // namespace service::gateway

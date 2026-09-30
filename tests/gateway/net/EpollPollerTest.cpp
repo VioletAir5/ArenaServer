@@ -19,8 +19,8 @@
 #include "net/Channel.h"
 #include "os/FileDescriptor.h"
 
-using service::Channel;
-using service::EpollPoller;
+using service::gateway::Channel;
+using service::gateway::EpollPoller;
 using service::FileDescriptor;
 
 namespace

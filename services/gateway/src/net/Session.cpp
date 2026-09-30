@@ -2,11 +2,11 @@
 
 #include <utility>
 
-namespace service
+namespace service::gateway
 {
 Session::Session(SessionID id, Socket&& socket)
     : _id{id}
     , _socket(std::move(socket))
 {
 }
-} // namespace service
+} // namespace service::gateway

@@ -5,7 +5,7 @@
 
 #include "cstring"
 
-namespace service
+namespace service::gateway
 {
 PacketBuffer::PacketBuffer()
     : _max_capacity(kMaxBufferSize)
@@ -117,4 +117,4 @@ bool PacketBuffer::ensureWritableBytes(size_t len)
 
     return true;
 }
-} // namespace service
+} // namespace service::gateway

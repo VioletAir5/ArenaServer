@@ -3,7 +3,7 @@
 #include "net/InetAddress.h"
 #include "os/FileDescriptor.h"
 
-namespace service
+namespace service::gateway
 {
 
 class Socket
@@ -32,4 +32,4 @@ private:
     FileDescriptor fd_;
 };
 
-} // namespace service
+} // namespace service::gateway

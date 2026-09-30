@@ -3,7 +3,7 @@
 
 #include "net/Socket.h"
 
-namespace service
+namespace service::gateway
 {
 using SessionID = std::uint64_t;
 class Session
@@ -39,4 +39,4 @@ public:
         return _socket;
     }
 };
-} // namespace service
+} // namespace service::gateway

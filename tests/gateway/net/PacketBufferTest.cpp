@@ -5,7 +5,7 @@
 #include <cstring>
 #include <string>
 
-using service::PacketBuffer;
+using service::gateway::PacketBuffer;
 
 TEST(PacketBufferTest, InitialState)
 {

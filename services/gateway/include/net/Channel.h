@@ -5,7 +5,7 @@
 
 #include <os/FileDescriptor.h>
 
-namespace service
+namespace service::gateway
 {
 
 class Channel
@@ -43,4 +43,4 @@ public:
     void handleEvent();
 };
 
-} // namespace service
+} // namespace service::gateway

@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-namespace service
+namespace service::gateway
 {
 InetAddress::InetAddress()
 {
@@ -69,4 +69,4 @@ std::string InetAddress::toStrig() const
     return ip() + ":" + std::to_string(port());
 }
 
-} // namespace service
+} // namespace service::gateway

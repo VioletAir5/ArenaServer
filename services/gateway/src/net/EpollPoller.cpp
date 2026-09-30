@@ -8,7 +8,7 @@
 #include "net/Channel.h"
 #include "os/FileDescriptor.h"
 
-namespace service
+namespace service::gateway
 {
 EpollPoller::EpollPoller()
     : m_epollFd(::epoll_create1(EPOLL_CLOEXEC))
@@ -126,4 +126,4 @@ void EpollPoller::poll(
         m_events.resize(m_events.size() * 2);
     }
 }
-}; // namespace service
+}; // namespace service::gateway

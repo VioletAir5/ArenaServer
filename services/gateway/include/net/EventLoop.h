@@ -7,7 +7,7 @@
 #include "net/Channel.h"
 #include "net/EpollPoller.h"
 
-namespace service
+namespace service::gateway
 {
 class EventLoop
 {
@@ -28,4 +28,4 @@ public:
     void updateChannel(Channel*);
     void removeChannel(Channel*);
 };
-}; // namespace service
+}; // namespace service::gateway

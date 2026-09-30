@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-namespace service
+namespace service::gateway
 {
 class InetAddress
 {
@@ -30,4 +30,4 @@ public:
     std::string toStrig() const;
 };
 
-} // namespace service
+} // namespace service::gateway

@@ -2,7 +2,7 @@
 
 #include "net/Channel.h"
 
-namespace service
+namespace service::gateway
 {
 void EventLoop::loop()
 {
@@ -32,4 +32,4 @@ void EventLoop::removeChannel(Channel* channel)
 {
     m_poller.removeChannel(channel);
 }
-} // namespace service
+} // namespace service::gateway

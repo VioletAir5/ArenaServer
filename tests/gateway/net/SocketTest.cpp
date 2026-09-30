@@ -13,7 +13,7 @@
 #include <cstring>
 #include <thread>
 
-using namespace service;
+using namespace service::gateway;
 
 TEST(SocketTest, CreateTcpSocket)
 {

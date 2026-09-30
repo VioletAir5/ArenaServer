@@ -3,7 +3,7 @@
 
 #include "net/Session.h"
 
-namespace service
+namespace service::gateway
 {
 class SessionManager
 {
@@ -31,4 +31,4 @@ public:
         return _sessions.size();
     }
 };
-} // namespace service
+} // namespace service::gateway

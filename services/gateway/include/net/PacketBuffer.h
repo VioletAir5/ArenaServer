@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace service
+namespace service::gateway
 {
 static constexpr size_t kInitialBufferSize = 4 * 1024; // 4 KB
 static constexpr size_t kMaxBufferSize = 1024 * 1024;  // 1 MB
@@ -40,4 +40,4 @@ private:
     size_t _readPos{};
     size_t _writePos{};
 };
-} // namespace service
+} // namespace service::gateway

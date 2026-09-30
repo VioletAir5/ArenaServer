@@ -6,7 +6,7 @@
 
 #include "net/Channel.h"
 #include "os/FileDescriptor.h"
-namespace service
+namespace service::gateway
 {
 class EpollPoller
 {
@@ -26,4 +26,4 @@ public:
 
     void poll(int, std::vector<Channel*>&);
 };
-}; // namespace service
+}; // namespace service::gateway

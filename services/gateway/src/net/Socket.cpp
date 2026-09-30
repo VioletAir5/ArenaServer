@@ -6,7 +6,7 @@
 
 #include <cerrno>
 #include <system_error>
-namespace service
+namespace service::gateway
 {
 
 Socket::Socket(FileDescriptor fd) noexcept
@@ -115,4 +115,4 @@ void Socket::setTcpNoDelay(bool on)
     }
 }
 
-} // namespace service
+} // namespace service::gateway

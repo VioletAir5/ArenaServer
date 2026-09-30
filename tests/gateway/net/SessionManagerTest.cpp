@@ -8,10 +8,10 @@
 #include "net/Socket.h"
 #include "os/FileDescriptor.h"
 
-using service::Session;
-using service::SessionID;
-using service::SessionManager;
-using service::Socket;
+using service::gateway::Session;
+using service::gateway::SessionID;
+using service::gateway::SessionManager;
+using service::gateway::Socket;
 using service::FileDescriptor;
 
 namespace {

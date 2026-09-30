@@ -16,7 +16,7 @@
 #include "net/InetAddress.h"
 #include "net/Socket.h"
 
-using namespace service;
+using namespace service::gateway;
 
 int main()
 {

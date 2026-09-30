@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-using service::Channel;
+using service::gateway::Channel;
 
 TEST(ChannelTest, StoresDescriptorAndInterestMasks)
 {

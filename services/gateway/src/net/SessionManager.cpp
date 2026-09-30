@@ -1,6 +1,6 @@
 #include "net/SessionManager.h"
 
-namespace service
+namespace service::gateway
 {
 
 bool SessionManager::addSession(std::unique_ptr<Session> session)
@@ -34,4 +34,4 @@ bool SessionManager::removeSession(SessionID id)
     return _sessions.erase(id) > 0;
 }
 
-} // namespace service
+} // namespace service::gateway
