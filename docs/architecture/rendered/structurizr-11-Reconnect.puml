@@ -1,0 +1,86 @@
+@startuml
+title <size:24>Dynamic View: ArenaServer Game Platform</size>\n<size:24>Target reconnect request path</size>
+
+set separator none
+left to right direction
+skinparam ranksep 60
+skinparam nodesep 30
+hide stereotype
+
+<style>
+  root {
+    BackgroundColor: #ffffff;
+    FontColor: #444444;
+  }
+  // Element,Container,InProgress
+  .Element-RWxlbWVudCxDb250YWluZXIsSW5Qcm9ncmVzcw== {
+    BackgroundColor: #167d73;
+    LineColor: #0f5750;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Element,Container,Planned
+  .Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA== {
+    BackgroundColor: #438dd5;
+    LineColor: #2e6295;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Element,Person
+  .Element-RWxlbWVudCxQZXJzb24= {
+    BackgroundColor: #08427b;
+    LineColor: #052e56;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Relationship
+  .Relationship-UmVsYXRpb25zaGlw {
+    LineThickness: 2;
+    LineStyle: 10-10;
+    LineColor: #444444;
+    FontColor: #444444;
+    FontSize: 24;
+  }
+  // ArenaServer Game Platform
+  .Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ== {
+    BackgroundColor: #ffffff;
+    LineColor: #0b4884;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+</style>
+
+rectangle "ArenaServer Game Platform\n<size:16>[Software System]</size>" <<Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ==>> {
+  rectangle "==Auth Service\n<size:16>[Container: C++]</size>\n\nVerifies identity, issues tokens, and authorizes operations." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as ArenaServerGamePlatform.AuthService
+  rectangle "==Room Server\n<size:16>[Container: C++]</size>\n\nOwns authoritative room state, input handling, fixed ticks, and combat." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer
+  rectangle "==Gateway Service\n<size:16>[Container: C++17, Linux epoll, Reactor]</size>\n\nOwns client connections, protocol framing, session routing, and connection safety." <<Element-RWxlbWVudCxDb250YWluZXIsSW5Qcm9ncmVzcw==>> as ArenaServerGamePlatform.GatewayService
+  rectangle "==Storage Service\n<size:16>[Container: C++]</size>\n\nProvides bounded cache access and durable persistence for account and game data." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as ArenaServerGamePlatform.StorageService
+}
+
+person "==Game Client\n<size:16>[Person]</size>\n\nPC, mobile, or console game client." <<Element-RWxlbWVudCxQZXJzb24=>> as GameClient
+
+GameClient --> ArenaServerGamePlatform.GatewayService <<Relationship-UmVsYXRpb25zaGlw>> : "1: Reconnects with an identity token\n<size:16>[TCP; UDP/WebSocket optional later]</size>"
+ArenaServerGamePlatform.GatewayService --> ArenaServerGamePlatform.AuthService <<Relationship-UmVsYXRpb25zaGlw>> : "2: Validates reconnect identity\n<size:16>[Internal request/response TBD]</size>"
+ArenaServerGamePlatform.GatewayService --> ArenaServerGamePlatform.RoomServer <<Relationship-UmVsYXRpb25zaGlw>> : "3: Routes player to the assigned room\n<size:16>[Internal messaging TBD]</size>"
+ArenaServerGamePlatform.RoomServer --> ArenaServerGamePlatform.StorageService <<Relationship-UmVsYXRpb25zaGlw>> : "4: Loads a checkpoint if recovery is needed\n<size:16>[Internal messaging TBD]</size>"
+
+@enduml

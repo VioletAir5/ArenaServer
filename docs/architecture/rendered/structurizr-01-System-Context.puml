@@ -1,0 +1,72 @@
+@startuml
+title <size:24>System Context View: ArenaServer Game Platform</size>\n<size:24>Target ArenaServer and its users and data stores</size>
+
+set separator none
+left to right direction
+skinparam ranksep 60
+skinparam nodesep 30
+hide stereotype
+
+<style>
+  root {
+    BackgroundColor: #ffffff;
+    FontColor: #444444;
+  }
+  // Element,Person
+  .Element-RWxlbWVudCxQZXJzb24= {
+    BackgroundColor: #08427b;
+    LineColor: #052e56;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Element,Software System
+  .Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0= {
+    BackgroundColor: #1168bd;
+    LineColor: #0b4884;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Element,Software System,External,Planned
+  .Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA== {
+    BackgroundColor: #747d8c;
+    LineColor: #515762;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Relationship
+  .Relationship-UmVsYXRpb25zaGlw {
+    LineThickness: 2;
+    LineStyle: 10-10;
+    LineColor: #444444;
+    FontColor: #444444;
+    FontSize: 24;
+  }
+</style>
+
+person "==Game Client\n<size:16>[Person]</size>\n\nPC, mobile, or console game client." <<Element-RWxlbWVudCxQZXJzb24=>> as GameClient
+person "==Admin / Operations\n<size:16>[Person]</size>\n\nConfigures services and monitors health, metrics, and logs." <<Element-RWxlbWVudCxQZXJzb24=>> as AdminOperations
+rectangle "==Redis\n<size:16>[Software System]</size>\n\nTarget cache for presence, tickets, and recoverable state." <<Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA==>> as Redis
+rectangle "==MySQL\n<size:16>[Software System]</size>\n\nTarget durable store for accounts and game results." <<Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA==>> as MySQL
+rectangle "==ArenaServer Game Platform\n<size:16>[Software System]</size>\n\nTarget architecture for a room-based multiplayer game server." <<Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0=>> as ArenaServerGamePlatform
+
+ArenaServerGamePlatform --> Redis <<Relationship-UmVsYXRpb25zaGlw>> : "Caches expiring state\n<size:16>[Planned]</size>"
+ArenaServerGamePlatform --> MySQL <<Relationship-UmVsYXRpb25zaGlw>> : "Persists durable records\n<size:16>[Planned]</size>"
+GameClient --> ArenaServerGamePlatform <<Relationship-UmVsYXRpb25zaGlw>> : "Connects and sends game messages\n<size:16>[TCP; UDP/WebSocket optional later]</size>"
+AdminOperations --> ArenaServerGamePlatform <<Relationship-UmVsYXRpb25zaGlw>> : "Configures and monitors\n<size:16>[Operations interfaces TBD]</size>"
+
+@enduml

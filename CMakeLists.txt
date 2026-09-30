@@ -20,6 +20,6 @@ FetchContent_MakeAvailable(googletest)
 
 enable_testing()
 
-add_subdirectory(src)
-add_subdirectory(app)
+add_subdirectory(shared)
+add_subdirectory(services/gateway)
 add_subdirectory(tests)

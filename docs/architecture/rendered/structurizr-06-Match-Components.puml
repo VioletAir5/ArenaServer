@@ -1,0 +1,73 @@
+@startuml
+title <size:24>Component View: ArenaServer Game Platform - Match Service</size>\n<size:24>Queueing, matching, and room assignment</size>
+
+set separator none
+left to right direction
+skinparam ranksep 60
+skinparam nodesep 30
+hide stereotype
+
+<style>
+  root {
+    BackgroundColor: #ffffff;
+    FontColor: #444444;
+  }
+  // Element,Component,Planned
+  .Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA== {
+    BackgroundColor: #85bbf0;
+    LineColor: #5d82a8;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #172b4d;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Relationship
+  .Relationship-UmVsYXRpb25zaGlw {
+    LineThickness: 2;
+    LineStyle: 10-10;
+    LineColor: #444444;
+    FontColor: #444444;
+    FontSize: 24;
+  }
+  // ArenaServer Game Platform
+  .Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ== {
+    BackgroundColor: #ffffff;
+    LineColor: #0b4884;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+  // Match Service
+  .Boundary-TWF0Y2ggU2VydmljZQ== {
+    BackgroundColor: #ffffff;
+    LineColor: #2e6295;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+</style>
+
+rectangle "ArenaServer Game Platform\n<size:16>[Software System]</size>" <<Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ==>> {
+  rectangle "Match Service\n<size:16>[Container: C++]</size>" <<Boundary-TWF0Y2ggU2VydmljZQ==>> {
+    rectangle "==MatchQueue\n<size:16>[Component: match]</size>\n\nQueues players or parties and supports cancellation and timeout." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.MatchService.MatchQueue
+    rectangle "==MatchRuleEngine\n<size:16>[Component: match]</size>\n\nSelects compatible players according to matching rules." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.MatchService.MatchRuleEngine
+    rectangle "==RoomAllocator\n<size:16>[Component: match]</size>\n\nSelects a Room Server with capacity and requests room creation." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.MatchService.RoomAllocator
+    rectangle "==MatchAssignment\n<size:16>[Component: match]</size>\n\nRecords player-to-room assignment for routing and reconnect." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.MatchService.MatchAssignment
+  }
+
+}
+
+ArenaServerGamePlatform.MatchService.MatchQueue --> ArenaServerGamePlatform.MatchService.MatchRuleEngine <<Relationship-UmVsYXRpb25zaGlw>> : "Supplies waiting players"
+ArenaServerGamePlatform.MatchService.MatchRuleEngine --> ArenaServerGamePlatform.MatchService.RoomAllocator <<Relationship-UmVsYXRpb25zaGlw>> : "Submits matched players"
+ArenaServerGamePlatform.MatchService.RoomAllocator --> ArenaServerGamePlatform.MatchService.MatchAssignment <<Relationship-UmVsYXRpb25zaGlw>> : "Records assigned room"
+
+@enduml

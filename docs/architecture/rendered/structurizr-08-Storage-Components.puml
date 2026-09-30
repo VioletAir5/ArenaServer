@@ -1,0 +1,90 @@
+@startuml
+title <size:24>Component View: ArenaServer Game Platform - Storage Service</size>\n<size:24>Cache and durable persistence</size>
+
+set separator none
+left to right direction
+skinparam ranksep 60
+skinparam nodesep 30
+hide stereotype
+
+<style>
+  root {
+    BackgroundColor: #ffffff;
+    FontColor: #444444;
+  }
+  // Element,Component,Planned
+  .Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA== {
+    BackgroundColor: #85bbf0;
+    LineColor: #5d82a8;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #172b4d;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Element,Software System,External,Planned
+  .Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA== {
+    BackgroundColor: #747d8c;
+    LineColor: #515762;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Relationship
+  .Relationship-UmVsYXRpb25zaGlw {
+    LineThickness: 2;
+    LineStyle: 10-10;
+    LineColor: #444444;
+    FontColor: #444444;
+    FontSize: 24;
+  }
+  // ArenaServer Game Platform
+  .Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ== {
+    BackgroundColor: #ffffff;
+    LineColor: #0b4884;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+  // Storage Service
+  .Boundary-U3RvcmFnZSBTZXJ2aWNl {
+    BackgroundColor: #ffffff;
+    LineColor: #2e6295;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+</style>
+
+rectangle "==Redis\n<size:16>[Software System]</size>\n\nTarget cache for presence, tickets, and recoverable state." <<Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA==>> as Redis
+rectangle "==MySQL\n<size:16>[Software System]</size>\n\nTarget durable store for accounts and game results." <<Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA==>> as MySQL
+
+rectangle "ArenaServer Game Platform\n<size:16>[Software System]</size>" <<Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ==>> {
+  rectangle "Storage Service\n<size:16>[Container: C++]</size>" <<Boundary-U3RvcmFnZSBTZXJ2aWNl>> {
+    rectangle "==DataAccessFacade\n<size:16>[Component: storage]</size>\n\nProvides data contracts to Auth, Lobby, and Room." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.StorageService.DataAccessFacade
+    rectangle "==RedisAdapter\n<size:16>[Component: storage]</size>\n\nReads and writes expiring cached state." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.StorageService.RedisAdapter
+    rectangle "==PersistenceCoordinator\n<size:16>[Component: storage]</size>\n\nApplies idempotent writes and retry policy for durable data." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.StorageService.PersistenceCoordinator
+    rectangle "==MySQLAdapter\n<size:16>[Component: storage]</size>\n\nReads and writes durable account and game records." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.StorageService.MySQLAdapter
+  }
+
+}
+
+ArenaServerGamePlatform.StorageService.DataAccessFacade --> ArenaServerGamePlatform.StorageService.RedisAdapter <<Relationship-UmVsYXRpb25zaGlw>> : "Uses cache"
+ArenaServerGamePlatform.StorageService.DataAccessFacade --> ArenaServerGamePlatform.StorageService.PersistenceCoordinator <<Relationship-UmVsYXRpb25zaGlw>> : "Submits durable writes"
+ArenaServerGamePlatform.StorageService.PersistenceCoordinator --> ArenaServerGamePlatform.StorageService.MySQLAdapter <<Relationship-UmVsYXRpb25zaGlw>> : "Persists records"
+ArenaServerGamePlatform.StorageService.RedisAdapter --> Redis <<Relationship-UmVsYXRpb25zaGlw>> : "Caches expiring state\n<size:16>[Planned]</size>"
+ArenaServerGamePlatform.StorageService.MySQLAdapter --> MySQL <<Relationship-UmVsYXRpb25zaGlw>> : "Persists durable records\n<size:16>[Planned]</size>"
+
+@enduml

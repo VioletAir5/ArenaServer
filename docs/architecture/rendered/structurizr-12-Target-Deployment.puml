@@ -1,0 +1,112 @@
+@startuml
+title <size:24>Deployment View: Target</size>\n<size:24>Logical scaling pools; exact topology and capacity remain design decisions</size>
+
+set separator none
+top to bottom direction
+skinparam ranksep 60
+skinparam nodesep 30
+hide stereotype
+
+<style>
+  root {
+    BackgroundColor: #ffffff;
+    FontColor: #444444;
+  }
+  // Element,Container,InProgress
+  .Element-RWxlbWVudCxDb250YWluZXIsSW5Qcm9ncmVzcw== {
+    BackgroundColor: #167d73;
+    LineColor: #0f5750;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Element,Container,Planned
+  .Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA== {
+    BackgroundColor: #438dd5;
+    LineColor: #2e6295;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Element,Software System,External,Planned
+  .Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA== {
+    BackgroundColor: #747d8c;
+    LineColor: #515762;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Relationship
+  .Relationship-UmVsYXRpb25zaGlw {
+    LineThickness: 2;
+    LineStyle: 10-10;
+    LineColor: #444444;
+    FontColor: #444444;
+    FontSize: 24;
+  }
+  // Element
+  .DeploymentNode-RWxlbWVudA== {
+    BackgroundColor: #ffffff;
+    LineColor: #444444;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #444444;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+</style>
+
+rectangle "Auth pool\n<size:16>[Deployment Node: Linux]</size>" <<DeploymentNode-RWxlbWVudA==>> as Target.Authpool {
+  rectangle "==Auth Service\n<size:16>[Container: C++]</size>\n\nVerifies identity, issues tokens, and authorizes operations." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as Target.Authpool.AuthService_1
+}
+
+rectangle "Lobby pool\n<size:16>[Deployment Node: Linux]</size>" <<DeploymentNode-RWxlbWVudA==>> as Target.Lobbypool {
+  rectangle "==Lobby Service\n<size:16>[Container: C++]</size>\n\nManages online state, friends, parties, and chat." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as Target.Lobbypool.LobbyService_1
+}
+
+rectangle "Match pool\n<size:16>[Deployment Node: Linux]</size>" <<DeploymentNode-RWxlbWVudA==>> as Target.Matchpool {
+  rectangle "==Match Service\n<size:16>[Container: C++]</size>\n\nQueues players, applies match rules, and assigns rooms." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as Target.Matchpool.MatchService_1
+}
+
+rectangle "Room pool (x1..N)\n<size:16>[Deployment Node: Linux]</size>" <<DeploymentNode-RWxlbWVudA==>> as Target.Roompool {
+  rectangle "==Room Server\n<size:16>[Container: C++]</size>\n\nOwns authoritative room state, input handling, fixed ticks, and combat." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as Target.Roompool.RoomServer_1
+}
+
+rectangle "Storage pool\n<size:16>[Deployment Node: Linux]</size>" <<DeploymentNode-RWxlbWVudA==>> as Target.Storagepool {
+  rectangle "==Storage Service\n<size:16>[Container: C++]</size>\n\nProvides bounded cache access and durable persistence for account and game data." <<Element-RWxlbWVudCxDb250YWluZXIsUGxhbm5lZA==>> as Target.Storagepool.StorageService_1
+}
+
+rectangle "Data services\n<size:16>[Deployment Node]</size>" <<DeploymentNode-RWxlbWVudA==>> as Target.Dataservices {
+  rectangle "==Redis\n<size:16>[Software System]</size>\n\nTarget cache for presence, tickets, and recoverable state." <<Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA==>> as Target.Dataservices.Redis_1
+  rectangle "==MySQL\n<size:16>[Software System]</size>\n\nTarget durable store for accounts and game results." <<Element-RWxlbWVudCxTb2Z0d2FyZSBTeXN0ZW0sRXh0ZXJuYWwsUGxhbm5lZA==>> as Target.Dataservices.MySQL_1
+}
+
+rectangle "Gateway pool (x2..N)\n<size:16>[Deployment Node: Linux]</size>" <<DeploymentNode-RWxlbWVudA==>> as Target.Gatewaypool {
+  rectangle "==Gateway Service\n<size:16>[Container: C++17, Linux epoll, Reactor]</size>\n\nOwns client connections, protocol framing, session routing, and connection safety." <<Element-RWxlbWVudCxDb250YWluZXIsSW5Qcm9ncmVzcw==>> as Target.Gatewaypool.GatewayService_1
+}
+
+Target.Gatewaypool.GatewayService_1 --> Target.Authpool.AuthService_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Validates login and reconnect identity\n<size:16>[Internal request/response TBD]</size>"
+Target.Gatewaypool.GatewayService_1 --> Target.Lobbypool.LobbyService_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Routes lobby messages\n<size:16>[Internal messaging TBD]</size>"
+Target.Gatewaypool.GatewayService_1 --> Target.Matchpool.MatchService_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Routes matchmaking requests\n<size:16>[Internal messaging TBD]</size>"
+Target.Gatewaypool.GatewayService_1 --> Target.Roompool.RoomServer_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Routes room commands and state updates\n<size:16>[Internal messaging TBD]</size>"
+Target.Matchpool.MatchService_1 --> Target.Roompool.RoomServer_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Requests room allocation\n<size:16>[Internal request/response TBD]</size>"
+Target.Authpool.AuthService_1 --> Target.Storagepool.StorageService_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Reads account data\n<size:16>[Internal request/response TBD]</size>"
+Target.Lobbypool.LobbyService_1 --> Target.Storagepool.StorageService_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Reads and writes social state\n<size:16>[Internal request/response TBD]</size>"
+Target.Roompool.RoomServer_1 --> Target.Storagepool.StorageService_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Loads checkpoints and persists final results\n<size:16>[Internal messaging TBD]</size>"
+Target.Storagepool.StorageService_1 --> Target.Dataservices.Redis_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Caches expiring state\n<size:16>[Planned]</size>"
+Target.Storagepool.StorageService_1 --> Target.Dataservices.MySQL_1 <<Relationship-UmVsYXRpb25zaGlw>> : "Persists durable records\n<size:16>[Planned]</size>"
+
+@enduml

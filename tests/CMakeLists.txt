@@ -1,10 +1,15 @@
-# tests/CMakeLists.txt
-
 add_executable(arena_tests)
 add_executable(arena_perf_tests)
 
 target_link_libraries(arena_tests PRIVATE
-    arena_core
+    arena_gateway
+    arena_shared
+    GTest::gtest_main
+)
+
+target_link_libraries(arena_perf_tests PRIVATE
+    arena_gateway
+    arena_shared
     GTest::gtest_main
 )
 
@@ -13,10 +18,6 @@ target_compile_options(arena_tests PRIVATE
     -Wextra
     -Wpedantic
     -fsanitize=undefined
-)
-target_link_libraries(arena_perf_tests PRIVATE
-    arena_core
-    GTest::gtest_main
 )
 
 target_compile_options(arena_perf_tests PRIVATE
@@ -34,9 +35,9 @@ target_link_options(arena_perf_tests PRIVATE
     -fsanitize=undefined
 )
 
-add_subdirectory(os)
-add_subdirectory(net)
-add_subdirectory(concurrent)
+add_subdirectory(shared/os)
+add_subdirectory(shared/concurrent)
+add_subdirectory(gateway/net)
 
 include(GoogleTest)
 gtest_discover_tests(arena_tests)

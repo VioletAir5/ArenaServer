@@ -1,0 +1,82 @@
+@startuml
+title <size:24>Component View: ArenaServer Game Platform - Room Server</size>\n<size:24>Authoritative room simulation and reconnect</size>
+
+set separator none
+top to bottom direction
+skinparam ranksep 60
+skinparam nodesep 30
+hide stereotype
+
+<style>
+  root {
+    BackgroundColor: #ffffff;
+    FontColor: #444444;
+  }
+  // Element,Component,Planned
+  .Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA== {
+    BackgroundColor: #85bbf0;
+    LineColor: #5d82a8;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #172b4d;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+    MaximumWidth: 450;
+  }
+  // Relationship
+  .Relationship-UmVsYXRpb25zaGlw {
+    LineThickness: 2;
+    LineStyle: 10-10;
+    LineColor: #444444;
+    FontColor: #444444;
+    FontSize: 24;
+  }
+  // ArenaServer Game Platform
+  .Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ== {
+    BackgroundColor: #ffffff;
+    LineColor: #0b4884;
+    LineStyle: 0;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+  // Room Server
+  .Boundary-Um9vbSBTZXJ2ZXI= {
+    BackgroundColor: #ffffff;
+    LineColor: #2e6295;
+    LineStyle: 10-10;
+    LineThickness: 2;
+    FontColor: #ffffff;
+    FontSize: 24;
+    HorizontalAlignment: center;
+    Shadowing: 0;
+  }
+</style>
+
+rectangle "ArenaServer Game Platform\n<size:16>[Software System]</size>" <<Boundary-QXJlbmFTZXJ2ZXIgR2FtZSBQbGF0Zm9ybQ==>> {
+  rectangle "Room Server\n<size:16>[Container: C++]</size>" <<Boundary-Um9vbSBTZXJ2ZXI=>> {
+    rectangle "==RoomLifecycle\n<size:16>[Component: room]</size>\n\nCreates, starts, and closes rooms; one owner per room." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer.RoomLifecycle
+    rectangle "==PlayerStateManager\n<size:16>[Component: room]</size>\n\nTracks authoritative in-room player state." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer.PlayerStateManager
+    rectangle "==InputValidator\n<size:16>[Component: room]</size>\n\nValidates and orders player commands before simulation." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer.InputValidator
+    rectangle "==TickScheduler\n<size:16>[Component: room]</size>\n\nAdvances room simulation on fixed ticks." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer.TickScheduler
+    rectangle "==CombatEngine\n<size:16>[Component: room]</size>\n\nApplies deterministic game rules to room state." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer.CombatEngine
+    rectangle "==SnapshotPublisher\n<size:16>[Component: room]</size>\n\nProduces versioned state snapshots and final results." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer.SnapshotPublisher
+    rectangle "==ReconnectCoordinator\n<size:16>[Component: room]</size>\n\nReattaches a verified player and sends a fresh snapshot." <<Element-RWxlbWVudCxDb21wb25lbnQsUGxhbm5lZA==>> as ArenaServerGamePlatform.RoomServer.ReconnectCoordinator
+  }
+
+}
+
+ArenaServerGamePlatform.RoomServer.RoomLifecycle --> ArenaServerGamePlatform.RoomServer.PlayerStateManager <<Relationship-UmVsYXRpb25zaGlw>> : "Owns membership and state"
+ArenaServerGamePlatform.RoomServer.RoomLifecycle --> ArenaServerGamePlatform.RoomServer.TickScheduler <<Relationship-UmVsYXRpb25zaGlw>> : "Starts and stops ticks"
+ArenaServerGamePlatform.RoomServer.InputValidator --> ArenaServerGamePlatform.RoomServer.PlayerStateManager <<Relationship-UmVsYXRpb25zaGlw>> : "Checks player and command state"
+ArenaServerGamePlatform.RoomServer.TickScheduler --> ArenaServerGamePlatform.RoomServer.InputValidator <<Relationship-UmVsYXRpb25zaGlw>> : "Consumes validated commands"
+ArenaServerGamePlatform.RoomServer.TickScheduler --> ArenaServerGamePlatform.RoomServer.CombatEngine <<Relationship-UmVsYXRpb25zaGlw>> : "Advances combat"
+ArenaServerGamePlatform.RoomServer.CombatEngine --> ArenaServerGamePlatform.RoomServer.PlayerStateManager <<Relationship-UmVsYXRpb25zaGlw>> : "Updates authoritative state"
+ArenaServerGamePlatform.RoomServer.TickScheduler --> ArenaServerGamePlatform.RoomServer.SnapshotPublisher <<Relationship-UmVsYXRpb25zaGlw>> : "Publishes versioned state"
+ArenaServerGamePlatform.RoomServer.ReconnectCoordinator --> ArenaServerGamePlatform.RoomServer.PlayerStateManager <<Relationship-UmVsYXRpb25zaGlw>> : "Restores player membership"
+ArenaServerGamePlatform.RoomServer.ReconnectCoordinator --> ArenaServerGamePlatform.RoomServer.SnapshotPublisher <<Relationship-UmVsYXRpb25zaGlw>> : "Sends current state"
+
+@enduml
