@@ -35,6 +35,20 @@ target_link_options(arena_perf_tests PRIVATE
     -fsanitize=undefined
 )
 
+function(arena_collect_tests)
+    file(GLOB test_sources CONFIGURE_DEPENDS "*Test.cpp")
+    file(GLOB performance_sources CONFIGURE_DEPENDS "*PerformanceTest.cpp")
+
+    if(performance_sources)
+        list(REMOVE_ITEM test_sources ${performance_sources})
+        target_sources(arena_perf_tests PRIVATE ${performance_sources})
+    endif()
+
+    if(test_sources)
+        target_sources(arena_tests PRIVATE ${test_sources})
+    endif()
+endfunction()
+
 add_subdirectory(shared/os)
 add_subdirectory(shared/concurrent)
 add_subdirectory(gateway/net)
