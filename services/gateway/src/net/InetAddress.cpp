@@ -29,7 +29,9 @@ InetAddress::InetAddress(uint16_t port, bool loopbackOnly)
     m_addr.sin_family = AF_INET;
     m_addr.sin_port = htons(port);
 
-    m_addr.sin_addr.s_addr = htonl(loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
+    m_addr.sin_addr.s_addr = htonl(
+        loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY
+    );
 }
 
 const sockaddr* InetAddress::sockaddrPtr() const noexcept
@@ -51,7 +53,8 @@ std::string InetAddress::ip() const
 {
     char buf[INET_ADDRSTRLEN]{};
 
-    if (::inet_ntop(AF_INET, &m_addr.sin_addr, buf, sizeof(buf)) == nullptr)
+    if (::inet_ntop(AF_INET, &m_addr.sin_addr, buf, sizeof(buf)) ==
+        nullptr)
     {
         return {};
     }
@@ -64,7 +67,7 @@ uint16_t InetAddress::port() const noexcept
     return ntohs(m_addr.sin_port);
 }
 
-std::string InetAddress::toStrig() const
+std::string InetAddress::toString() const
 {
     return ip() + ":" + std::to_string(port());
 }

@@ -1,14 +1,13 @@
-#include <netinet/in.h>
 #include <sys/socket.h>
 
-#include <cerrno>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 #include "net/Acceptor.h"
 #include "net/EventLoop.h"
-#include "os/FileDescriptor.h"
 
 namespace service::gateway
 {
@@ -65,48 +64,27 @@ void Acceptor::handleRead()
 {
     while (true)
     {
-        sockaddr_in peerAddress{};
-
-        socklen_t peerLength = sizeof(peerAddress);
-
-        int connfd = ::accept4(
-            m_listenSocket.get(),
-            reinterpret_cast<sockaddr*>(&peerAddress),
-            &peerLength,
-            SOCK_NONBLOCK | SOCK_CLOEXEC
-        );
-
-        if (connfd >= 0)
+        InetAddress peer;
+        std::optional<Socket> clientSocket;
+        try
         {
-            Socket clientSocket{FileDescriptor(connfd)};
-
-            InetAddress peer(peerAddress);
-
-            if (m_newConnectionCallback)
-            {
-                m_newConnectionCallback(
-                    std::move(clientSocket),
-                    peer
-                );
-            }
-
-            continue;
+            clientSocket = m_listenSocket.accept(&peer);
+        }
+        catch (const std::system_error& error)
+        {
+            std::cerr << "accept failed: " << error.what() << '\n';
+            return;
         }
 
-        if (errno == EINTR)
-        {
-            continue;
-        }
-
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        if (!clientSocket)
         {
             return;
         }
 
-        std::cerr << "accept4 failed errno=" << errno << '\n';
-
-        return;
+        if (m_newConnectionCallback)
+        {
+            m_newConnectionCallback(std::move(*clientSocket), peer);
+        }
     }
 }
-
 } // namespace service::gateway

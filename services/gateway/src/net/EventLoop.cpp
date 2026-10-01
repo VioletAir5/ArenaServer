@@ -15,7 +15,26 @@ void EventLoop::loop()
         {
             channel->handleEvent();
         }
+
+        auto pending = std::move(m_pendingFunctors);
+
+        m_pendingFunctors.clear();
+
+        for (auto& functor : pending)
+        {
+            functor();
+        }
     }
+}
+
+void EventLoop::quit()
+{
+    m_quit = true;
+}
+
+void EventLoop::queueInLoop(Functor cb)
+{
+    m_pendingFunctors.push_back(std::move(cb));
 }
 
 void EventLoop::addChannel(Channel* channel)

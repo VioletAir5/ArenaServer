@@ -183,10 +183,11 @@ TEST(SocketTest, AcceptConnection)
 
     InetAddress peer;
 
-    Socket client = server.accept(&peer);
+    std::optional<Socket> client = server.accept(&peer);
 
-    EXPECT_TRUE(client.valid());
-    EXPECT_GE(client.get(), 0);
+    ASSERT_TRUE(client.has_value());
+    EXPECT_TRUE(client->valid());
+    EXPECT_GE(client->get(), 0);
 
     clientThread.join();
 }

@@ -27,7 +27,7 @@ public:
 
     std::string ip() const;
     uint16_t port() const noexcept;
-    std::string toStrig() const;
+    std::string toString() const;
 };
 
 } // namespace service::gateway

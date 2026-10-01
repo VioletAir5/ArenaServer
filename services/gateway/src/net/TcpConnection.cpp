@@ -31,7 +31,13 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
 
 void TcpConnection::handleRead()
 {
+    if (m_closing || m_readClosed)
+    {
+        return;
+    }
+
     char buffer[8192];
+    bool peerClosed = false;
 
     while (true)
     {
@@ -44,14 +50,13 @@ void TcpConnection::handleRead()
                 handleError();
                 return;
             }
-
             continue;
         }
 
         if (n == 0)
         {
-            handleClose();
-            return;
+            peerClosed = true;
+            break;
         }
 
         if (errno == EINTR)
@@ -68,16 +73,46 @@ void TcpConnection::handleRead()
         return;
     }
 
-    // Echo 第一版
     if (m_inputBuffer.readableBytes() > 0)
     {
-        send(m_inputBuffer.readPtr(), m_inputBuffer.readableBytes());
+        const size_t readable = m_inputBuffer.readableBytes();
+        if (m_messageCallback)
+        {
+            m_messageCallback(
+                *this,
+                std::string_view(m_inputBuffer.readPtr(), readable)
+            );
+        }
+        m_inputBuffer.skip(readable);
+    }
 
-        m_inputBuffer.skip(m_inputBuffer.readableBytes());
+    if (m_closing)
+    {
+        return;
+    }
+
+    if (peerClosed)
+    {
+        m_readClosed = true;
+        if (m_outputBuffer.readableBytes() == 0)
+        {
+            handleClose();
+        }
+        else
+        {
+            m_channel.setEvents(EPOLLOUT);
+            m_loop->updateChannel(&m_channel);
+        }
     }
 }
+
 void TcpConnection::send(const void* data, size_t len)
 {
+    if (m_closing || len == 0)
+    {
+        return;
+    }
+
     const char* ptr = static_cast<const char*>(data);
 
     size_t remaining = len;
@@ -137,6 +172,11 @@ void TcpConnection::send(const void* data, size_t len)
 
 void TcpConnection::handleWrite()
 {
+    if (m_closing)
+    {
+        return;
+    }
+
     while (m_outputBuffer.readableBytes() > 0)
     {
         ssize_t n = ::write(
@@ -163,6 +203,12 @@ void TcpConnection::handleWrite()
         }
 
         handleError();
+        return;
+    }
+
+    if (m_readClosed)
+    {
+        handleClose();
         return;
     }
 
@@ -205,8 +251,6 @@ void TcpConnection::handleClose()
 
     m_closing = true;
 
-    m_channel.setEvents(0);
-    m_loop->updateChannel(&m_channel);
     // 不在这里 close(fd)
     // 不在这里 removeChannel()
     // 不在这里 delete this
@@ -220,6 +264,11 @@ void TcpConnection::handleClose()
 void TcpConnection::setCloseCallback(CloseCallback cb)
 {
     m_closeCallback = std::move(cb);
+}
+
+void TcpConnection::setMessageCallback(MessageCallback cb)
+{
+    m_messageCallback = std::move(cb);
 }
 
 Channel& TcpConnection::channel() noexcept
