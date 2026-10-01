@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -182,7 +183,8 @@ TEST(TcpConnectionTest, DrainsPendingOutputBeforeClosingAfterPeerShutdown)
     ASSERT_NE(connection.channel().events() & EPOLLOUT, 0U);
 
     ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
-    connection.handleRead();
+    connection.channel().setRevents(EPOLLRDHUP);
+    connection.channel().handleEvent();
     EXPECT_EQ(closeCount, 0);
 
     size_t received = 0;
@@ -216,4 +218,139 @@ TEST(TcpConnectionTest, DrainsPendingOutputBeforeClosingAfterPeerShutdown)
 
     EXPECT_EQ(received, payload.size());
     EXPECT_EQ(closeCount, 1);
+}
+
+TEST(
+    TcpConnectionTest,
+    HighWaterPausesReadsAndLowWaterResumesPendingEdge
+)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(
+        &loop,
+        Socket(std::move(pair.connection))
+    );
+
+    int sendBufferSize = 4096;
+    ASSERT_EQ(
+        ::setsockopt(
+            connection.fd(),
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &sendBufferSize,
+            sizeof(sendBufferSize)
+        ),
+        0
+    );
+
+    const std::string payload(
+        TcpConnection::kHighWaterMark + 128 * 1024,
+        'x'
+    );
+    connection.send(payload.data(), payload.size());
+    ASSERT_EQ(connection.channel().events() & EPOLLIN, 0U);
+    ASSERT_NE(connection.channel().events() & EPOLLOUT, 0U);
+
+    int messages = 0;
+    connection.setMessageCallback(
+        [&](TcpConnection& conn, std::string_view bytes)
+        {
+            EXPECT_EQ(bytes, "held");
+            ++messages;
+            conn.send(bytes.data(), bytes.size());
+        }
+    );
+    ASSERT_EQ(::write(pair.peer.get(), "held", 4), 4);
+    connection.handleRead();
+    EXPECT_EQ(messages, 0);
+
+    char buffer[8192];
+    for (int attempt = 0; attempt < 1000 && messages == 0; ++attempt)
+    {
+        while (::read(pair.peer.get(), buffer, sizeof(buffer)) > 0)
+        {
+        }
+        connection.handleWrite();
+    }
+
+    EXPECT_EQ(messages, 1);
+    EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
+}
+
+TEST(TcpConnectionTest, SustainedHighWaterDisconnectsSlowClient)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(
+        &loop,
+        Socket(std::move(pair.connection))
+    );
+    int closes = 0;
+    connection.setCloseCallback([&](TcpConnection*) { ++closes; });
+
+    int sendBufferSize = 4096;
+    ASSERT_EQ(
+        ::setsockopt(
+            connection.fd(),
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &sendBufferSize,
+            sizeof(sendBufferSize)
+        ),
+        0
+    );
+
+    const std::string payload(
+        TcpConnection::kHighWaterMark + 128 * 1024,
+        'x'
+    );
+    connection.send(payload.data(), payload.size());
+    ASSERT_EQ(connection.channel().events() & EPOLLIN, 0U);
+
+    const auto now = std::chrono::steady_clock::now();
+    connection.closeIfSlow(now + std::chrono::seconds(1));
+    EXPECT_EQ(closes, 0);
+
+    connection.closeIfSlow(
+        now + TcpConnection::kSlowClientTimeout +
+        std::chrono::seconds(1)
+    );
+    connection.closeIfSlow(
+        now + TcpConnection::kSlowClientTimeout +
+        std::chrono::seconds(2)
+    );
+    EXPECT_EQ(closes, 1);
+}
+
+TEST(TcpConnectionTest, HardOutputLimitDisconnectsImmediately)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(
+        &loop,
+        Socket(std::move(pair.connection))
+    );
+    int closes = 0;
+    connection.setCloseCallback([&](TcpConnection*) { ++closes; });
+
+    int sendBufferSize = 4096;
+    ASSERT_EQ(
+        ::setsockopt(
+            connection.fd(),
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &sendBufferSize,
+            sizeof(sendBufferSize)
+        ),
+        0
+    );
+
+    const std::string payload(
+        TcpConnection::kHardOutputLimit + 8192,
+        'x'
+    );
+    connection.send(payload.data(), payload.size());
+
+    EXPECT_EQ(closes, 1);
 }

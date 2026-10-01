@@ -1,14 +1,43 @@
 #include "net/TcpServer.h"
 
+#include <sys/timerfd.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <string_view>
+#include <system_error>
+#include <utility>
 
 #include "net/EventLoop.h"
 #include "net/InetAddress.h"
 
 namespace service::gateway
 {
+namespace
+{
+service::FileDescriptor createSlowTimer()
+{
+    const int fd = ::timerfd_create(
+        CLOCK_MONOTONIC,
+        TFD_NONBLOCK | TFD_CLOEXEC
+    );
+    if (fd < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "timerfd_create"
+        );
+    }
+    return service::FileDescriptor(fd);
+}
+} // namespace
+
 TcpServer::TcpServer(
     EventLoop* loop,
     const InetAddress& listenAddress,
@@ -17,7 +46,8 @@ TcpServer::TcpServer(
     : m_loop(loop)
     , m_acceptor(m_loop, listenAddress)
     , m_maxConnections(maxConnections)
-
+    , m_slowTimerFd(createSlowTimer())
+    , m_slowTimerChannel(m_slowTimerFd.get())
 {
     if (m_loop == nullptr)
     {
@@ -26,10 +56,69 @@ TcpServer::TcpServer(
         );
     }
 
+    itimerspec interval{};
+    interval.it_value.tv_sec = 1;
+    interval.it_interval.tv_sec = 1;
+    if (::timerfd_settime(
+            m_slowTimerFd.get(),
+            0,
+            &interval,
+            nullptr
+        ) != 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "timerfd_settime"
+        );
+    }
+
+    m_slowTimerChannel.setEvents(EPOLLIN);
+    m_slowTimerChannel.setReadCallback([this]() { handleSlowTimer(); }
+    );
+    m_loop->addChannel(&m_slowTimerChannel);
     m_acceptor.setNewConnectionCallback(
         [this](Socket&& socket, const InetAddress& peer)
         { handleNewConnection(std::move(socket), peer); }
     );
+}
+
+TcpServer::~TcpServer()
+{
+    m_loop->removeChannel(&m_slowTimerChannel);
+}
+
+void TcpServer::handleSlowTimer()
+{
+    std::uint64_t expirations = 0;
+    ssize_t count;
+    do
+    {
+        count = ::read(
+            m_slowTimerFd.get(),
+            &expirations,
+            sizeof(expirations)
+        );
+    } while (count < 0 && errno == EINTR);
+
+    if (count < 0 && errno == EAGAIN)
+    {
+        return;
+    }
+    if (count != static_cast<ssize_t>(sizeof(expirations)))
+    {
+        throw std::system_error(
+            count < 0 ? errno : EIO,
+            std::generic_category(),
+            "read slow-client timer"
+        );
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& [fd, connection] : m_connections)
+    {
+        connection->closeIfSlow(now);
+    }
 }
 
 void TcpServer::handleNewConnection(

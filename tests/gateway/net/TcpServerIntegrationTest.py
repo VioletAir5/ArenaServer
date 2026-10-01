@@ -120,6 +120,32 @@ def run(binary, scenario):
             wait_until(server, lambda: fd_count(server) == baseline, "FD recovery")
             print("1001st connection closed; capacity recovered")
 
+        elif scenario == "slow":
+            client = connect(port)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            client.setblocking(False)
+            clients.append(client)
+
+            sent = 0
+            payload = b"x" * 8192
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and sent < 8 * 1024 * 1024:
+                try:
+                    sent += client.send(payload)
+                except BlockingIOError:
+                    time.sleep(0.001)
+
+            def slow_client_closed():
+                with open(log.name, errors="replace") as stream:
+                    return "slow client timeout" in stream.read()
+
+            wait_until(server, slow_client_closed, "slow-client timeout")
+            wait_until(
+                server,
+                lambda: fd_count(server) == baseline,
+                "slow-client FD recovery",
+            )
+            print(f"slow client timed out after sending {sent} bytes")
         else:
             raise ValueError(f"unknown scenario: {scenario}")
 
@@ -155,5 +181,5 @@ def run(binary, scenario):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit")
+        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow")
     run(sys.argv[1], sys.argv[2])

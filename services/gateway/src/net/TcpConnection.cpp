@@ -24,7 +24,7 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
 
     m_channel.setWriteCallback([this]() { handleWrite(); });
 
-    m_channel.setCloseCallback([this]() { handleClose(); });
+    m_channel.setCloseCallback([this]() { handleRead(); });
 
     m_channel.setErrorCallback([this]() { handleError(); });
 
@@ -37,23 +37,43 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
 
 void TcpConnection::handleRead()
 {
-    if (m_closing || m_readClosed)
+    if (m_closing || m_readClosed || m_readPaused)
     {
         return;
     }
 
     char buffer[8192];
-    bool peerClosed = false;
-
-    while (true)
+    while (!m_readPaused)
     {
-        ssize_t n = ::read(m_socket.get(), buffer, sizeof(buffer));
+        const ssize_t n = ::read(
+            m_socket.get(),
+            buffer,
+            sizeof(buffer)
+        );
 
         if (n > 0)
         {
             if (!m_inputBuffer.append(buffer, static_cast<size_t>(n)))
             {
-                handleError();
+                handleClose();
+                return;
+            }
+
+            const size_t readable = m_inputBuffer.readableBytes();
+            if (m_messageCallback)
+            {
+                m_messageCallback(
+                    *this,
+                    std::string_view(
+                        m_inputBuffer.readPtr(),
+                        readable
+                    )
+                );
+            }
+            m_inputBuffer.skip(readable);
+
+            if (m_closing)
+            {
                 return;
             }
             continue;
@@ -61,8 +81,16 @@ void TcpConnection::handleRead()
 
         if (n == 0)
         {
-            peerClosed = true;
-            break;
+            m_readClosed = true;
+            if (m_outputBuffer.readableBytes() == 0)
+            {
+                handleClose();
+            }
+            else
+            {
+                m_channel.enableWriting();
+            }
+            return;
         }
 
         if (errno == EINTR)
@@ -72,45 +100,13 @@ void TcpConnection::handleRead()
 
         if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
-            break;
+            return;
         }
 
         handleError();
         return;
     }
-
-    if (m_inputBuffer.readableBytes() > 0)
-    {
-        const size_t readable = m_inputBuffer.readableBytes();
-        if (m_messageCallback)
-        {
-            m_messageCallback(
-                *this,
-                std::string_view(m_inputBuffer.readPtr(), readable)
-            );
-        }
-        m_inputBuffer.skip(readable);
-    }
-
-    if (m_closing)
-    {
-        return;
-    }
-
-    if (peerClosed)
-    {
-        m_readClosed = true;
-        if (m_outputBuffer.readableBytes() == 0)
-        {
-            handleClose();
-        }
-        else
-        {
-            m_channel.enableWriting();
-        }
-    }
 }
-
 void TcpConnection::send(const void* data, size_t len)
 {
     if (m_closing || len == 0)
@@ -160,19 +156,23 @@ void TcpConnection::send(const void* data, size_t len)
 
     if (remaining > 0)
     {
-        if (!m_outputBuffer.append(ptr, remaining))
+        if (remaining >
+                kHardOutputLimit - m_outputBuffer.readableBytes() ||
+            !m_outputBuffer.append(ptr, remaining))
         {
-            handleError();
+            std::cerr << "TcpConnection output limit reached fd="
+                      << fd() << '\n';
+            handleClose();
             return;
         }
 
+        pauseReadingIfNeeded();
         if (!m_channel.isWriting())
         {
             m_channel.enableWriting();
         }
     }
 }
-
 void TcpConnection::handleWrite()
 {
     if (m_closing)
@@ -182,7 +182,7 @@ void TcpConnection::handleWrite()
 
     while (m_outputBuffer.readableBytes() > 0)
     {
-        ssize_t n = ::write(
+        const ssize_t n = ::write(
             m_socket.get(),
             m_outputBuffer.readPtr(),
             m_outputBuffer.readableBytes()
@@ -191,7 +191,6 @@ void TcpConnection::handleWrite()
         if (n > 0)
         {
             m_outputBuffer.skip(static_cast<size_t>(n));
-
             continue;
         }
 
@@ -202,10 +201,16 @@ void TcpConnection::handleWrite()
 
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
-            return;
+            break;
         }
 
         handleError();
+        return;
+    }
+
+    resumeReadingIfNeeded();
+    if (m_closing || m_outputBuffer.readableBytes() != 0)
+    {
         return;
     }
 
@@ -221,6 +226,55 @@ void TcpConnection::handleWrite()
     }
 }
 
+void TcpConnection::pauseReadingIfNeeded()
+{
+    if (m_readPaused ||
+        m_outputBuffer.readableBytes() < kHighWaterMark)
+    {
+        return;
+    }
+
+    m_channel.disableReading();
+    m_readPaused = true;
+    m_highWaterSince = std::chrono::steady_clock::now();
+}
+
+void TcpConnection::resumeReadingIfNeeded()
+{
+    if (!m_readPaused ||
+        m_outputBuffer.readableBytes() > kLowWaterMark)
+    {
+        return;
+    }
+
+    if (!m_readClosed)
+    {
+        m_channel.enableReading();
+    }
+    m_readPaused = false;
+
+    // Re-enabling EPOLLIN in ET mode may not create another edge for
+    // bytes already in the socket. Drain them before returning.
+    if (!m_readClosed)
+    {
+        handleRead();
+    }
+}
+
+void TcpConnection::closeIfSlow(
+    std::chrono::steady_clock::time_point now
+)
+{
+    if (m_closing || !m_readPaused ||
+        now - m_highWaterSince < kSlowClientTimeout)
+    {
+        return;
+    }
+
+    std::cerr << "TcpConnection slow client timeout fd=" << fd()
+              << '\n';
+    handleClose();
+}
 void TcpConnection::handleError()
 {
     int error = 0;

@@ -6,8 +6,10 @@
 #include <unordered_set>
 
 #include "net/Acceptor.h"
+#include "net/Channel.h"
 #include "net/InetAddress.h"
 #include "net/TcpConnection.h"
+#include "os/FileDescriptor.h"
 
 namespace service::gateway
 {
@@ -20,6 +22,8 @@ public:
         const InetAddress& listenAddress,
         std::size_t maxConnections
     );
+
+    ~TcpServer();
 
     TcpServer(const TcpServer&) = delete;
     TcpServer& operator=(const TcpServer&) = delete;
@@ -34,6 +38,7 @@ private:
     void handleConnectionClose(TcpConnection* connection);
 
     void removeClosedConnections();
+    void handleSlowTimer();
 
 private:
     EventLoop* m_loop;
@@ -41,6 +46,9 @@ private:
     Acceptor m_acceptor;
 
     std::size_t m_maxConnections;
+
+    service::FileDescriptor m_slowTimerFd;
+    Channel m_slowTimerChannel;
 
     std::unordered_map<int, std::unique_ptr<TcpConnection>>
         m_connections;

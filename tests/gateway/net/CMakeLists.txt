@@ -28,7 +28,15 @@ add_test(
         "$<TARGET_FILE:arena_tcp_server_test_host>"
         limit
 )
+add_test(
+    NAME TcpServerDisconnectsSlowClient
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
+        "$<TARGET_FILE:arena_tcp_server_test_host>"
+        slow
+)
 set_tests_properties(
     TcpServerThousandConnectionsNoFdLeak TcpServerRejectsOverLimit
+    TcpServerDisconnectsSlowClient
     PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network"
 )
