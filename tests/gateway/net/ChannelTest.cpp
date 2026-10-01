@@ -2,6 +2,8 @@
 
 #include <sys/epoll.h>
 
+#include <stdexcept>
+
 #include <gtest/gtest.h>
 
 using service::gateway::Channel;
@@ -68,4 +70,47 @@ TEST(ChannelTest, MissingCallbacksAreSafe)
     channel.setRevents(EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLRDHUP);
 
     EXPECT_NO_THROW(channel.handleEvent());
+}
+
+TEST(ChannelTest, InterestHelpersPreserveMasksAndNotifyOnlyOnChange)
+{
+    Channel channel(42);
+    channel.enableReading();
+    EXPECT_EQ(channel.events(), static_cast<uint32_t>(EPOLLIN));
+
+    int updates = 0;
+    channel.setEventLoopCallback([&] { ++updates; });
+
+    channel.enablePeerClose();
+    channel.enableEdgeTriggered();
+    channel.enableWriting();
+    channel.enableWriting();
+
+    EXPECT_EQ(updates, 3);
+    EXPECT_TRUE(channel.isWriting());
+    EXPECT_EQ(
+        channel.events(),
+        static_cast<uint32_t>(
+            EPOLLIN | EPOLLRDHUP | EPOLLET | EPOLLOUT
+        )
+    );
+
+    channel.disableWriting();
+    EXPECT_FALSE(channel.isWriting());
+    EXPECT_EQ(updates, 4);
+    EXPECT_NE(channel.events() & EPOLLIN, 0U);
+    EXPECT_NE(channel.events() & EPOLLRDHUP, 0U);
+}
+
+TEST(ChannelTest, FailedUpdateRestoresInterestMask)
+{
+    Channel channel(42);
+    channel.enableReading();
+    channel.setEventLoopCallback(
+        [] { throw std::runtime_error("update failed"); }
+    );
+
+    EXPECT_THROW(channel.enableWriting(), std::runtime_error);
+    EXPECT_EQ(channel.events(), static_cast<uint32_t>(EPOLLIN));
+    EXPECT_FALSE(channel.isWriting());
 }

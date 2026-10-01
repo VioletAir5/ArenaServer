@@ -8,6 +8,8 @@ namespace service::gateway
 {
 Channel::Channel(int fd)
     : m_fd(fd)
+    , m_events(0)
+    , m_revents(0)
 {
 }
 
@@ -24,16 +26,6 @@ uint32_t Channel::events() const noexcept
 uint32_t Channel::revents() const noexcept
 {
     return m_revents;
-}
-
-void Channel::setEvents(uint32_t events) noexcept
-{
-    m_events = events;
-}
-
-void Channel::setRevents(uint32_t revents) noexcept
-{
-    m_revents = revents;
 }
 
 void Channel::setReadCallback(EventCallback cb)
@@ -54,6 +46,75 @@ void Channel::setCloseCallback(EventCallback cb)
 void Channel::setErrorCallback(EventCallback cb)
 {
     m_errorCallback = cb;
+}
+
+void Channel::setEvents(uint32_t events)
+{
+    if (m_events == events)
+    {
+        return;
+    }
+
+    const uint32_t previous = m_events;
+    m_events = events;
+
+    if (m_update)
+    {
+        try
+        {
+            m_update();
+        }
+        catch (...)
+        {
+            m_events = previous;
+            throw;
+        }
+    }
+}
+
+void Channel::setRevents(uint32_t revents) noexcept
+{
+    m_revents = revents;
+}
+
+void Channel::enableReading()
+{
+    setEvents(m_events | EPOLLIN);
+}
+
+void Channel::disableReading()
+{
+    setEvents(m_events & ~EPOLLIN);
+}
+
+void Channel::enableWriting()
+{
+    setEvents(m_events | EPOLLOUT);
+}
+
+void Channel::disableWriting()
+{
+    setEvents(m_events & ~EPOLLOUT);
+}
+
+void Channel::enablePeerClose()
+{
+    setEvents(m_events | EPOLLRDHUP);
+}
+
+void Channel::enableEdgeTriggered()
+{
+    setEvents(m_events | EPOLLET);
+}
+
+bool Channel::isWriting() const noexcept
+{
+    return (m_events & EPOLLOUT) != 0;
+}
+
+void Channel::setEventLoopCallback(EventLoopUpdateCallback cb)
+{
+    m_update = cb;
 }
 
 void Channel::handleEvent()

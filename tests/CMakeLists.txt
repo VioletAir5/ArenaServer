@@ -29,10 +29,12 @@ target_compile_options(arena_perf_tests PRIVATE
 
 target_link_options(arena_tests PRIVATE
     -fsanitize=undefined
+    -no-pie
 )
 
 target_link_options(arena_perf_tests PRIVATE
     -fsanitize=undefined
+    -no-pie
 )
 
 function(arena_collect_tests)

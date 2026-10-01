@@ -16,7 +16,9 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
     , m_socket(std::move(socket))
     , m_channel(m_socket.get())
 {
-    m_channel.setEvents(EPOLLIN | EPOLLRDHUP);
+    m_channel.enableReading();
+    m_channel.enablePeerClose();
+    m_channel.enableEdgeTriggered();
 
     m_channel.setReadCallback([this]() { handleRead(); });
 
@@ -25,6 +27,10 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
     m_channel.setCloseCallback([this]() { handleClose(); });
 
     m_channel.setErrorCallback([this]() { handleError(); });
+
+    m_channel.setEventLoopCallback(
+        [this]() { m_loop->updateChannel(&this->channel()); }
+    );
 
     m_loop->addChannel(&m_channel);
 }
@@ -100,8 +106,7 @@ void TcpConnection::handleRead()
         }
         else
         {
-            m_channel.setEvents(EPOLLOUT);
-            m_loop->updateChannel(&m_channel);
+            m_channel.enableWriting();
         }
     }
 }
@@ -161,11 +166,9 @@ void TcpConnection::send(const void* data, size_t len)
             return;
         }
 
-        if ((m_channel.events() & EPOLLOUT) == 0)
+        if (!m_channel.isWriting())
         {
-            m_channel.setEvents(m_channel.events() | EPOLLOUT);
-
-            m_loop->updateChannel(&m_channel);
+            m_channel.enableWriting();
         }
     }
 }
@@ -212,11 +215,9 @@ void TcpConnection::handleWrite()
         return;
     }
 
-    if (m_channel.events() & EPOLLOUT)
+    if (m_channel.isWriting())
     {
-        m_channel.setEvents(m_channel.events() & ~EPOLLOUT);
-
-        m_loop->updateChannel(&m_channel);
+        m_channel.disableWriting();
     }
 }
 
