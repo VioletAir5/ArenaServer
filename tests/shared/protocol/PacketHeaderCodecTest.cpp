@@ -1,9 +1,12 @@
 #include "protocol/PacketHeaderCodec.hpp"
 
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <random>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -311,4 +314,259 @@ TEST(ProtocolBufferTest, GrowsSafelyAfterPrependingHeader)
         std::string_view(buffer.peek(), buffer.readableBytes()),
         "01234567890abcdef"
     );
+}
+
+TEST(PacketHeaderCodecTest, OneByteThroughMaximumPayloadBoundaries)
+{
+    constexpr std::size_t maxPayload = PacketHeader::kMaxPacketSize -
+                                       PacketHeader::kMetadataSize;
+    for (const std::size_t payloadSize :
+         {std::size_t{1}, maxPayload - 1, maxPayload})
+    {
+        SCOPED_TRACE(payloadSize);
+        const std::string payload(payloadSize, 'x');
+        Buffer output;
+        ASSERT_TRUE(output.append(payload.data(), payload.size()));
+        PacketHeader header;
+        header.m_length = PacketHeader::kMetadataSize + payloadSize;
+        header.m_type = PacketHeader::kEchoRequest;
+        header.m_requestId = 0x10203040;
+        ASSERT_TRUE(PacketHeaderCodec::encode(output, header));
+        ASSERT_EQ(
+            output.readableBytes(),
+            PacketHeader::kLengthSize + header.m_length
+        );
+
+        Buffer input;
+        ASSERT_TRUE(
+            input.append(output.peek(), output.readableBytes())
+        );
+        int deliveries = 0;
+        EXPECT_EQ(
+            PacketHeaderCodec::decodeFrames(
+                input,
+                [&](const PacketHeader& decoded,
+                    std::string_view bytes)
+                {
+                    ++deliveries;
+                    EXPECT_EQ(decoded.m_length, header.m_length);
+                    EXPECT_EQ(
+                        decoded.m_requestId,
+                        header.m_requestId
+                    );
+                    EXPECT_EQ(bytes.size(), payload.size());
+                    if (bytes.size() == payload.size())
+                    {
+                        EXPECT_EQ(
+                            std::memcmp(
+                                bytes.data(),
+                                payload.data(),
+                                payload.size()
+                            ),
+                            0
+                        );
+                    }
+                    return true;
+                }
+            ),
+            FrameDecodeStatus::NeedMore
+        );
+        EXPECT_EQ(deliveries, 1);
+        EXPECT_EQ(input.readableBytes(), 0);
+    }
+
+    const std::string tooLarge(maxPayload + 1, 'x');
+    Buffer output;
+    ASSERT_TRUE(output.append(tooLarge.data(), tooLarge.size()));
+    PacketHeader header;
+    header.m_length = PacketHeader::kMaxPacketSize + 1;
+    header.m_type = PacketHeader::kEchoRequest;
+    EXPECT_FALSE(PacketHeaderCodec::encode(output, header));
+    EXPECT_EQ(output.readableBytes(), tooLarge.size());
+}
+
+TEST(PacketHeaderCodecTest, TenThousandFramesAcrossRandomChunks)
+{
+    constexpr std::size_t frameCount = 10000;
+    std::mt19937 random(0xA11CE);
+    std::uniform_int_distribution<int> lengthDist(1, 64);
+    std::uniform_int_distribution<int> byteDist(0, 255);
+    std::uniform_int_distribution<int> chunkDist(1, 31);
+    std::vector<std::string> expected;
+    expected.reserve(frameCount);
+    std::string wire;
+    Buffer output;
+
+    for (std::size_t index = 0; index < frameCount; ++index)
+    {
+        std::string payload(lengthDist(random), '\0');
+        for (char& byte : payload)
+        {
+            byte = static_cast<char>(byteDist(random));
+        }
+        expected.push_back(payload);
+        ASSERT_TRUE(output.append(payload.data(), payload.size()));
+        PacketHeader header;
+        header.m_length = PacketHeader::kMetadataSize +
+                          payload.size();
+        header.m_type = index % 2 == 0 ? PacketHeader::kEchoRequest
+                                       : PacketHeader::kEchoResponse;
+        header.m_requestId = static_cast<std::uint32_t>(index + 1);
+        ASSERT_TRUE(PacketHeaderCodec::encode(output, header));
+        wire.append(output.peek(), output.readableBytes());
+        ASSERT_TRUE(output.retrieve(output.readableBytes()));
+    }
+
+    Buffer input;
+    std::size_t delivered = 0;
+    std::size_t chunks = 0;
+    std::size_t offset = 0;
+    while (offset < wire.size())
+    {
+        const std::size_t count = std::min(
+            static_cast<std::size_t>(chunkDist(random)),
+            wire.size() - offset
+        );
+        ASSERT_TRUE(input.append(wire.data() + offset, count));
+        offset += count;
+        ++chunks;
+        ASSERT_EQ(
+            PacketHeaderCodec::decodeFrames(
+                input,
+                [&](const PacketHeader& header,
+                    std::string_view payload)
+                {
+                    if (delivered >= expected.size())
+                    {
+                        ADD_FAILURE() << "extra frame";
+                        return false;
+                    }
+                    EXPECT_EQ(header.m_requestId, delivered + 1);
+                    EXPECT_EQ(
+                        header.m_type,
+                        delivered % 2 == 0
+                            ? PacketHeader::kEchoRequest
+                            : PacketHeader::kEchoResponse
+                    );
+                    const std::string& original = expected[delivered];
+                    EXPECT_EQ(payload.size(), original.size());
+                    if (payload.size() == original.size())
+                    {
+                        EXPECT_EQ(
+                            std::memcmp(
+                                payload.data(),
+                                original.data(),
+                                original.size()
+                            ),
+                            0
+                        );
+                    }
+                    ++delivered;
+                    return true;
+                }
+            ),
+            FrameDecodeStatus::NeedMore
+        );
+    }
+    EXPECT_GE(chunks, frameCount);
+    EXPECT_EQ(delivered, frameCount);
+    EXPECT_EQ(input.readableBytes(), 0);
+}
+
+TEST(
+    PacketHeaderCodecTest,
+    OversizedAndNegativeLengthBitPatternsAreInvalid
+)
+{
+    for (const std::uint32_t bodyLength :
+         {PacketHeader::kMaxPacketSize + 1,
+          std::uint32_t{0x80000000U},
+          std::uint32_t{0xffffffffU}})
+    {
+        SCOPED_TRACE(bodyLength);
+        const std::uint32_t networkLength = ::htonl(bodyLength);
+        Buffer input;
+        ASSERT_TRUE(
+            input.append(&networkLength, sizeof(networkLength))
+        );
+        PacketHeader output;
+        output.m_requestId = 77;
+        EXPECT_EQ(
+            PacketHeaderCodec::decode(
+                input.peek(),
+                input.readableBytes(),
+                output
+            ),
+            HeaderDecodeStatus::Invalid
+        );
+        int delivered = 0;
+        EXPECT_EQ(
+            PacketHeaderCodec::decodeFrames(
+                input,
+                [&](const PacketHeader&, std::string_view)
+                {
+                    ++delivered;
+                    return true;
+                }
+            ),
+            FrameDecodeStatus::Invalid
+        );
+        EXPECT_EQ(output.m_requestId, 77U);
+        EXPECT_EQ(delivered, 0);
+        EXPECT_EQ(input.readableBytes(), PacketHeader::kLengthSize);
+    }
+}
+
+TEST(
+    PacketHeaderCodecTest, EveryTruncatedPrefixOrPayloadNeedsMoreBytes
+)
+{
+    Buffer frame;
+    ASSERT_TRUE(frame.append("abc", 3));
+    PacketHeader header;
+    header.m_length = PacketHeader::kMetadataSize + 3;
+    header.m_type = PacketHeader::kEchoRequest;
+    ASSERT_TRUE(PacketHeaderCodec::encode(frame, header));
+
+    for (std::size_t prefixSize = 1;
+         prefixSize < frame.readableBytes();
+         ++prefixSize)
+    {
+        SCOPED_TRACE(prefixSize);
+        Buffer input;
+        ASSERT_TRUE(input.append(frame.peek(), prefixSize));
+        int delivered = 0;
+        EXPECT_EQ(
+            PacketHeaderCodec::decodeFrames(
+                input,
+                [&](const PacketHeader&, std::string_view)
+                {
+                    ++delivered;
+                    return true;
+                }
+            ),
+            FrameDecodeStatus::NeedMore
+        );
+        EXPECT_EQ(delivered, 0);
+        EXPECT_EQ(input.readableBytes(), prefixSize);
+
+        ASSERT_TRUE(input.append(
+            frame.peek() + prefixSize,
+            frame.readableBytes() - prefixSize
+        ));
+        EXPECT_EQ(
+            PacketHeaderCodec::decodeFrames(
+                input,
+                [&](const PacketHeader&, std::string_view payload)
+                {
+                    ++delivered;
+                    EXPECT_EQ(payload, "abc");
+                    return true;
+                }
+            ),
+            FrameDecodeStatus::NeedMore
+        );
+        EXPECT_EQ(delivered, 1);
+        EXPECT_EQ(input.readableBytes(), 0);
+    }
 }
