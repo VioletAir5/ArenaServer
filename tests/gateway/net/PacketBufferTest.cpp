@@ -4,6 +4,8 @@
 
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <type_traits>
 
 using service::gateway::PacketBuffer;
 
@@ -236,5 +238,38 @@ TEST(PacketBufferTest, AppendAfterPartialSkip)
             7
         ),
         0
+    );
+}
+
+TEST(PacketBufferTest, SharesBaseStorageAndLegacyReadNames)
+{
+    static_assert(std::is_base_of_v<
+                  service::protocol::Buffer,
+                  PacketBuffer>);
+    PacketBuffer buffer(4, 16);
+    service::protocol::Buffer& base = buffer;
+    EXPECT_EQ(base.prependableBytes(), 0);
+    ASSERT_TRUE(base.append("abcd", 4));
+    EXPECT_EQ(buffer.readPtr(), base.peek());
+    ASSERT_TRUE(buffer.skip(2));
+    EXPECT_EQ(base.readableBytes(), 2);
+    EXPECT_EQ(std::string_view(buffer.readPtr(), 2), "cd");
+    ASSERT_TRUE(base.retrieve(2));
+    EXPECT_EQ(buffer.readableBytes(), 0);
+}
+
+TEST(PacketBufferTest, DefaultCapacityRemainsOneMiB)
+{
+    PacketBuffer buffer;
+    const std::string data(service::gateway::kMaxBufferSize, 'x');
+    ASSERT_TRUE(buffer.append(data.data(), data.size()));
+    EXPECT_EQ(
+        buffer.readableBytes(),
+        service::gateway::kMaxBufferSize
+    );
+    EXPECT_FALSE(buffer.append("y", 1));
+    EXPECT_EQ(
+        buffer.readableBytes(),
+        service::gateway::kMaxBufferSize
     );
 }
