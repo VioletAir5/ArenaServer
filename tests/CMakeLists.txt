@@ -53,6 +53,7 @@ endfunction()
 
 add_subdirectory(shared/os)
 add_subdirectory(shared/concurrent)
+add_subdirectory(shared/protocol)
 add_subdirectory(gateway/net)
 
 include(GoogleTest)

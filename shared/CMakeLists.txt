@@ -13,3 +13,4 @@ target_compile_options(arena_shared PRIVATE
 
 add_subdirectory(src/os)
 add_subdirectory(src/concurrent)
+add_subdirectory(src/protocol)
