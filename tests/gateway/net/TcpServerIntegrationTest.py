@@ -1,11 +1,13 @@
 """End-to-end TCP server checks against an isolated server process."""
 
 import os
+import random
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 CAPACITY = 1000
@@ -120,6 +122,62 @@ def run(binary, scenario):
             wait_until(server, lambda: fd_count(server) == baseline, "FD recovery")
             print("1001st connection closed; capacity recovered")
 
+        elif scenario == "stream":
+            client = connect(port)
+            client.settimeout(10)
+            clients.append(client)
+
+            frame_rng = random.Random(20261002)
+            # Slices may split a record or combine several records.
+            frames = []
+            for _ in range(1024):
+                size = frame_rng.randrange(0, 8192)
+                frames.append(size.to_bytes(2, "big") + frame_rng.randbytes(size))
+            payload = b"".join(frames)
+
+            send_errors = []
+
+            def send_random_slices():
+                try:
+                    send_rng = random.Random(0xA11CE)
+                    offset = 0
+                    chunk_sizes = (1, 2, 7, 31, 256, 2048, 16384, 32768)
+                    while offset < len(payload):
+                        size = send_rng.choice(chunk_sizes)
+                        end = min(offset + size, len(payload))
+                        client.sendall(memoryview(payload)[offset:end])
+                        offset = end
+                    client.shutdown(socket.SHUT_WR)
+                except Exception as error:
+                    send_errors.append(error)
+
+            sender = threading.Thread(target=send_random_slices, daemon=True)
+            sender.start()
+
+            recv_rng = random.Random(0xBEE)
+            received = 0
+            recv_sizes = (1, 3, 17, 127, 1024, 8192, 32768)
+            while True:
+                chunk = client.recv(recv_rng.choice(recv_sizes))
+                if not chunk:
+                    break
+                expected = payload[received : received + len(chunk)]
+                if chunk != expected:
+                    raise AssertionError(f"byte stream mismatch at offset {received}")
+                received += len(chunk)
+                if received > len(payload):
+                    raise AssertionError("server repeated bytes")
+
+            sender.join(timeout=10)
+            if sender.is_alive():
+                raise AssertionError("sender did not finish")
+            if send_errors:
+                raise AssertionError(f"sender failed: {send_errors[0]}")
+            if received != len(payload):
+                raise AssertionError(
+                    f"truncated stream: received {received} of {len(payload)} bytes"
+                )
+            print(f"byte stream preserved: {received} bytes in 1024 records")
         elif scenario == "slow":
             client = connect(port)
             client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -181,5 +239,5 @@ def run(binary, scenario):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow")
+        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow|stream")
     run(sys.argv[1], sys.argv[2])

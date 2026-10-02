@@ -49,6 +49,8 @@ public:
 
     Channel& channel() noexcept;
     int fd() const noexcept;
+    // Read only on the owning EventLoop thread.
+    std::size_t pendingOutputBytes() const noexcept;
 
 private:
     void notifyHighWaterIfNeeded();

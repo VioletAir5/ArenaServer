@@ -427,3 +427,36 @@ TEST(TcpConnectionTest, WatermarkCallbacksLeaveReadPolicyToCaller)
     EXPECT_EQ(lowCalls, 1);
     EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
 }
+
+TEST(TcpConnectionTest, SlowPeerPendingOutputIsBounded)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(&loop, Socket(std::move(pair.connection)));
+    int closes = 0;
+    connection.setCloseCallback([&](TcpConnection*) { ++closes; });
+
+    int sendBufferSize = 4096;
+    ASSERT_EQ(
+        ::setsockopt(
+            connection.fd(), SOL_SOCKET, SO_SNDBUF,
+            &sendBufferSize, sizeof(sendBufferSize)
+        ),
+        0
+    );
+
+    const std::string payload(64 * 1024, 'x');
+    for (int attempt = 0; attempt < 64 && closes == 0; ++attempt)
+    {
+        connection.send(payload.data(), payload.size());
+        EXPECT_LE(
+            connection.pendingOutputBytes(),
+            TcpConnection::kHardOutputLimit
+        );
+    }
+
+    ASSERT_EQ(closes, 1);
+    const std::size_t pendingAtClose = connection.pendingOutputBytes();
+    connection.send(payload.data(), payload.size());
+    EXPECT_EQ(connection.pendingOutputBytes(), pendingAtClose);
+}

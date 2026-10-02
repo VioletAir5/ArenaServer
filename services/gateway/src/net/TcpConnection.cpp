@@ -376,4 +376,9 @@ int TcpConnection::fd() const noexcept
 {
     return m_socket.get();
 }
+
+std::size_t TcpConnection::pendingOutputBytes() const noexcept
+{
+    return m_outputBuffer.readableBytes();
+}
 } // namespace service::gateway
