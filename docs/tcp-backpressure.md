@@ -1,35 +1,35 @@
-# TCP 背压与慢客户端断开策略
+# TCP 输出水位与慢客户端策略
 
-## 修改目标
+## 目标与边界
 
-TCP 连接使用 ET（边沿触发）后，持续写入但不读取响应的客户端可能让服务端输出队列不断增长。本次改动为每个连接设置输出队列水位，并在持续拥塞时断开连接。本实现要求 `send()` 和连接回调在所属 EventLoop 线程调用；目前没有跨线程投递接口。
+`TcpConnection` 负责统计待发送字节、检测水位跨越、执行硬上限与持续拥塞超时；它通过回调通知上层，由上层决定暂停哪个数据生产者。连接本身提供 `pauseReading()` 和 `resumeReading()` 供需要限制本连接输入的业务使用。当前 echo 服务在 `TcpServer` 中注册这两个动作，其他业务可以改为暂停上游流、任务生产者或订阅推送。
+
+`send()`、水位回调和连接回调要求在所属 EventLoop 线程运行。目前没有跨线程投递接口，调用者应先把跨线程操作投递到该事件循环。
 
 ## 修改位置与原因
 
 | 位置 | 修改 | 原因 |
 | --- | --- | --- |
-| `services/gateway/include/net/TcpConnection.h` | 定义低水位 256 KiB、高水位 512 KiB、硬上限 1 MiB、持续高水位超时 5 秒，并保存暂停读状态与进入高水位的时间。 | 让连接的内存和等待时间有明确上界，并集中管理策略参数。 |
-| `services/gateway/src/net/TcpConnection.cpp` | 输出队列达到高水位时移除 `EPOLLIN`；降到低水位时重新启用，并主动调用读处理函数。 | 在拥塞时停止继续接收数据。ET 模式下重新启用读事件后，已有数据未必产生新边沿，因此必须主动读取。 |
-| `services/gateway/src/net/TcpConnection.cpp` | 读循环改为每次读取后调用消息回调，再检查是否暂停读；输出队列超过硬上限时立即关闭连接；持续高水位超过 5 秒时关闭连接。 | 原先读到 `EAGAIN` 后才处理消息，可能在观察到输出水位前读入大量数据。硬上限和超时分别处理突发积压与长期慢客户端。 |
-| `services/gateway/src/net/TcpConnection.cpp` | `EPOLLRDHUP` 改为走读取 EOF 的路径。 | 对端停止发送后，仍要尽量排空已经排队的响应。 |
-| `services/gateway/include/net/TcpServer.h`、`services/gateway/src/net/TcpServer.cpp` | 每个服务器使用一个 1 秒周期的 `timerfd`，检查所有连接是否持续处于高水位；析构时从 poller 移除定时器 Channel。 | 没有可写事件的慢客户端仍需按时断开；共用一个定时器避免每个连接额外占用一个 FD。 |
-| `tests/gateway/net/ConnectionLifecycleTest.cpp` | 增加暂停读、低水位恢复后主动排空 ET 数据、持续拥塞超时、硬上限断开，以及半关闭后排空响应的测试。 | 验证状态切换与断开规则，避免 ET 下恢复读后连接停住。 |
-| `tests/gateway/net/TcpServerIntegrationTest.py`、`tests/gateway/net/CMakeLists.txt` | 增加真实慢读 TCP 客户端测试：持续发送但不读取响应，等待超时日志并检查 FD 回到基线。 | 验证服务器的定时器、连接关闭与资源回收确实串联工作。 |
+| `services/gateway/include/net/TcpConnection.h`、`services/gateway/src/net/TcpConnection.cpp` | 增加高、低水位回调注册接口；高水位达到 512 KiB、低水位降到 256 KiB 时各通知一次。 | 把水位检测与具体的暂停对象分开；回调获得连接和当前待发送字节数。 |
+| `services/gateway/src/net/TcpConnection.cpp` | 将 `pauseReading()`、`resumeReading()` 设为显式操作。恢复 `EPOLLIN` 后主动排空已有 socket 数据。 | ET 模式下恢复读兴趣不应依赖下一个边沿；同时允许业务自行决定是否限制连接读取。 |
+| `services/gateway/src/net/TcpServer.cpp` | echo 连接注册高水位暂停本连接读取、低水位恢复读取的回调。 | echo 响应只依赖同一连接的请求输入，因此限制该输入源是合适的业务策略。 |
+| `services/gateway/src/net/TcpConnection.cpp`、`services/gateway/src/net/TcpServer.cpp` | 保留 1 MiB 输出硬上限和持续高水位 5 秒断开；服务器用一个 1 秒周期的 `timerfd` 巡检。 | 即使业务不注册暂停回调或客户端一直不可写，也能限制内存与占用时间。 |
+| `tests/gateway/net/ConnectionLifecycleTest.cpp` | 验证回调可选择暂停恢复，也可只观察水位而不改变 `EPOLLIN`。 | 锁定传输层不内置 echo 读策略的接口契约。 |
+| `tests/gateway/net/TcpServerIntegrationTest.py` | 继续验证千连接、超限和真实慢读客户端断开。 | 确认 echo 服务装配回调后，原有端到端行为仍成立。 |
 
-## 运行规则
+## 运行路径和不变量
 
-1. 输出队列低于 512 KiB 时正常读取。
-2. 队列达到 512 KiB 时暂停读取，并记录进入高水位的时间。发送仍继续进行。
-3. 队列降到 256 KiB 或以下时恢复读取，并立即尝试读取 socket 中已有的数据。
-4. 如果连续 5 秒未降到低水位，由服务器定时器关闭该连接。队列需要增加超过 1 MiB 时立即关闭。
-5. 低水位恢复会重置超时计时；下一次进入高水位重新计时。
+1. `send()` 的直接非阻塞写入遇到 `EAGAIN` 后，把剩余字节放入输出队列。队列首次达到 512 KiB 时记录时间并调用高水位回调。
+2. echo 服务的高水位回调调用 `pauseReading()`，移除本连接的 `EPOLLIN`。不注册回调时，水位跨越本身不会修改读兴趣。
+3. `handleWrite()` 排空队列到 256 KiB 或以下时调用低水位回调，并清除持续高水位计时。echo 服务的低水位回调调用 `resumeReading()`；它重新启用 `EPOLLIN` 并立即读取一次，防止 ET 下已有字节停住。
+4. 若队列需要超过 1 MiB，立即关闭连接。若连续 5 秒未降到低水位，服务器定时器关闭连接。这两条保护规则不依赖水位回调。
+5. 一次高水位阶段只发出一次高水位通知；下降到低水位后才允许下一次高水位通知。关闭中的连接不再恢复读取。
 
-消息回调现在按每次读取到的字节块调用，单次块最多 8192 字节。TCP 是字节流，业务协议应自行处理拆包和粘包，不能假设一次回调对应一条完整消息。
+消息回调按每次读取到的字节块调用，单次最多 8192 字节。TCP 是字节流，业务协议必须自行处理拆包和粘包。
 
 ## 验证
 
-- 普通构建：95 项非性能测试通过，包括 3 轮各 1000 个连接的 FD 回收与连接数上限测试。
-- ASan/UBSan：92 项单元测试通过；3 项 TCP 集成测试通过，未报告内存泄漏或 sanitizer 错误。
-- 新增测试验证高低水位切换、ET 恢复时主动读取、5 秒持续高水位断开和 1 MiB 硬上限断开；真实慢客户端集成测试另连续通过 3 次。
+- 普通构建与 96 项非性能测试通过；其中 TCP 连接测试覆盖注册回调后的暂停恢复、仅观察水位的回调、ET 恢复时主动读取、硬上限和超时关闭。
+- ASan/UBSan 下 93 项单元测试和 3 项 TCP 集成测试通过，包含真实慢读客户端的定时断开和 FD 回收。
 
-阈值是当前的初始策略，尚未通过真实客户端流量与内存预算校准。后续可按连接数、平均响应大小和目标延迟调整。
+512 KiB、256 KiB、1 MiB 和 5 秒是当前初始策略，尚未按真实业务流量和内存预算调优。

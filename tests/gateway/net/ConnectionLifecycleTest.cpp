@@ -244,6 +244,24 @@ TEST(
         0
     );
 
+    int highCalls = 0;
+    int lowCalls = 0;
+    connection.setHighWaterMarkCallback(
+        [&](TcpConnection& conn, std::size_t pending)
+        {
+            EXPECT_GE(pending, TcpConnection::kHighWaterMark);
+            ++highCalls;
+            conn.pauseReading();
+        }
+    );
+    connection.setLowWaterMarkCallback(
+        [&](TcpConnection& conn, std::size_t pending)
+        {
+            EXPECT_LE(pending, TcpConnection::kLowWaterMark);
+            ++lowCalls;
+            conn.resumeReading();
+        }
+    );
     const std::string payload(
         TcpConnection::kHighWaterMark + 128 * 1024,
         'x'
@@ -251,6 +269,7 @@ TEST(
     connection.send(payload.data(), payload.size());
     ASSERT_EQ(connection.channel().events() & EPOLLIN, 0U);
     ASSERT_NE(connection.channel().events() & EPOLLOUT, 0U);
+    EXPECT_EQ(highCalls, 1);
 
     int messages = 0;
     connection.setMessageCallback(
@@ -275,6 +294,7 @@ TEST(
     }
 
     EXPECT_EQ(messages, 1);
+    EXPECT_EQ(lowCalls, 1);
     EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
 }
 
@@ -306,7 +326,8 @@ TEST(TcpConnectionTest, SustainedHighWaterDisconnectsSlowClient)
         'x'
     );
     connection.send(payload.data(), payload.size());
-    ASSERT_EQ(connection.channel().events() & EPOLLIN, 0U);
+    // Without a policy callback, watermarks do not change read interest.
+    ASSERT_NE(connection.channel().events() & EPOLLIN, 0U);
 
     const auto now = std::chrono::steady_clock::now();
     connection.closeIfSlow(now + std::chrono::seconds(1));
@@ -353,4 +374,56 @@ TEST(TcpConnectionTest, HardOutputLimitDisconnectsImmediately)
     connection.send(payload.data(), payload.size());
 
     EXPECT_EQ(closes, 1);
+}
+
+TEST(TcpConnectionTest, WatermarkCallbacksLeaveReadPolicyToCaller)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(&loop, Socket(std::move(pair.connection)));
+
+    int sendBufferSize = 4096;
+    ASSERT_EQ(
+        ::setsockopt(
+            connection.fd(), SOL_SOCKET, SO_SNDBUF,
+            &sendBufferSize, sizeof(sendBufferSize)
+        ),
+        0
+    );
+
+    int highCalls = 0;
+    int lowCalls = 0;
+    connection.setHighWaterMarkCallback(
+        [&](TcpConnection&, std::size_t pending)
+        {
+            EXPECT_GE(pending, TcpConnection::kHighWaterMark);
+            ++highCalls;
+        }
+    );
+    connection.setLowWaterMarkCallback(
+        [&](TcpConnection&, std::size_t pending)
+        {
+            EXPECT_LE(pending, TcpConnection::kLowWaterMark);
+            ++lowCalls;
+        }
+    );
+
+    const std::string payload(
+        TcpConnection::kHighWaterMark + 128 * 1024, 'x'
+    );
+    connection.send(payload.data(), payload.size());
+    ASSERT_EQ(highCalls, 1);
+    EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
+
+    char buffer[8192];
+    for (int attempt = 0; attempt < 1000 && lowCalls == 0; ++attempt)
+    {
+        while (::read(pair.peer.get(), buffer, sizeof(buffer)) > 0)
+        {
+        }
+        connection.handleWrite();
+    }
+
+    EXPECT_EQ(lowCalls, 1);
+    EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
 }

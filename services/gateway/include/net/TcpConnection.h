@@ -18,6 +18,8 @@ public:
     using CloseCallback = std::function<void(TcpConnection*)>;
     using MessageCallback = std::function<
         void(TcpConnection&, std::string_view)>;
+    using WatermarkCallback = std::function<
+        void(TcpConnection&, std::size_t)>;
 
     static constexpr std::size_t kLowWaterMark = 256 * 1024;
     static constexpr std::size_t kHighWaterMark = 512 * 1024;
@@ -35,21 +37,29 @@ public:
     // The message view is valid only for the duration of the
     // callback.
     void setMessageCallback(MessageCallback);
+    // Called synchronously on threshold crossing in the EventLoop thread.
+    // Register before sending; callbacks must not destroy this connection.
+    void setHighWaterMarkCallback(WatermarkCallback);
+    void setLowWaterMarkCallback(WatermarkCallback);
 
     void send(const void* data, size_t len);
+    void pauseReading();
+    void resumeReading();
     void closeIfSlow(std::chrono::steady_clock::time_point now);
 
     Channel& channel() noexcept;
     int fd() const noexcept;
 
 private:
-    void pauseReadingIfNeeded();
-    void resumeReadingIfNeeded();
+    void notifyHighWaterIfNeeded();
+    void notifyLowWaterIfNeeded();
 
     EventLoop* m_loop;
 
     CloseCallback m_closeCallback;
     MessageCallback m_messageCallback;
+    WatermarkCallback m_highWaterMarkCallback;
+    WatermarkCallback m_lowWaterMarkCallback;
 
     Socket m_socket;
     Channel m_channel;
@@ -58,6 +68,7 @@ private:
     PacketBuffer m_outputBuffer;
 
     std::chrono::steady_clock::time_point m_highWaterSince{};
+    bool m_aboveHighWater{false};
     bool m_readPaused{false};
     bool m_closing{false};
     bool m_readClosed{false};

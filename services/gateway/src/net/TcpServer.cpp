@@ -148,6 +148,14 @@ void TcpServer::handleNewConnection(
         { conn.send(message.data(), message.size()); }
     );
 
+    connection->setHighWaterMarkCallback(
+        [](TcpConnection& conn, std::size_t) { conn.pauseReading(); }
+    );
+
+    connection->setLowWaterMarkCallback(
+        [](TcpConnection& conn, std::size_t) { conn.resumeReading(); }
+    );
+
     connection->setCloseCallback([this](TcpConnection* conn)
                                  { handleConnectionClose(conn); });
 

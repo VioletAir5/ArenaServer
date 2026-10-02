@@ -166,13 +166,18 @@ void TcpConnection::send(const void* data, size_t len)
             return;
         }
 
-        pauseReadingIfNeeded();
+        notifyHighWaterIfNeeded();
+        if (m_closing)
+        {
+            return;
+        }
         if (!m_channel.isWriting())
         {
             m_channel.enableWriting();
         }
     }
 }
+
 void TcpConnection::handleWrite()
 {
     if (m_closing)
@@ -208,7 +213,7 @@ void TcpConnection::handleWrite()
         return;
     }
 
-    resumeReadingIfNeeded();
+    notifyLowWaterIfNeeded();
     if (m_closing || m_outputBuffer.readableBytes() != 0)
     {
         return;
@@ -226,38 +231,63 @@ void TcpConnection::handleWrite()
     }
 }
 
-void TcpConnection::pauseReadingIfNeeded()
+void TcpConnection::pauseReading()
 {
-    if (m_readPaused ||
-        m_outputBuffer.readableBytes() < kHighWaterMark)
+    if (m_closing || m_readClosed || m_readPaused)
     {
         return;
     }
 
     m_channel.disableReading();
     m_readPaused = true;
-    m_highWaterSince = std::chrono::steady_clock::now();
 }
 
-void TcpConnection::resumeReadingIfNeeded()
+void TcpConnection::resumeReading()
 {
-    if (!m_readPaused ||
+    if (m_closing || m_readClosed || !m_readPaused)
+    {
+        return;
+    }
+
+    m_channel.enableReading();
+    m_readPaused = false;
+
+    // Re-enabling EPOLLIN in ET mode may not create another edge for
+    // bytes already in the socket. Drain them before returning.
+    handleRead();
+}
+
+void TcpConnection::notifyHighWaterIfNeeded()
+{
+    if (m_aboveHighWater ||
+        m_outputBuffer.readableBytes() < kHighWaterMark)
+    {
+        return;
+    }
+
+    m_aboveHighWater = true;
+    m_highWaterSince = std::chrono::steady_clock::now();
+    if (m_highWaterMarkCallback)
+    {
+        m_highWaterMarkCallback(
+            *this,
+            m_outputBuffer.readableBytes()
+        );
+    }
+}
+
+void TcpConnection::notifyLowWaterIfNeeded()
+{
+    if (!m_aboveHighWater ||
         m_outputBuffer.readableBytes() > kLowWaterMark)
     {
         return;
     }
 
-    if (!m_readClosed)
+    m_aboveHighWater = false;
+    if (m_lowWaterMarkCallback)
     {
-        m_channel.enableReading();
-    }
-    m_readPaused = false;
-
-    // Re-enabling EPOLLIN in ET mode may not create another edge for
-    // bytes already in the socket. Drain them before returning.
-    if (!m_readClosed)
-    {
-        handleRead();
+        m_lowWaterMarkCallback(*this, m_outputBuffer.readableBytes());
     }
 }
 
@@ -265,7 +295,7 @@ void TcpConnection::closeIfSlow(
     std::chrono::steady_clock::time_point now
 )
 {
-    if (m_closing || !m_readPaused ||
+    if (m_closing || !m_aboveHighWater ||
         now - m_highWaterSince < kSlowClientTimeout)
     {
         return;
@@ -275,6 +305,7 @@ void TcpConnection::closeIfSlow(
               << '\n';
     handleClose();
 }
+
 void TcpConnection::handleError()
 {
     int error = 0;
@@ -324,6 +355,16 @@ void TcpConnection::setCloseCallback(CloseCallback cb)
 void TcpConnection::setMessageCallback(MessageCallback cb)
 {
     m_messageCallback = std::move(cb);
+}
+
+void TcpConnection::setHighWaterMarkCallback(WatermarkCallback cb)
+{
+    m_highWaterMarkCallback = std::move(cb);
+}
+
+void TcpConnection::setLowWaterMarkCallback(WatermarkCallback cb)
+{
+    m_lowWaterMarkCallback = std::move(cb);
 }
 
 Channel& TcpConnection::channel() noexcept
