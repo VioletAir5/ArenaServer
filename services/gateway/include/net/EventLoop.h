@@ -18,7 +18,7 @@ namespace service::gateway
 class EventLoop
 {
 public:
-    using Functor = std::move_only_function<void()>;
+    using Functor = std::function<void()>;
 
     EventLoop();
     ~EventLoop() = default;
@@ -28,17 +28,14 @@ public:
     void loop();
     void quit();
 
-    // A foreign caller delegates the task to the owner thread. The task
-    // may own move-only resources such as an accepted Socket.
     void runInLoop(Functor cb);
     // Thread-safe. The queue is currently unbounded.
     void queueInLoop(Functor cb);
     std::size_t peakPendingFunctorCount() const;
-    void assertInLoopThread() const;
 
     // Timer operations are confined to the construction thread.
-    TimerId runAfter(Timer::Duration delay, Timer::Callback cb);
-    TimerId runEvery(Timer::Duration interval, Timer::Callback cb);
+    TimerId runAfter(Timer::Duration delay, Functor cb);
+    TimerId runEvery(Timer::Duration interval, Functor cb);
     bool cancelTimer(TimerId id);
     std::size_t pendingTimerCount() const;
 

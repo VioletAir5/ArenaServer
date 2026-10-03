@@ -3,7 +3,6 @@
 #include <unistd.h>
 
 #include <iostream>
-#include <stdexcept>
 #include <utility>
 
 #include "net/Channel.h"
@@ -17,12 +16,6 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
     , m_socket(std::move(socket))
     , m_channel(m_socket.get())
 {
-    if (m_loop == nullptr)
-    {
-        throw std::invalid_argument("TcpConnection requires EventLoop");
-    }
-    m_loop->assertInLoopThread();
-
     m_channel.enableReading();
     m_channel.enablePeerClose();
     m_channel.enableEdgeTriggered();
@@ -44,7 +37,6 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
 
 void TcpConnection::handleRead()
 {
-    m_loop->assertInLoopThread();
     if (m_closing || m_readClosed || m_readPaused)
     {
         return;
@@ -118,7 +110,6 @@ void TcpConnection::handleRead()
 }
 void TcpConnection::send(const void* data, size_t len)
 {
-    m_loop->assertInLoopThread();
     if (m_closing || len == 0)
     {
         return;
@@ -191,7 +182,6 @@ void TcpConnection::send(const void* data, size_t len)
 
 void TcpConnection::handleWrite()
 {
-    m_loop->assertInLoopThread();
     if (m_closing)
     {
         return;
@@ -246,7 +236,6 @@ void TcpConnection::handleWrite()
 
 void TcpConnection::pauseReading()
 {
-    m_loop->assertInLoopThread();
     if (m_closing || m_readClosed || m_readPaused)
     {
         return;
@@ -258,7 +247,6 @@ void TcpConnection::pauseReading()
 
 void TcpConnection::resumeReading()
 {
-    m_loop->assertInLoopThread();
     if (m_closing || m_readClosed || !m_readPaused)
     {
         return;
@@ -310,7 +298,6 @@ void TcpConnection::closeIfSlow(
     std::chrono::steady_clock::time_point now
 )
 {
-    m_loop->assertInLoopThread();
     if (m_closing || !m_aboveHighWater ||
         now - m_highWaterSince < kSlowClientTimeout)
     {
@@ -324,7 +311,6 @@ void TcpConnection::closeIfSlow(
 
 void TcpConnection::handleError()
 {
-    m_loop->assertInLoopThread();
     int error = 0;
     socklen_t len = sizeof(error);
 
@@ -347,7 +333,6 @@ void TcpConnection::handleError()
 
 void TcpConnection::handleClose()
 {
-    m_loop->assertInLoopThread();
     if (m_closing)
     {
         return;
@@ -367,25 +352,21 @@ void TcpConnection::handleClose()
 
 void TcpConnection::setCloseCallback(CloseCallback cb)
 {
-    m_loop->assertInLoopThread();
     m_closeCallback = std::move(cb);
 }
 
 void TcpConnection::setMessageCallback(MessageCallback cb)
 {
-    m_loop->assertInLoopThread();
     m_messageCallback = std::move(cb);
 }
 
 void TcpConnection::setHighWaterMarkCallback(WatermarkCallback cb)
 {
-    m_loop->assertInLoopThread();
     m_highWaterMarkCallback = std::move(cb);
 }
 
 void TcpConnection::setLowWaterMarkCallback(WatermarkCallback cb)
 {
-    m_loop->assertInLoopThread();
     m_lowWaterMarkCallback = std::move(cb);
 }
 

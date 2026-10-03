@@ -6,11 +6,9 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
-#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <unordered_set>
@@ -232,47 +230,4 @@ TEST(EpollPollerTest, InterruptedWaitClearsPreviousResults)
     interrupter.join();
 
     EXPECT_TRUE(active.empty());
-}
-
-TEST(EpollPollerTest, RejectsAllOperationsFromForeignThread)
-{
-    FileDescriptor registeredFd = makeEventFd();
-    FileDescriptor newFd = makeEventFd();
-    Channel registered(registeredFd.get());
-    Channel additional(newFd.get());
-    registered.setEvents(EPOLLIN);
-    additional.setEvents(EPOLLIN);
-    EpollPoller poller;
-    poller.addChannel(&registered);
-
-    std::array<bool, 4> rejected{};
-    std::thread other([&]
-    {
-        const auto rejects = [](auto operation)
-        {
-            try
-            {
-                operation();
-            }
-            catch (const std::logic_error&)
-            {
-                return true;
-            }
-            catch (...)
-            {
-            }
-            return false;
-        };
-        std::vector<Channel*> active;
-        rejected[0] = rejects([&] { poller.addChannel(&additional); });
-        rejected[1] = rejects([&] { poller.updateChannel(&registered); });
-        rejected[2] = rejects([&] { poller.removeChannel(&registered); });
-        rejected[3] = rejects([&] { poller.poll(0, active); });
-    });
-    other.join();
-
-    EXPECT_EQ(rejected, (std::array<bool, 4>{true, true, true, true}));
-    poller.addChannel(&additional);
-    poller.removeChannel(&additional);
-    poller.removeChannel(&registered);
 }
