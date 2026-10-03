@@ -18,6 +18,7 @@ public:
     ~Acceptor();
 
     bool listening() const noexcept;
+    void stop();
 
     void setNewConnectionCallback(NewConnectionCallback cb);
 

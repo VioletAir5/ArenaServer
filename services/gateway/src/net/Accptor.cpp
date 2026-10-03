@@ -41,12 +41,19 @@ Acceptor::Acceptor(EventLoop* loop, const InetAddress& listenAddress)
 
 Acceptor::~Acceptor()
 {
-    if (m_loop != nullptr && m_listening)
-    {
-        m_loop->removeChannel(&m_listenChannel);
+    stop();
+}
 
-        m_listening = false;
+void Acceptor::stop()
+{
+    if (!m_listening)
+    {
+        return;
     }
+
+    m_loop->removeChannel(&m_listenChannel);
+    m_listening = false;
+    m_listenSocket.close();
 }
 
 void Acceptor::setNewConnectionCallback(NewConnectionCallback callback
@@ -62,7 +69,7 @@ bool Acceptor::listening() const noexcept
 
 void Acceptor::handleRead()
 {
-    while (true)
+    while (m_listening)
     {
         InetAddress peer;
         std::optional<Socket> clientSocket;

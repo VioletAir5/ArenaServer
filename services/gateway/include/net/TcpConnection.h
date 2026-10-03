@@ -12,6 +12,15 @@
 
 namespace service::gateway
 {
+enum struct TcpConnectionState
+{
+    Connected,
+    PeerHalfClosed,
+    WriteDraining,
+    WriteDrainingPeerClosed,
+    WriteHalfClosed,
+    Disconnected
+};
 class TcpConnection
 {
 public:
@@ -44,6 +53,9 @@ public:
     void setLowWaterMarkCallback(WatermarkCallback);
 
     void send(const void* data, size_t len);
+    // Owner EventLoop thread only. Flush queued bytes, then send FIN;
+    // keep reading until the peer also closes its write half.
+    void shutdownWrite();
     void pauseReading();
     void resumeReading();
     void closeIfSlow(std::chrono::steady_clock::time_point now);
@@ -59,6 +71,8 @@ public:
 private:
     void notifyHighWaterIfNeeded();
     void notifyLowWaterIfNeeded();
+    void finishShutdownWrite();
+    void handleIoError(int error);
 
     EventLoop* m_loop;
 
@@ -75,10 +89,11 @@ private:
 
     std::chrono::steady_clock::time_point m_highWaterSince{};
     std::chrono::steady_clock::time_point m_lastActivity{
-        std::chrono::steady_clock::now()};
+        std::chrono::steady_clock::now()
+    };
+
+    TcpConnectionState m_state{TcpConnectionState::Connected};
     bool m_aboveHighWater{false};
     bool m_readPaused{false};
-    bool m_closing{false};
-    bool m_readClosed{false};
 };
 } // namespace service::gateway

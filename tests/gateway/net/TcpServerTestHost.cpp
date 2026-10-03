@@ -26,6 +26,7 @@ int main(int argc, char** argv)
     sigset_t signals;
     sigemptyset(&signals);
     sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGUSR1);
     if (::sigprocmask(SIG_BLOCK, &signals, nullptr) != 0)
     {
         return 3;
@@ -40,16 +41,45 @@ int main(int argc, char** argv)
     }
 
     service::gateway::EventLoop loop;
+    service::gateway::TcpServer* serverPtr = nullptr;
+    service::gateway::TimerId stopPollId = 0;
     service::gateway::Channel stopChannel(stopFd.get());
     stopChannel.setEvents(EPOLLIN);
     stopChannel.setReadCallback(
         [&]()
         {
             signalfd_siginfo event{};
-            if (::read(stopFd.get(), &event, sizeof(event)) ==
+            if (::read(stopFd.get(), &event, sizeof(event)) !=
                 sizeof(event))
             {
+                return;
+            }
+            if (event.ssi_signo == SIGTERM)
+            {
                 loop.quit();
+                return;
+            }
+            if (event.ssi_signo == SIGUSR1 && serverPtr != nullptr &&
+                stopPollId == 0)
+            {
+                serverPtr->stop(std::chrono::milliseconds(300));
+                if (serverPtr->stopped())
+                {
+                    loop.quit();
+                    return;
+                }
+                stopPollId = loop.runEvery(
+                    std::chrono::milliseconds(10),
+                    [&]()
+                    {
+                        if (serverPtr->stopped())
+                        {
+                            loop.cancelTimer(stopPollId);
+                            stopPollId = 0;
+                            loop.quit();
+                        }
+                    }
+                );
             }
         }
     );
@@ -68,6 +98,7 @@ int main(int argc, char** argv)
                               : std::chrono::seconds(60);
         service::gateway::TcpServer
             server(&loop, address, 1000, idleTimeout);
+        serverPtr = &server;
         std::cerr << "TEST_HOST_READY" << std::endl;
         loop.loop();
     }

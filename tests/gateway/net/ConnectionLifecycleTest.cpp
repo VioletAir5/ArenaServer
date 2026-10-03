@@ -11,12 +11,14 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include "net/Acceptor.h"
 #include "net/EventLoop.h"
 #include "net/Socket.h"
 #include "net/TcpConnection.h"
+#include "net/TcpServer.h"
 #include "os/FileDescriptor.h"
 
 using service::FileDescriptor;
@@ -63,6 +65,21 @@ TEST(TcpConnectionTest, ReadsAndEchoesIncomingBytes)
     ASSERT_EQ(::read(pair.peer.get(), received, sizeof(received)),
               static_cast<ssize_t>(message.size()));
     EXPECT_EQ(std::string_view(received, message.size()), message);
+}
+
+TEST(TcpConnectionTest, ClosedPeerSendDoesNotRaiseSigpipe)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(&loop, Socket(std::move(pair.connection)));
+    int closes = 0;
+    connection.setCloseCallback([&](TcpConnection*) { ++closes; });
+
+    pair.peer = FileDescriptor();
+    connection.send("x", 1);
+    connection.send("again", 5);
+
+    EXPECT_EQ(closes, 1);
 }
 
 TEST(TcpConnectionTest, PeerEofNotifiesCloseCallbackOnce)
@@ -129,6 +146,157 @@ TEST(TcpConnectionTest, EchoesBytesBeforePeerWriteShutdown)
     ASSERT_EQ(::read(pair.peer.get(), received, sizeof(received)),
               static_cast<ssize_t>(message.size()));
     EXPECT_EQ(std::string_view(received, message.size()), message);
+}
+
+TEST(TcpConnectionTest, LocalWriteShutdownKeepsReceivingUntilPeerFin)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(&loop, Socket(std::move(pair.connection)));
+    int closes = 0;
+    std::string received;
+    connection.setCloseCallback([&](TcpConnection*) { ++closes; });
+    connection.setMessageCallback(
+        [&](TcpConnection&, std::string_view bytes)
+        { received.append(bytes); });
+
+    connection.send("reply", 5);
+    connection.shutdownWrite();
+    connection.shutdownWrite();
+    connection.send("ignored", 7);
+
+    char buffer[32]{};
+    ASSERT_EQ(::read(pair.peer.get(), buffer, sizeof(buffer)), 5);
+    EXPECT_EQ(std::string_view(buffer, 5), "reply");
+    EXPECT_EQ(::read(pair.peer.get(), buffer, sizeof(buffer)), 0);
+    EXPECT_EQ(closes, 0);
+    EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
+    EXPECT_EQ(connection.channel().events() & EPOLLOUT, 0U);
+
+    ASSERT_EQ(::write(pair.peer.get(), "request", 7), 7);
+    connection.handleRead();
+    EXPECT_EQ(received, "request");
+    EXPECT_EQ(closes, 0);
+
+    ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
+    connection.handleRead();
+    connection.handleRead();
+    EXPECT_EQ(closes, 1);
+}
+
+TEST(TcpConnectionTest, QueuedWriteShutdownWaitsForPeerFin)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(&loop, Socket(std::move(pair.connection)));
+    int closes = 0;
+    std::string input;
+    connection.setCloseCallback([&](TcpConnection*) { ++closes; });
+    connection.setMessageCallback(
+        [&](TcpConnection&, std::string_view bytes)
+        { input.append(bytes); });
+
+    int sendBufferSize = 4096;
+    ASSERT_EQ(::setsockopt(connection.fd(), SOL_SOCKET, SO_SNDBUF,
+                           &sendBufferSize, sizeof(sendBufferSize)), 0);
+    const std::string payload(128 * 1024, 'x');
+    connection.send(payload.data(), payload.size());
+    ASSERT_GT(connection.pendingOutputBytes(), 0U);
+    connection.shutdownWrite();
+    connection.send("ignored", 7);
+
+    std::string received;
+    char buffer[8192];
+    bool sawFin = false;
+    for (int attempt = 0; attempt < 1000 && !sawFin; ++attempt)
+    {
+        while (true)
+        {
+            const ssize_t n = ::read(pair.peer.get(), buffer, sizeof(buffer));
+            if (n > 0)
+            {
+                received.append(buffer, static_cast<size_t>(n));
+                continue;
+            }
+            if (n == 0)
+            {
+                sawFin = true;
+                break;
+            }
+            ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
+            break;
+        }
+        if (!sawFin)
+        {
+            connection.handleWrite();
+        }
+    }
+
+    EXPECT_TRUE(sawFin);
+    EXPECT_EQ(received, payload);
+    EXPECT_EQ(closes, 0);
+    EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
+
+    ASSERT_EQ(::write(pair.peer.get(), "last", 4), 4);
+    connection.handleRead();
+    EXPECT_EQ(input, "last");
+    EXPECT_EQ(closes, 0);
+
+    ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
+    connection.handleRead();
+    EXPECT_EQ(closes, 1);
+}
+
+TEST(TcpConnectionTest, LocalWriteShutdownDrainsBeforeFinAfterPeerFin)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(&loop, Socket(std::move(pair.connection)));
+    int closes = 0;
+    connection.setCloseCallback([&](TcpConnection*) { ++closes; });
+
+    int sendBufferSize = 4096;
+    ASSERT_EQ(::setsockopt(connection.fd(), SOL_SOCKET, SO_SNDBUF,
+                           &sendBufferSize, sizeof(sendBufferSize)), 0);
+    const std::string payload(128 * 1024, 'x');
+    connection.send(payload.data(), payload.size());
+    ASSERT_GT(connection.pendingOutputBytes(), 0U);
+    connection.shutdownWrite();
+    ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
+    connection.handleRead();
+    EXPECT_EQ(closes, 0);
+
+    std::string received;
+    char buffer[8192];
+    bool sawFin = false;
+    for (int attempt = 0; attempt < 1000 && !sawFin; ++attempt)
+    {
+        while (true)
+        {
+            const ssize_t n = ::read(pair.peer.get(), buffer, sizeof(buffer));
+            if (n > 0)
+            {
+                received.append(buffer, static_cast<size_t>(n));
+                continue;
+            }
+            if (n == 0)
+            {
+                sawFin = true;
+                break;
+            }
+            ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
+            break;
+        }
+        if (!sawFin)
+        {
+            connection.handleWrite();
+        }
+    }
+
+    EXPECT_TRUE(sawFin);
+    EXPECT_EQ(received, payload);
+    EXPECT_EQ(connection.pendingOutputBytes(), 0U);
+    EXPECT_EQ(closes, 1);
 }
 
 TEST(AcceptorTest, DispatchesAcceptedSocketAndPeerAddress)
@@ -459,4 +627,51 @@ TEST(TcpConnectionTest, SlowPeerPendingOutputIsBounded)
     const std::size_t pendingAtClose = connection.pendingOutputBytes();
     connection.send(payload.data(), payload.size());
     EXPECT_EQ(connection.pendingOutputBytes(), pendingAtClose);
+}
+
+TEST(TcpServerTest, StopWithoutConnectionsIsImmediateAndIdempotent)
+{
+    EventLoop loop;
+    service::gateway::TcpServer server(
+        &loop,
+        service::gateway::InetAddress(0, true),
+        4
+    );
+
+    EXPECT_FALSE(server.stopped());
+    EXPECT_EQ(server.maxConnections(), 4U);
+    server.stop();
+    EXPECT_TRUE(server.stopped());
+    EXPECT_EQ(server.connectionCount(), 0U);
+    EXPECT_NO_THROW(server.stop());
+}
+
+TEST(TcpServerTest, StopFromAnotherThreadIsRejectedBeforeMutation)
+{
+    EventLoop loop;
+    service::gateway::TcpServer server(
+        &loop,
+        service::gateway::InetAddress(0, true),
+        4
+    );
+    bool rejected = false;
+    std::thread other(
+        [&]()
+        {
+            try
+            {
+                server.stop();
+            }
+            catch (const std::logic_error&)
+            {
+                rejected = true;
+            }
+        }
+    );
+    other.join();
+
+    EXPECT_TRUE(rejected);
+    EXPECT_FALSE(server.stopped());
+    server.stop();
+    EXPECT_TRUE(server.stopped());
 }

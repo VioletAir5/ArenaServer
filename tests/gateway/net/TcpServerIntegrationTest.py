@@ -3,6 +3,7 @@
 import os
 import random
 import signal
+import struct
 import socket
 import subprocess
 import sys
@@ -198,6 +199,72 @@ def run(binary, scenario):
                 "idle timeout FD recovery",
             )
             print("activity refreshed idle deadline; inactive connection closed")
+        elif scenario == "rst":
+            client = connect(port)
+            client.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_LINGER,
+                struct.pack("ii", 1, 0),
+            )
+            client.sendall(b"reset me")
+            client.close()
+            wait_until(
+                server,
+                lambda: fd_count(server) == baseline,
+                "RST connection FD recovery",
+            )
+
+            def logged_reset():
+                with open(log.name, errors="replace") as stream:
+                    return "peer reset" in stream.read()
+
+            wait_until(server, logged_reset, "explicit RST handling")
+            with connect(port) as next_client:
+                next_client.sendall(b"alive")
+                if next_client.recv(5) != b"alive":
+                    raise AssertionError("server did not survive peer RST")
+            print("RST logged and FD recovered; server still accepts")
+        elif scenario == "stop_fast":
+            client = connect(port)
+            clients.append(client)
+            server.send_signal(signal.SIGUSR1)
+            client.settimeout(3)
+            if client.recv(1) != b"":
+                raise AssertionError("server did not send FIN")
+            client.shutdown(socket.SHUT_WR)
+            server.wait(timeout=3)
+            with open(log.name, errors="replace") as stream:
+                stop_log = stream.read()
+            if "TcpServer stopped" not in stop_log:
+                raise AssertionError("cooperative stop did not complete")
+            if "stop deadline reached" in stop_log:
+                raise AssertionError("cooperative stop waited for deadline")
+            print("cooperative stop completed before deadline")
+        elif scenario == "stop":
+            cooperative = connect(port)
+            lingering = connect(port)
+            clients.extend((cooperative, lingering))
+            start = time.monotonic()
+            server.send_signal(signal.SIGUSR1)
+            cooperative.settimeout(3)
+            lingering.settimeout(3)
+            if cooperative.recv(1) != b"" or lingering.recv(1) != b"":
+                raise AssertionError("server did not send FIN on stop")
+            cooperative.shutdown(socket.SHUT_WR)
+            server.wait(timeout=3)
+            elapsed = time.monotonic() - start
+            with open(log.name, errors="replace") as stream:
+                stop_log = stream.read()
+            if "stop deadline reached" not in stop_log:
+                raise AssertionError("lingering peer did not reach stop deadline")
+            if elapsed > 3:
+                raise AssertionError(f"stop took too long: {elapsed:.3f}s")
+            try:
+                with connect(port):
+                    raise AssertionError("listener accepted after stop")
+            except OSError:
+                pass
+            print(f"stop sent FIN, waited {elapsed:.3f}s, then reclaimed peers")
         elif scenario == "slow":
             client = connect(port)
             client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -227,7 +294,8 @@ def run(binary, scenario):
         else:
             raise ValueError(f"unknown scenario: {scenario}")
 
-        server.send_signal(signal.SIGTERM)
+        if server.poll() is None:
+            server.send_signal(signal.SIGTERM)
         server.wait(timeout=10)
         log.flush()
         with open(log.name, errors="replace") as stream:
@@ -259,5 +327,5 @@ def run(binary, scenario):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow|stream|idle")
+        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow|stream|idle|rst|stop|stop_fast")
     run(sys.argv[1], sys.argv[2])

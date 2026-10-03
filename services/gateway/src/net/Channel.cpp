@@ -117,8 +117,19 @@ void Channel::setEventLoopCallback(EventLoopUpdateCallback cb)
     m_update = cb;
 }
 
+void Channel::tie(const std::shared_ptr<void>& owner)
+{
+    m_owner = owner;
+    m_tied = true;
+}
+
 void Channel::handleEvent()
 {
+    const std::shared_ptr<void> guard = m_owner.lock();
+    if (m_tied && !guard)
+    {
+        return;
+    }
     if (m_revents & (EPOLLERR | EPOLLHUP))
     {
         if (m_errorCallback)

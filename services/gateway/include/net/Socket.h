@@ -25,6 +25,7 @@ public:
     std::optional<Socket> accept(InetAddress* peer = nullptr);
 
     void shutdownWrite();
+    void close() noexcept;
 
     void setReuseAddr(bool on);
     void setReusePort(bool on);

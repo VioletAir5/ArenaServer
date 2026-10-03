@@ -130,6 +130,27 @@ std::optional<Socket> Socket::accept(InetAddress* peer)
     }
 }
 
+void Socket::close() noexcept
+{
+    fd_ = FileDescriptor();
+}
+
+void Socket::shutdownWrite()
+{
+    while (::shutdown(fd_.get(), SHUT_WR) < 0)
+    {
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "shutdown SHUT_WR"
+        );
+    }
+}
+
 void Socket::setReuseAddr(bool on)
 {
     int opt = on ? 1 : 0;

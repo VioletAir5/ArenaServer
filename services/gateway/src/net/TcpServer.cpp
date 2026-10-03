@@ -54,14 +54,124 @@ TcpServer::TcpServer(
 
 TcpServer::~TcpServer()
 {
+    // Pending EventLoop functors capture this only behind this guard.
+    m_callbackGuard.reset();
+    m_acceptor.stop();
     m_loop->cancelTimer(m_slowTimerId);
+    if (m_stopTimerId != 0)
+    {
+        m_loop->cancelTimer(m_stopTimerId);
+    }
     for (const auto& [fd, id] : m_idleTimers)
     {
         m_loop->cancelTimer(id);
     }
     for (const auto& [fd, connection] : m_connections)
     {
+        connection->setCloseCallback({});
         m_loop->removeChannel(&connection->channel());
+    }
+}
+
+void TcpServer::stop(std::chrono::milliseconds grace)
+{
+    if (!m_loop->isInLoopThread())
+    {
+        throw std::logic_error(
+            "TcpServer::stop requires EventLoop thread"
+        );
+    }
+    if (grace < std::chrono::milliseconds::zero())
+    {
+        throw std::invalid_argument("stop grace must be nonnegative");
+    }
+    if (m_state != TcpServerState::Running)
+    {
+        return;
+    }
+
+    m_acceptor.stop();
+    m_state = TcpServerState::Draining;
+    for (auto& [fd, connection] : m_connections)
+    {
+        connection->shutdownWrite();
+    }
+
+    if (m_connections.empty())
+    {
+        finishStopIfDrained();
+    }
+    else if (grace == std::chrono::milliseconds::zero())
+    {
+        handleStopTimeout();
+    }
+    else
+    {
+        const std::weak_ptr<void> guard = m_callbackGuard;
+        try
+        {
+            m_stopTimerId = m_loop->runAfter(
+                grace,
+                [this, guard]()
+                {
+                    if (guard.lock())
+                    {
+                        handleStopTimeout();
+                    }
+                }
+            );
+        }
+        catch (...)
+        {
+            handleStopTimeout();
+            throw;
+        }
+    }
+}
+
+bool TcpServer::stopped() const noexcept
+{
+    return m_state == TcpServerState::Stopped;
+}
+
+std::size_t TcpServer::connectionCount() const noexcept
+{
+    return m_connections.size();
+}
+
+std::size_t TcpServer::maxConnections() const noexcept
+{
+    return m_maxConnections;
+}
+
+void TcpServer::handleStopTimeout()
+{
+    std::cerr << "TcpServer stop deadline reached, connections="
+              << m_connections.size() << '\n';
+    m_stopTimerId = 0;
+    for (auto& [fd, connection] : m_connections)
+    {
+        connection->handleClose();
+    }
+    finishStopIfDrained();
+}
+
+void TcpServer::finishStopIfDrained()
+{
+    if (m_state != TcpServerState::Draining ||
+        !m_connections.empty())
+    {
+        return;
+    }
+
+    m_state = TcpServerState::Stopped;
+    std::cerr << "TcpServer stopped" << '\n';
+    m_loop->cancelTimer(m_slowTimerId);
+    m_slowTimerId = 0;
+    if (m_stopTimerId != 0)
+    {
+        m_loop->cancelTimer(m_stopTimerId);
+        m_stopTimerId = 0;
     }
 }
 
@@ -102,6 +212,10 @@ void TcpServer::handleNewConnection(
     Socket&& socket, const InetAddress& peer
 )
 {
+    if (m_state != TcpServerState::Running)
+    {
+        return;
+    }
     if (m_connections.size() >= m_maxConnections)
     {
         std::cerr << "connection limit reached, peer="
@@ -110,10 +224,11 @@ void TcpServer::handleNewConnection(
     }
 
     const int fd = socket.get();
-    auto connection = std::make_unique<TcpConnection>(
+    auto connection = std::make_shared<TcpConnection>(
         m_loop,
         std::move(socket)
     );
+    connection->channel().tie(connection);
     connection->setMessageCallback(
         [](TcpConnection& conn, std::string_view message)
         { conn.send(message.data(), message.size()); }
@@ -162,7 +277,16 @@ void TcpServer::handleConnectionClose(TcpConnection* connection)
         return;
     }
     m_removeTaskQueued = true;
-    m_loop->queueInLoop([this]() { removeClosedConnections(); });
+    const std::weak_ptr<void> guard = m_callbackGuard;
+    m_loop->queueInLoop(
+        [this, guard]()
+        {
+            if (guard.lock())
+            {
+                removeClosedConnections();
+            }
+        }
+    );
 }
 
 void TcpServer::removeClosedConnections()
@@ -175,7 +299,7 @@ void TcpServer::removeClosedConnections()
             continue;
         }
 
-        TcpConnection* connection = it->second.get();
+        std::shared_ptr<TcpConnection> connection = it->second;
         m_loop->removeChannel(&connection->channel());
         m_connections.erase(it);
         std::cout << "connection removed fd=" << fd
@@ -183,5 +307,6 @@ void TcpServer::removeClosedConnections()
     }
     m_pendingRemove.clear();
     m_removeTaskQueued = false;
+    finishStopIfDrained();
 }
 } // namespace service::gateway

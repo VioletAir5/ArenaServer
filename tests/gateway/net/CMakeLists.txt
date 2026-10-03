@@ -43,6 +43,27 @@ add_test(
         idle
 )
 add_test(
+    NAME TcpServerHandlesPeerReset
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
+        "$<TARGET_FILE:arena_tcp_server_test_host>"
+        rst
+)
+add_test(
+    NAME TcpServerGracefulStopDeadline
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
+        "$<TARGET_FILE:arena_tcp_server_test_host>"
+        stop
+)
+add_test(
+    NAME TcpServerGracefulStopCompletesEarly
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
+        "$<TARGET_FILE:arena_tcp_server_test_host>"
+        stop_fast
+)
+add_test(
     NAME TcpServerPreservesRandomByteStream
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
@@ -52,6 +73,8 @@ add_test(
 set_tests_properties(
     TcpServerThousandConnectionsNoFdLeak TcpServerRejectsOverLimit
     TcpServerDisconnectsSlowClient TcpServerPreservesRandomByteStream
-    TcpServerClosesIdleConnection
+    TcpServerClosesIdleConnection TcpServerHandlesPeerReset
+    TcpServerGracefulStopDeadline
+    TcpServerGracefulStopCompletesEarly
     PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network"
 )

@@ -27,6 +27,7 @@ public:
     // thread.
     void loop();
     void quit();
+    bool isInLoopThread() const noexcept;
 
     void runInLoop(Functor cb);
     // Thread-safe. The queue is currently unbounded.
@@ -47,7 +48,6 @@ private:
     void handleWakeup();
     void wakeup();
     void doPendingFunctors();
-    bool isInLoopThread() const noexcept;
 
     const std::thread::id m_threadId;
     FileDescriptor m_wakeupFd;

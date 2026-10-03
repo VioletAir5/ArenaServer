@@ -1,8 +1,12 @@
 #include "net/TcpConnection.h"
 
+#include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
+
 #include <iostream>
+#include <system_error>
 #include <utility>
 
 #include "net/Channel.h"
@@ -37,7 +41,9 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
 
 void TcpConnection::handleRead()
 {
-    if (m_closing || m_readClosed || m_readPaused)
+    if (m_state == TcpConnectionState::PeerHalfClosed ||
+        m_state == TcpConnectionState::WriteDrainingPeerClosed ||
+        m_state == TcpConnectionState::Disconnected || m_readPaused)
     {
         return;
     }
@@ -73,7 +79,7 @@ void TcpConnection::handleRead()
             }
             m_inputBuffer.skip(readable);
 
-            if (m_closing)
+            if (m_state == TcpConnectionState::Disconnected)
             {
                 return;
             }
@@ -82,13 +88,29 @@ void TcpConnection::handleRead()
 
         if (n == 0)
         {
-            m_readClosed = true;
-            if (m_outputBuffer.readableBytes() == 0)
+            if (m_state == TcpConnectionState::WriteHalfClosed)
+            {
+                handleClose();
+            }
+            else if (m_state == TcpConnectionState::WriteDraining)
+            {
+                m_state = TcpConnectionState::WriteDrainingPeerClosed;
+                if (m_outputBuffer.readableBytes() == 0)
+                {
+                    finishShutdownWrite();
+                }
+                else
+                {
+                    m_channel.enableWriting();
+                }
+            }
+            else if (m_outputBuffer.readableBytes() == 0)
             {
                 handleClose();
             }
             else
             {
+                m_state = TcpConnectionState::PeerHalfClosed;
                 m_channel.enableWriting();
             }
             return;
@@ -104,13 +126,15 @@ void TcpConnection::handleRead()
             return;
         }
 
-        handleError();
+        handleIoError(errno);
         return;
     }
 }
 void TcpConnection::send(const void* data, size_t len)
 {
-    if (m_closing || len == 0)
+    if ((m_state != TcpConnectionState::Connected &&
+         m_state != TcpConnectionState::PeerHalfClosed) ||
+        len == 0)
     {
         return;
     }
@@ -125,7 +149,7 @@ void TcpConnection::send(const void* data, size_t len)
     {
         while (true)
         {
-            ssize_t n = ::write(m_socket.get(), ptr, remaining);
+            ssize_t n = ::send(m_socket.get(), ptr, remaining, MSG_NOSIGNAL);
 
             if (n > 0)
             {
@@ -151,7 +175,7 @@ void TcpConnection::send(const void* data, size_t len)
                 break;
             }
 
-            handleError();
+            handleIoError(errno);
             return;
         }
     }
@@ -169,7 +193,7 @@ void TcpConnection::send(const void* data, size_t len)
         }
 
         notifyHighWaterIfNeeded();
-        if (m_closing)
+        if (m_state == TcpConnectionState::Disconnected)
         {
             return;
         }
@@ -180,19 +204,75 @@ void TcpConnection::send(const void* data, size_t len)
     }
 }
 
+void TcpConnection::shutdownWrite()
+{
+    if (m_state != TcpConnectionState::Connected &&
+        m_state != TcpConnectionState::PeerHalfClosed)
+    {
+        return;
+    }
+
+    m_state = m_state == TcpConnectionState::PeerHalfClosed
+        ? TcpConnectionState::WriteDrainingPeerClosed
+        : TcpConnectionState::WriteDraining;
+    if (m_outputBuffer.readableBytes() == 0)
+    {
+        finishShutdownWrite();
+    }
+    else if (!m_channel.isWriting())
+    {
+        m_channel.enableWriting();
+    }
+}
+
+void TcpConnection::finishShutdownWrite()
+{
+    if ((m_state != TcpConnectionState::WriteDraining &&
+         m_state != TcpConnectionState::WriteDrainingPeerClosed) ||
+        m_outputBuffer.readableBytes() != 0)
+    {
+        return;
+    }
+
+    try
+    {
+        m_socket.shutdownWrite();
+    }
+    catch (const std::system_error& error)
+    {
+        std::cerr << "TcpConnection shutdown write failed fd="
+                  << fd() << ": " << error.what() << '\n';
+        handleClose();
+        return;
+    }
+
+    if (m_state == TcpConnectionState::WriteDrainingPeerClosed)
+    {
+        handleClose();
+        return;
+    }
+
+    m_state = TcpConnectionState::WriteHalfClosed;
+    if (m_channel.isWriting())
+    {
+        m_channel.disableWriting();
+    }
+}
+
 void TcpConnection::handleWrite()
 {
-    if (m_closing)
+    if (m_state == TcpConnectionState::Disconnected)
     {
         return;
     }
 
     while (m_outputBuffer.readableBytes() > 0)
     {
-        const ssize_t n = ::write(
+        const ssize_t n = ::send(
             m_socket.get(),
             m_outputBuffer.readPtr(),
-            m_outputBuffer.readableBytes()
+            m_outputBuffer.readableBytes(),
+            MSG_NOSIGNAL
         );
 
         if (n > 0)
@@ -212,17 +292,25 @@ void TcpConnection::handleWrite()
             break;
         }
 
-        handleError();
+        handleIoError(errno);
         return;
     }
 
     notifyLowWaterIfNeeded();
-    if (m_closing || m_outputBuffer.readableBytes() != 0)
+    if (m_state == TcpConnectionState::Disconnected ||
+        m_outputBuffer.readableBytes() != 0)
     {
         return;
     }
 
-    if (m_readClosed)
+    if (m_state == TcpConnectionState::WriteDraining ||
+        m_state == TcpConnectionState::WriteDrainingPeerClosed)
+    {
+        finishShutdownWrite();
+        return;
+    }
+
+    if (m_state == TcpConnectionState::PeerHalfClosed)
     {
         handleClose();
         return;
@@ -236,7 +324,10 @@ void TcpConnection::handleWrite()
 
 void TcpConnection::pauseReading()
 {
-    if (m_closing || m_readClosed || m_readPaused)
+    if (m_state == TcpConnectionState::Disconnected ||
+        m_state == TcpConnectionState::PeerHalfClosed ||
+        m_state == TcpConnectionState::WriteDrainingPeerClosed ||
+        m_readPaused)
     {
         return;
     }
@@ -247,7 +338,10 @@ void TcpConnection::pauseReading()
 
 void TcpConnection::resumeReading()
 {
-    if (m_closing || m_readClosed || !m_readPaused)
+    if (m_state == TcpConnectionState::Disconnected ||
+        m_state == TcpConnectionState::PeerHalfClosed ||
+        m_state == TcpConnectionState::WriteDrainingPeerClosed ||
+        !m_readPaused)
     {
         return;
     }
@@ -298,7 +392,8 @@ void TcpConnection::closeIfSlow(
     std::chrono::steady_clock::time_point now
 )
 {
-    if (m_closing || !m_aboveHighWater ||
+    if (m_state == TcpConnectionState::Disconnected ||
+        !m_aboveHighWater ||
         now - m_highWaterSince < kSlowClientTimeout)
     {
         return;
@@ -311,6 +406,11 @@ void TcpConnection::closeIfSlow(
 
 void TcpConnection::handleError()
 {
+    if (m_state == TcpConnectionState::Disconnected)
+    {
+        return;
+    }
+
     int error = 0;
     socklen_t len = sizeof(error);
 
@@ -325,20 +425,45 @@ void TcpConnection::handleError()
         error = errno;
     }
 
-    std::cerr << "TcpConnection error fd=" << fd()
-              << ", error=" << error << '\n';
+    if (error == 0)
+    {
+        // EPOLLHUP without SO_ERROR can be an orderly close. Drain
+        // readable bytes/EOF instead of discarding pending output.
+        handleRead();
+        return;
+    }
 
+    handleIoError(error);
+}
+
+void TcpConnection::handleIoError(int error)
+{
+    if (error == ECONNRESET)
+    {
+        std::cerr << "TcpConnection peer reset fd=" << fd()
+                  << ", error=" << error << '\n';
+    }
+    else if (error == EPIPE)
+    {
+        std::cerr << "TcpConnection peer write closed fd=" << fd()
+                  << ", error=" << error << '\n';
+    }
+    else
+    {
+        std::cerr << "TcpConnection I/O error fd=" << fd()
+                  << ", error=" << error << '\n';
+    }
     handleClose();
 }
 
 void TcpConnection::handleClose()
 {
-    if (m_closing)
+    if (m_state == TcpConnectionState::Disconnected)
     {
         return;
     }
 
-    m_closing = true;
+    m_state = TcpConnectionState::Disconnected;
 
     // 不在这里 close(fd)
     // 不在这里 removeChannel()
@@ -392,6 +517,6 @@ TcpConnection::lastActivity() const noexcept
 
 bool TcpConnection::closing() const noexcept
 {
-    return m_closing;
+    return m_state == TcpConnectionState::Disconnected;
 }
 } // namespace service::gateway

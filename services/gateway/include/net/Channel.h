@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 
 #include <os/FileDescriptor.h>
 
@@ -27,6 +28,8 @@ private:
     EventCallback m_errorCallback;
 
     EventLoopUpdateCallback m_update;
+    std::weak_ptr<void> m_owner;
+    bool m_tied{false};
 
 public:
     Channel(int fd);
@@ -47,6 +50,8 @@ public:
 
     void setEventLoopCallback(EventLoopUpdateCallback cb);
 
+    // Keep a shared owner alive across all callbacks in one event.
+    void tie(const std::shared_ptr<void>& owner);
     void handleEvent();
 
     void enableReading();

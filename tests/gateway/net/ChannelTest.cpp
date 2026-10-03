@@ -2,6 +2,7 @@
 
 #include <sys/epoll.h>
 
+#include <memory>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -113,4 +114,43 @@ TEST(ChannelTest, FailedUpdateRestoresInterestMask)
     EXPECT_THROW(channel.enableWriting(), std::runtime_error);
     EXPECT_EQ(channel.events(), static_cast<uint32_t>(EPOLLIN));
     EXPECT_FALSE(channel.isWriting());
+}
+
+
+TEST(ChannelTest, TiedOwnerSurvivesAllCallbacksInOneEvent)
+{
+    std::shared_ptr<Channel> channel =
+        std::make_shared<Channel>(42);
+    std::weak_ptr<Channel> weak = channel;
+    channel->tie(channel);
+
+    int reads = 0;
+    channel->setErrorCallback([&]() { channel.reset(); });
+    channel->setReadCallback(
+        [&]()
+        {
+            EXPECT_FALSE(weak.expired());
+            ++reads;
+        }
+    );
+    channel->setRevents(EPOLLERR | EPOLLIN);
+    channel->handleEvent();
+
+    EXPECT_EQ(reads, 1);
+    EXPECT_TRUE(weak.expired());
+}
+
+TEST(ChannelTest, ExpiredTieSuppressesEventCallbacks)
+{
+    Channel channel(42);
+    auto owner = std::make_shared<int>(1);
+    channel.tie(owner);
+    owner.reset();
+
+    int callbacks = 0;
+    channel.setReadCallback([&]() { ++callbacks; });
+    channel.setRevents(EPOLLIN);
+    channel.handleEvent();
+
+    EXPECT_EQ(callbacks, 0);
 }
