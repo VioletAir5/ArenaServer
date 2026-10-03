@@ -6,11 +6,15 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <chrono>
+#include <future>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include "net/Acceptor.h"
@@ -459,4 +463,157 @@ TEST(TcpConnectionTest, SlowPeerPendingOutputIsBounded)
     const std::size_t pendingAtClose = connection.pendingOutputBytes();
     connection.send(payload.data(), payload.size());
     EXPECT_EQ(connection.pendingOutputBytes(), pendingAtClose);
+}
+
+TEST(TcpConnectionTest, ForeignThreadConstructionDoesNotQueueRawPointer)
+{
+    SocketPair pair;
+    EventLoop loop;
+    bool rejected = false;
+    std::thread other([&]
+    {
+        try
+        {
+            TcpConnection connection(
+                &loop,
+                Socket(std::move(pair.connection))
+            );
+        }
+        catch (const std::logic_error&)
+        {
+            rejected = true;
+        }
+    });
+    other.join();
+
+    EXPECT_TRUE(rejected);
+    EXPECT_EQ(loop.peakPendingFunctorCount(), 0U);
+}
+
+TEST(TcpConnectionTest, ForeignThreadMutationsAreRejectedBeforeStateChange)
+{
+    SocketPair pair;
+    EventLoop loop;
+    TcpConnection connection(&loop, Socket(std::move(pair.connection)));
+
+    std::array<bool, 3> rejected{};
+    std::thread other([&]
+    {
+        const auto rejects = [](auto operation)
+        {
+            try
+            {
+                operation();
+            }
+            catch (const std::logic_error&)
+            {
+                return true;
+            }
+            catch (...)
+            {
+            }
+            return false;
+        };
+        rejected[0] = rejects([&] { connection.send("x", 1); });
+        rejected[1] = rejects([&] { connection.pauseReading(); });
+        rejected[2] = rejects([&] { connection.resumeReading(); });
+    });
+    other.join();
+
+    EXPECT_EQ(rejected, (std::array<bool, 3>{true, true, true}));
+    char data{};
+    EXPECT_EQ(::read(pair.peer.get(), &data, 1), -1);
+    EXPECT_EQ(errno, EAGAIN);
+    loop.removeChannel(&connection.channel());
+}
+
+TEST(TcpConnectionTest, SocketIsRegisteredByTargetLoopThread)
+{
+    SocketPair pair;
+    std::promise<EventLoop*> readyPromise;
+    auto ready = readyPromise.get_future();
+    std::thread worker([&]
+    {
+        EventLoop loop;
+        readyPromise.set_value(&loop);
+        loop.loop();
+    });
+    EventLoop* target = ready.get();
+    struct ConnectionState
+    {
+        std::unique_ptr<TcpConnection> connection;
+    };
+    auto state = std::make_shared<ConnectionState>();
+    std::promise<std::thread::id> registeredPromise;
+    auto registered = registeredPromise.get_future();
+    auto readPromise = std::make_shared<std::promise<std::thread::id>>();
+    auto readOnThread = readPromise->get_future();
+
+    target->runInLoop(
+        [target,
+         state,
+         readPromise,
+         socket = Socket(std::move(pair.connection)),
+         completion = std::move(registeredPromise)]() mutable
+        {
+            state->connection = std::make_unique<TcpConnection>(
+                target,
+                std::move(socket)
+            );
+            state->connection->setMessageCallback(
+                [readPromise](TcpConnection&, std::string_view bytes)
+                {
+                    if (bytes == "x")
+                    {
+                        readPromise->set_value(std::this_thread::get_id());
+                    }
+                }
+            );
+            completion.set_value(std::this_thread::get_id());
+        }
+    );
+
+    const bool registeredInTime =
+        registered.wait_for(std::chrono::seconds(5)) ==
+        std::future_status::ready;
+    if (registeredInTime)
+    {
+        EXPECT_EQ(registered.get(), worker.get_id());
+        constexpr char message = 'x';
+        EXPECT_EQ(::write(pair.peer.get(), &message, 1), 1);
+        const bool readInTime =
+            readOnThread.wait_for(std::chrono::seconds(5)) ==
+            std::future_status::ready;
+        if (readInTime)
+        {
+            EXPECT_EQ(readOnThread.get(), worker.get_id());
+        }
+        EXPECT_TRUE(readInTime);
+        std::promise<void> removedPromise;
+        auto removed = removedPromise.get_future();
+        target->queueInLoop(
+            [target, state, completion = std::move(removedPromise)
+            ]() mutable
+            {
+                target->removeChannel(&state->connection->channel());
+                state->connection.reset();
+                completion.set_value();
+                target->quit();
+            }
+        );
+        const bool removedInTime =
+            removed.wait_for(std::chrono::seconds(5)) ==
+            std::future_status::ready;
+        if (!removedInTime)
+        {
+            target->quit();
+        }
+        EXPECT_TRUE(removedInTime);
+    }
+    else
+    {
+        target->quit();
+    }
+    worker.join();
+    EXPECT_TRUE(registeredInTime);
 }

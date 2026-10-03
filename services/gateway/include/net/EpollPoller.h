@@ -2,6 +2,7 @@
 
 #include <sys/epoll.h>
 
+#include <thread>
 #include <vector>
 
 #include "net/Channel.h"
@@ -13,6 +14,9 @@ class EpollPoller
 private:
     static constexpr int M_kInitialEventSize = 64;
 
+    void assertInOwnerThread() const;
+
+    const std::thread::id m_ownerThreadId;
     FileDescriptor m_epollFd{};
     std::vector<epoll_event> m_events;
 

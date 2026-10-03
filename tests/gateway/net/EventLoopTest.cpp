@@ -1,6 +1,9 @@
 #include "net/EventLoop.h"
 
+#include <sys/eventfd.h>
+
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -8,10 +11,14 @@
 #include <future>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
+
+#include "net/Channel.h"
+#include "os/FileDescriptor.h"
 
 using service::gateway::EventLoop;
 
@@ -159,4 +166,51 @@ TEST(EventLoopTest, QuitFromAnotherThreadWakesIdlePoll)
 
     loop.loop();
     stopper.join();
+}
+
+TEST(EventLoopTest, ChannelOperationsRejectForeignThread)
+{
+    EventLoop loop;
+    service::FileDescriptor registeredFd(
+        ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)
+    );
+    service::FileDescriptor newFd(
+        ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)
+    );
+    ASSERT_TRUE(registeredFd.valid());
+    ASSERT_TRUE(newFd.valid());
+    service::gateway::Channel registered(registeredFd.get());
+    service::gateway::Channel additional(newFd.get());
+    registered.enableReading();
+    additional.enableReading();
+    loop.addChannel(&registered);
+
+    std::array<bool, 3> rejected{};
+    std::thread other([&]
+    {
+        const auto rejects = [](auto operation)
+        {
+            try
+            {
+                operation();
+            }
+            catch (const std::logic_error&)
+            {
+                return true;
+            }
+            catch (...)
+            {
+            }
+            return false;
+        };
+        rejected[0] = rejects([&] { loop.addChannel(&additional); });
+        rejected[1] = rejects([&] { loop.updateChannel(&registered); });
+        rejected[2] = rejects([&] { loop.removeChannel(&registered); });
+    });
+    other.join();
+
+    EXPECT_EQ(rejected, (std::array<bool, 3>{true, true, true}));
+    loop.addChannel(&additional);
+    loop.removeChannel(&additional);
+    loop.removeChannel(&registered);
 }

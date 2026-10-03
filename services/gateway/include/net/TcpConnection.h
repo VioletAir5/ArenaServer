@@ -26,6 +26,8 @@ public:
     static constexpr std::size_t kHardOutputLimit = kMaxBufferSize;
     static constexpr std::chrono::seconds kSlowClientTimeout{5};
 
+    // Construct and mutate on the target EventLoop thread. Transfer an
+    // accepted Socket through EventLoop::runInLoop to that thread.
     TcpConnection(EventLoop*, Socket);
 
     void handleRead();

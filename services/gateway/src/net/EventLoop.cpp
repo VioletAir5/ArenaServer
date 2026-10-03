@@ -108,7 +108,17 @@ std::size_t EventLoop::peakPendingFunctorCount() const
     return m_peakPendingFunctors;
 }
 
-TimerId EventLoop::runAfter(Timer::Duration delay, Functor cb)
+void EventLoop::assertInLoopThread() const
+{
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "EventLoop operation requires owner thread"
+        );
+    }
+}
+
+TimerId EventLoop::runAfter(Timer::Duration delay, Timer::Callback cb)
 {
     if (!isInLoopThread())
     {
@@ -119,7 +129,7 @@ TimerId EventLoop::runAfter(Timer::Duration delay, Functor cb)
     return m_timerQueue->addAfter(delay, std::move(cb));
 }
 
-TimerId EventLoop::runEvery(Timer::Duration interval, Functor cb)
+TimerId EventLoop::runEvery(Timer::Duration interval, Timer::Callback cb)
 {
     if (!isInLoopThread())
     {
@@ -153,16 +163,19 @@ std::size_t EventLoop::pendingTimerCount() const
 }
 void EventLoop::addChannel(Channel* channel)
 {
+    assertInLoopThread();
     m_poller.addChannel(channel);
 }
 
 void EventLoop::updateChannel(Channel* channel)
 {
+    assertInLoopThread();
     m_poller.updateChannel(channel);
 }
 
 void EventLoop::removeChannel(Channel* channel)
 {
+    assertInLoopThread();
     m_poller.removeChannel(channel);
 }
 

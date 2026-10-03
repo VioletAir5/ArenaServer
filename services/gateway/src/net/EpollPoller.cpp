@@ -3,6 +3,7 @@
 #include <sys/epoll.h>
 
 #include <cerrno>
+#include <stdexcept>
 #include <system_error>
 
 #include "net/Channel.h"
@@ -11,7 +12,8 @@
 namespace service::gateway
 {
 EpollPoller::EpollPoller()
-    : m_epollFd(::epoll_create1(EPOLL_CLOEXEC))
+    : m_ownerThreadId(std::this_thread::get_id())
+    , m_epollFd(::epoll_create1(EPOLL_CLOEXEC))
     , m_events(M_kInitialEventSize)
 {
     if (!m_epollFd.valid())
@@ -24,8 +26,19 @@ EpollPoller::EpollPoller()
     }
 }
 
+void EpollPoller::assertInOwnerThread() const
+{
+    if (std::this_thread::get_id() != m_ownerThreadId)
+    {
+        throw std::logic_error(
+            "EpollPoller operation requires owner thread"
+        );
+    }
+}
+
 void EpollPoller::addChannel(Channel* channel)
 {
+    assertInOwnerThread();
     epoll_event event;
     event.events = channel->events();
     event.data.ptr = channel;
@@ -47,6 +60,7 @@ void EpollPoller::addChannel(Channel* channel)
 
 void EpollPoller::updateChannel(Channel* channel)
 {
+    assertInOwnerThread();
     epoll_event event;
     event.events = channel->events();
     event.data.ptr = channel;
@@ -68,6 +82,7 @@ void EpollPoller::updateChannel(Channel* channel)
 
 void EpollPoller::removeChannel(Channel* channel)
 {
+    assertInOwnerThread();
     if (::epoll_ctl(
             m_epollFd.get(),
             EPOLL_CTL_DEL,
@@ -87,6 +102,7 @@ void EpollPoller::poll(
     int timeoutMs, std::vector<Channel*>& activeChannels
 )
 {
+    assertInOwnerThread();
     activeChannels.clear();
 
     int ready = ::epoll_wait(
