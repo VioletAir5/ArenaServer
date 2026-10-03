@@ -10,6 +10,7 @@
 
 #include "net/Channel.h"
 #include "net/EpollPoller.h"
+#include "net/TimerQueue.h"
 #include "os/FileDescriptor.h"
 
 namespace service::gateway
@@ -32,6 +33,12 @@ public:
     void queueInLoop(Functor cb);
     std::size_t peakPendingFunctorCount() const;
 
+    // Timer operations are confined to the construction thread.
+    TimerId runAfter(Timer::Duration delay, Functor cb);
+    TimerId runEvery(Timer::Duration interval, Functor cb);
+    bool cancelTimer(TimerId id);
+    std::size_t pendingTimerCount() const;
+
     void addChannel(Channel*);
     void updateChannel(Channel*);
     void removeChannel(Channel*);
@@ -48,6 +55,7 @@ private:
     mutable std::mutex m_mutex;
     std::atomic<bool> m_quit{false};
     EpollPoller m_poller;
+    std::unique_ptr<TimerQueue> m_timerQueue;
     std::vector<Channel*> m_activeChannels;
     std::vector<Functor> m_pendingFunctors;
     std::size_t m_peakPendingFunctors{0};

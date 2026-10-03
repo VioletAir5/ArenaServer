@@ -53,6 +53,7 @@ void TcpConnection::handleRead()
 
         if (n > 0)
         {
+            m_lastActivity = std::chrono::steady_clock::now();
             if (!m_inputBuffer.append(buffer, static_cast<size_t>(n)))
             {
                 handleClose();
@@ -128,6 +129,7 @@ void TcpConnection::send(const void* data, size_t len)
 
             if (n > 0)
             {
+                m_lastActivity = std::chrono::steady_clock::now();
                 ptr += n;
                 remaining -= static_cast<size_t>(n);
 
@@ -195,6 +197,7 @@ void TcpConnection::handleWrite()
 
         if (n > 0)
         {
+            m_lastActivity = std::chrono::steady_clock::now();
             m_outputBuffer.skip(static_cast<size_t>(n));
             continue;
         }
@@ -380,5 +383,15 @@ int TcpConnection::fd() const noexcept
 std::size_t TcpConnection::pendingOutputBytes() const noexcept
 {
     return m_outputBuffer.readableBytes();
+}
+std::chrono::steady_clock::time_point
+TcpConnection::lastActivity() const noexcept
+{
+    return m_lastActivity;
+}
+
+bool TcpConnection::closing() const noexcept
+{
+    return m_closing;
 }
 } // namespace service::gateway

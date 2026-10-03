@@ -37,8 +37,9 @@ public:
     // The message view is valid only for the duration of the
     // callback.
     void setMessageCallback(MessageCallback);
-    // Called synchronously on threshold crossing in the EventLoop thread.
-    // Register before sending; callbacks must not destroy this connection.
+    // Called synchronously on threshold crossing in the EventLoop
+    // thread. Register before sending; callbacks must not destroy
+    // this connection.
     void setHighWaterMarkCallback(WatermarkCallback);
     void setLowWaterMarkCallback(WatermarkCallback);
 
@@ -51,6 +52,9 @@ public:
     int fd() const noexcept;
     // Read only on the owning EventLoop thread.
     std::size_t pendingOutputBytes() const noexcept;
+    std::chrono::steady_clock::time_point
+    lastActivity() const noexcept;
+    bool closing() const noexcept;
 
 private:
     void notifyHighWaterIfNeeded();
@@ -70,6 +74,8 @@ private:
     PacketBuffer m_outputBuffer;
 
     std::chrono::steady_clock::time_point m_highWaterSince{};
+    std::chrono::steady_clock::time_point m_lastActivity{
+        std::chrono::steady_clock::now()};
     bool m_aboveHighWater{false};
     bool m_readPaused{false};
     bool m_closing{false};

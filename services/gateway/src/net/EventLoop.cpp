@@ -37,6 +37,7 @@ EventLoop::EventLoop()
     m_wakeupChannel->setReadCallback([this]() { handleWakeup(); });
     m_wakeupChannel->enableReading();
     addChannel(m_wakeupChannel.get());
+    m_timerQueue = std::make_unique<TimerQueue>(this);
 }
 
 void EventLoop::loop()
@@ -50,7 +51,7 @@ void EventLoop::loop()
 
     while (!m_quit.load())
     {
-        m_poller.poll(1000, m_activeChannels);
+        m_poller.poll(-1, m_activeChannels);
         for (Channel* channel : m_activeChannels)
         {
             channel->handleEvent();
@@ -107,6 +108,49 @@ std::size_t EventLoop::peakPendingFunctorCount() const
     return m_peakPendingFunctors;
 }
 
+TimerId EventLoop::runAfter(Timer::Duration delay, Functor cb)
+{
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "timer operations require EventLoop thread"
+        );
+    }
+    return m_timerQueue->addAfter(delay, std::move(cb));
+}
+
+TimerId EventLoop::runEvery(Timer::Duration interval, Functor cb)
+{
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "timer operations require EventLoop thread"
+        );
+    }
+    return m_timerQueue->addEvery(interval, std::move(cb));
+}
+
+bool EventLoop::cancelTimer(TimerId id)
+{
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "timer operations require EventLoop thread"
+        );
+    }
+    return m_timerQueue->cancel(id);
+}
+
+std::size_t EventLoop::pendingTimerCount() const
+{
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "timer operations require EventLoop thread"
+        );
+    }
+    return m_timerQueue->size();
+}
 void EventLoop::addChannel(Channel* channel)
 {
     m_poller.addChannel(channel);

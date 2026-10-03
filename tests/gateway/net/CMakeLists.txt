@@ -36,6 +36,13 @@ add_test(
         slow
 )
 add_test(
+    NAME TcpServerClosesIdleConnection
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
+        "$<TARGET_FILE:arena_tcp_server_test_host>"
+        idle
+)
+add_test(
     NAME TcpServerPreservesRandomByteStream
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
@@ -45,5 +52,6 @@ add_test(
 set_tests_properties(
     TcpServerThousandConnectionsNoFdLeak TcpServerRejectsOverLimit
     TcpServerDisconnectsSlowClient TcpServerPreservesRandomByteStream
+    TcpServerClosesIdleConnection
     PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network"
 )

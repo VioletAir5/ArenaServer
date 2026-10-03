@@ -53,8 +53,11 @@ def run(binary, scenario):
         "ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1:abort_on_error=1"
     )
     environment.setdefault("UBSAN_OPTIONS", "halt_on_error=1")
+    command = [binary, str(port)]
+    if scenario == "idle":
+        command.append("1000")
     server = subprocess.Popen(
-        [binary, str(port)],
+        command,
         stdin=subprocess.DEVNULL,
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -178,6 +181,23 @@ def run(binary, scenario):
                     f"truncated stream: received {received} of {len(payload)} bytes"
                 )
             print(f"byte stream preserved: {received} bytes in 1024 records")
+        elif scenario == "idle":
+            client = connect(port)
+            clients.append(client)
+            for _ in range(7):
+                client.sendall(b"x")
+                if client.recv(1) != b"x":
+                    raise AssertionError("idle test echo mismatch")
+                time.sleep(0.2)
+            client.settimeout(4)
+            if client.recv(1) != b"":
+                raise AssertionError("idle connection stayed open")
+            wait_until(
+                server,
+                lambda: fd_count(server) == baseline,
+                "idle timeout FD recovery",
+            )
+            print("activity refreshed idle deadline; inactive connection closed")
         elif scenario == "slow":
             client = connect(port)
             client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -239,5 +259,5 @@ def run(binary, scenario):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow|stream")
+        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow|stream|idle")
     run(sys.argv[1], sys.argv[2])
