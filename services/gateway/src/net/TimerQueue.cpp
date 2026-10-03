@@ -59,13 +59,19 @@ TimerQueue::addAfter(Timer::Duration delay, Timer::Callback callback)
         );
     }
     const TimerId id = m_nextId++;
+    const auto expiration = Timer::Clock::now() + delay;
+    const bool newEarliest = m_heap.empty() ||
+                             expiration < m_heap.front().expiration();
     insert(Timer(
         id,
-        Timer::Clock::now() + delay,
+        expiration,
         Timer::Duration::zero(),
         std::move(callback)
     ));
-    arm();
+    if (newEarliest)
+    {
+        arm();
+    }
     return id;
 }
 
@@ -80,13 +86,14 @@ TimerId TimerQueue::addEvery(
         );
     }
     const TimerId id = m_nextId++;
-    insert(Timer(
-        id,
-        Timer::Clock::now() + interval,
-        interval,
-        std::move(callback)
-    ));
-    arm();
+    const auto expiration = Timer::Clock::now() + interval;
+    const bool newEarliest = m_heap.empty() ||
+                             expiration < m_heap.front().expiration();
+    insert(Timer(id, expiration, interval, std::move(callback)));
+    if (newEarliest)
+    {
+        arm();
+    }
     return id;
 }
 
@@ -95,8 +102,15 @@ bool TimerQueue::cancel(TimerId id)
     const auto it = m_indices.find(id);
     if (it != m_indices.end())
     {
+        const bool wasEarliest = it->second == 0;
+        const auto previousDeadline = m_heap.front().expiration();
         removeAt(it->second);
-        arm();
+        if (wasEarliest &&
+            (m_heap.empty() ||
+             m_heap.front().expiration() != previousDeadline))
+        {
+            arm();
+        }
         return true;
     }
     if (id != 0 && id == m_runningId)
