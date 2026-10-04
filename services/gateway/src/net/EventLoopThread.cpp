@@ -9,40 +9,71 @@
 
 namespace service::gateway
 {
-EventLoopThread::~EventLoopThread()
+EventLoopThread::~EventLoopThread() noexcept
 {
-    stopThread();
+    try
+    {
+        if (isInWorkerThread())
+        {
+            // The worker still accesses this object after callbacks.
+            // Detaching or continuing destruction would leave it dangling.
+            std::terminate();
+        }
+        stopThread();
+    }
+    catch (...)
+    {
+        // Destruction cannot recover from failed synchronization or I/O.
+        std::terminate();
+    }
+}
+
+bool EventLoopThread::isInWorkerThread()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_workerId == std::this_thread::get_id();
 }
 
 void EventLoopThread::stopThread()
 {
-    if (m_thread && m_thread->joinable() &&
-        m_thread->get_id() == std::this_thread::get_id())
+    // Serialize join() without holding the worker's publication lock.
+    std::lock_guard<std::mutex> stopLock(m_stopMutex);
     {
-        throw std::logic_error(
-            "EventLoopThread cannot join itself; use EventLoop::quit"
-        );
-    }
+        std::unique_lock<std::mutex> lock(m_mutex);
+        if (!m_thread)
+        {
+            return;
+        }
 
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        // A created worker may still be constructing its stack EventLoop.
+        // Both successful startup and construction failure notify this wait.
+        m_cv.wait(lock, [this] { return m_startComplete; });
         if (m_loop != nullptr)
         {
-            // Keep the worker's stack loop alive until quit finishes.
             // The worker clears m_loop under this same lock.
             m_loop->quit();
         }
     }
 
-    // The worker needs m_mutex to unpublish the loop before exiting.
-    if (m_thread && m_thread->joinable())
+    if (m_thread->joinable())
     {
         m_thread->join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_workerId = {};
     }
 }
 
 void EventLoopThread::stop()
 {
+    // Check before taking m_stopMutex: another caller may be joining us.
+    if (isInWorkerThread())
+    {
+        throw std::logic_error(
+            "EventLoopThread cannot join itself; use EventLoop::quit"
+        );
+    }
     stopThread();
     std::exception_ptr error;
     {
@@ -60,9 +91,9 @@ EventLoop* EventLoopThread::startLoop()
     std::unique_lock<std::mutex> lock(m_mutex);
     if (!m_thread)
     {
-        m_thread = std::make_unique<std::jthread>(
-            [this]() { threadFunc(); }
-        );
+        m_thread = std::make_unique<std::jthread>([this]()
+                                                  { threadFunc(); });
+        m_workerId = m_thread->get_id();
     }
     // A pointer is not a completion predicate: it can become null
     // again after successful startup. Failure must also wake waiters.

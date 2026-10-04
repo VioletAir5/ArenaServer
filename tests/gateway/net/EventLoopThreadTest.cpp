@@ -3,6 +3,8 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <barrier>
 #include <cerrno>
 #include <chrono>
 #include <future>
@@ -10,10 +12,65 @@
 #include <stdexcept>
 #include <thread>
 #include <system_error>
+#include <type_traits>
+#include <vector>
 
 #include "net/EventLoopThread.h"
 
 using service::gateway::EventLoopThread;
+
+namespace service::gateway
+{
+class EventLoopThreadTestPeer
+{
+public:
+    static void startPaused(
+        EventLoopThread& thread, std::shared_future<void> release
+    )
+    {
+        std::lock_guard<std::mutex> lock(thread.m_mutex);
+        thread.m_thread = std::make_unique<std::jthread>(
+            [&thread, release]()
+            {
+                release.wait();
+                thread.threadFunc();
+            }
+        );
+        thread.m_workerId = thread.m_thread->get_id();
+    }
+
+    static bool waitForStop(EventLoopThread& thread)
+    {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (!thread.m_stopMutex.try_lock())
+            {
+                return true;
+            }
+            thread.m_stopMutex.unlock();
+            std::this_thread::yield();
+        }
+        return false;
+    }
+
+    // Rescue a regression that joined before requesting quit, so the
+    // test can report a failure rather than hanging during cleanup.
+    static void quitPublishedLoop(EventLoopThread& thread)
+    {
+        std::lock_guard<std::mutex> lock(thread.m_mutex);
+        if (thread.m_loop != nullptr)
+        {
+            thread.m_loop->quit();
+        }
+    }
+};
+} // namespace service::gateway
+
+using service::gateway::EventLoopThreadTestPeer;
+
+static_assert(std::is_nothrow_destructible_v<EventLoopThread>);
 
 TEST(EventLoopThreadTest, UnstartedObjectCanBeDestroyed)
 {
@@ -173,6 +230,160 @@ TEST(EventLoopThreadDeathTest, ConstructionFailureReachesStartingThread)
                 ::_exit(error.code().value() == EMFILE ? 0 : 4);
             }
             ::_exit(5);
+        },
+        testing::ExitedWithCode(0),
+        "");
+}
+
+TEST(EventLoopThreadTest, StopWaitsForStartupBeforeJoining)
+{
+    std::promise<void> stopped;
+    auto done = stopped.get_future();
+    EventLoopThread thread;
+    std::promise<void> release;
+    EventLoopThreadTestPeer::startPaused(
+        thread, release.get_future().share()
+    );
+    std::promise<void> started;
+    auto startup = started.get_future();
+    std::jthread starter([&]()
+    {
+        try
+        {
+            // Only observe startup; stop may invalidate the returned borrow.
+            thread.startLoop();
+            started.set_value();
+        }
+        catch (const std::logic_error&)
+        {
+            // The stop may finish before the starting waiter gets its lock.
+            started.set_value();
+        }
+        catch (...)
+        {
+            started.set_exception(std::current_exception());
+        }
+    });
+    std::jthread stopper([&]()
+    {
+        try
+        {
+            thread.stop();
+            stopped.set_value();
+        }
+        catch (...)
+        {
+            stopped.set_exception(std::current_exception());
+        }
+    });
+
+    EXPECT_TRUE(EventLoopThreadTestPeer::waitForStop(thread));
+    EXPECT_EQ(done.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+    release.set_value();
+    const bool finished =
+        done.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    if (!finished)
+    {
+        EventLoopThreadTestPeer::quitPublishedLoop(thread);
+    }
+    stopper.join();
+    starter.join();
+    EXPECT_TRUE(finished);
+    EXPECT_NO_THROW(done.get());
+    EXPECT_NO_THROW(startup.get());
+    EXPECT_THROW(thread.startLoop(), std::logic_error);
+}
+
+TEST(EventLoopThreadTest, ConcurrentStopsJoinOnlyOnce)
+{
+    for (int attempt = 0; attempt < 100; ++attempt)
+    {
+        EventLoopThread thread;
+        thread.startLoop();
+        std::barrier ready(5);
+        std::atomic<int> failures{0};
+        std::vector<std::jthread> stoppers;
+        for (int caller = 0; caller < 4; ++caller)
+        {
+            stoppers.emplace_back([&]()
+            {
+                ready.arrive_and_wait();
+                try
+                {
+                    thread.stop();
+                }
+                catch (...)
+                {
+                    failures.fetch_add(1);
+                }
+            });
+        }
+        ready.arrive_and_wait();
+        stoppers.clear();
+        EXPECT_EQ(failures.load(), 0);
+        EXPECT_THROW(thread.startLoop(), std::logic_error);
+    }
+}
+
+TEST(EventLoopThreadDeathTest, WorkerDestructionTerminatesWithoutThrowing)
+{
+    EXPECT_EXIT(
+        {
+            ::alarm(5);
+            std::set_terminate([]()
+            {
+                // The old noexcept destructor terminated while handling
+                // a thrown logic_error. Self-destruction must terminate
+                // directly, without introducing an active exception.
+                ::_exit(std::current_exception() ? 4 : 0);
+            });
+            auto* thread = new EventLoopThread;
+            auto* loop = thread->startLoop();
+            loop->queueInLoop([thread]() { delete thread; });
+            for (;;)
+            {
+                ::pause();
+            }
+        },
+        testing::ExitedWithCode(0),
+        "");
+}
+
+TEST(EventLoopThreadDeathTest, WorkerStopRejectsWhileAnotherCallerJoins)
+{
+    EXPECT_EXIT(
+        {
+            ::alarm(5);
+            std::promise<void> release;
+            auto released = release.get_future();
+            std::promise<void> entered;
+            auto started = entered.get_future();
+            bool rejected = false;
+            EventLoopThread thread;
+            auto* loop = thread.startLoop();
+            loop->queueInLoop([&]()
+            {
+                entered.set_value();
+                released.wait();
+                try
+                {
+                    thread.stop();
+                }
+                catch (const std::logic_error&)
+                {
+                    rejected = true;
+                }
+            });
+            started.wait();
+            std::jthread stopper([&]() { thread.stop(); });
+            if (!EventLoopThreadTestPeer::waitForStop(thread))
+            {
+                ::_exit(3);
+            }
+            release.set_value();
+            stopper.join();
+            ::_exit(rejected ? 0 : 4);
         },
         testing::ExitedWithCode(0),
         "");
