@@ -1,4 +1,8 @@
+#include <fcntl.h>
 #include <sys/socket.h>
+#include <unistd.h>
+
+#include <cerrno>
 
 #include <iostream>
 #include <optional>
@@ -22,6 +26,15 @@ Acceptor::Acceptor(EventLoop* loop, const InetAddress& listenAddress)
         throw std::invalid_argument(
             "Acceptor requires valid EventLoop"
         );
+    }
+
+    m_reserveFd = service::FileDescriptor(
+        ::open("/dev/null", O_RDONLY | O_CLOEXEC)
+    );
+    if (!m_reserveFd.valid())
+    {
+        throw std::system_error(errno, std::generic_category(),
+                                "accept reserve fd");
     }
 
     m_listenSocket.setReuseAddr(true);
@@ -51,9 +64,15 @@ void Acceptor::stop()
         return;
     }
 
+    if (m_retryTimerId != 0)
+    {
+        m_loop->cancelTimer(m_retryTimerId);
+        m_retryTimerId = 0;
+    }
     m_loop->removeChannel(&m_listenChannel);
     m_listening = false;
     m_listenSocket.close();
+    m_reserveFd = service::FileDescriptor();
 }
 
 void Acceptor::setNewConnectionCallback(NewConnectionCallback callback
@@ -79,7 +98,13 @@ void Acceptor::handleRead()
         }
         catch (const std::system_error& error)
         {
+            const int code = error.code().value();
             std::cerr << "accept failed: " << error.what() << '\n';
+            if (code == EMFILE || code == ENFILE ||
+                code == ENOBUFS || code == ENOMEM)
+            {
+                suspendForResourceError();
+            }
             return;
         }
 
@@ -94,4 +119,69 @@ void Acceptor::handleRead()
         }
     }
 }
+void Acceptor::suspendForResourceError()
+{
+    // A queued peer keeps an LT listener readable. Disable interest
+    // before retrying so epoll_wait can sleep and service other work.
+    m_listenChannel.disableReading();
+    m_loop->updateChannel(&m_listenChannel);
+
+    m_reserveFd = service::FileDescriptor();
+    int rejected;
+    do
+    {
+        rejected = ::accept4(m_listenSocket.get(), nullptr, nullptr,
+                             SOCK_NONBLOCK | SOCK_CLOEXEC);
+    }
+    while (rejected < 0 && errno == EINTR);
+    {
+        service::FileDescriptor rejectedPeer(rejected);
+    }
+    m_reserveFd = service::FileDescriptor(
+        ::open("/dev/null", O_RDONLY | O_CLOEXEC)
+    );
+    scheduleRetry();
+}
+
+void Acceptor::scheduleRetry()
+{
+    try
+    {
+        m_retryTimerId = m_loop->runAfter(
+            kRetryDelay, [this]() { retryListening(); }
+        );
+    }
+    catch (...)
+    {
+        // If no retry can be scheduled, close the listener rather
+        // than leaving it permanently suspended or spinning.
+        stop();
+        throw;
+    }
+}
+
+void Acceptor::retryListening()
+{
+    m_retryTimerId = 0;
+    if (!m_listening)
+    {
+        return;
+    }
+    if (!m_reserveFd.valid())
+    {
+        m_reserveFd = service::FileDescriptor(
+            ::open("/dev/null", O_RDONLY | O_CLOEXEC)
+        );
+        if (!m_reserveFd.valid())
+        {
+            scheduleRetry();
+            return;
+        }
+    }
+    m_listenChannel.enableReading();
+    m_loop->updateChannel(&m_listenChannel);
+    // This listener is LT: an outstanding accept queue becomes
+    // readable again even without a new incoming connection.
+}
+
 } // namespace service::gateway

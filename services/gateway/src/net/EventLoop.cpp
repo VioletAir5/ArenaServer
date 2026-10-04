@@ -52,10 +52,15 @@ void EventLoop::loop()
     while (!m_quit.load())
     {
         m_poller.poll(-1, m_activeChannels);
-        for (Channel* channel : m_activeChannels)
+        for (Channel*& entry : m_activeChannels)
         {
-            channel->handleEvent();
+            Channel* channel = std::exchange(entry, nullptr);
+            if (channel != nullptr)
+            {
+                channel->handleEvent();
+            }
         }
+        m_activeChannels.clear();
         doPendingFunctors();
     }
 }
@@ -164,6 +169,11 @@ void EventLoop::updateChannel(Channel* channel)
 void EventLoop::removeChannel(Channel* channel)
 {
     m_poller.removeChannel(channel);
+    // epoll DEL cannot retract events already copied by poll().
+    // Keep the vector shape stable while a callback removes another
+    // ready Channel; the dispatcher skips invalidated entries.
+    std::replace(m_activeChannels.begin(), m_activeChannels.end(),
+                 channel, static_cast<Channel*>(nullptr));
 }
 
 void EventLoop::wakeup()

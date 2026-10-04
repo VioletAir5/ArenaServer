@@ -1,5 +1,8 @@
 #include "net/EventLoop.h"
 
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -7,6 +10,7 @@
 #include <cstddef>
 #include <future>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -159,4 +163,46 @@ TEST(EventLoopTest, QuitFromAnotherThreadWakesIdlePoll)
 
     loop.loop();
     stopper.join();
+}
+
+TEST(EventLoopTest, RemovingReadyChannelSkipsItsPendingEvent)
+{
+    using service::gateway::Channel;
+    service::FileDescriptor firstFd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
+    service::FileDescriptor secondFd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
+    ASSERT_TRUE(firstFd.valid());
+    ASSERT_TRUE(secondFd.valid());
+    EventLoop loop;
+    auto first = std::make_shared<Channel>(firstFd.get());
+    auto second = std::make_shared<Channel>(secondFd.get());
+    first->tie(first);
+    second->tie(second);
+    first->enableReading();
+    second->enableReading();
+    int callbacks = 0;
+    // Whichever event is dispatched first destroys the other ready
+    // Channel. Its copied epoll event must never be dispatched.
+    first->setReadCallback([&]
+    {
+        ++callbacks;
+        loop.removeChannel(second.get());
+        second.reset();
+        loop.quit();
+    });
+    second->setReadCallback([&]
+    {
+        ++callbacks;
+        loop.removeChannel(first.get());
+        first.reset();
+        loop.quit();
+    });
+    loop.addChannel(first.get());
+    loop.addChannel(second.get());
+    const std::uint64_t one = 1;
+    ASSERT_EQ(::write(firstFd.get(), &one, sizeof(one)), sizeof(one));
+    ASSERT_EQ(::write(secondFd.get(), &one, sizeof(one)), sizeof(one));
+    loop.loop();
+    EXPECT_EQ(callbacks, 1);
+    if (first) loop.removeChannel(first.get());
+    if (second) loop.removeChannel(second.get());
 }

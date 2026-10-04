@@ -42,6 +42,8 @@ public:
 
     void addChannel(Channel*);
     void updateChannel(Channel*);
+    // Also invalidate an event already copied into the current batch.
+    // Remove before destroying a Channel, on the owner thread.
     void removeChannel(Channel*);
 
 private:
@@ -55,8 +57,10 @@ private:
     mutable std::mutex m_mutex;
     std::atomic<bool> m_quit{false};
     EpollPoller m_poller;
-    std::unique_ptr<TimerQueue> m_timerQueue;
+    // TimerQueue teardown removes its Channel, so this batch storage
+    // must outlive m_timerQueue (members destruct in reverse order).
     std::vector<Channel*> m_activeChannels;
+    std::unique_ptr<TimerQueue> m_timerQueue;
     std::vector<Functor> m_pendingFunctors;
     std::size_t m_peakPendingFunctors{0};
 };

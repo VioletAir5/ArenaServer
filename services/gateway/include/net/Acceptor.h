@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 
 #include "net/Channel.h"
@@ -24,12 +25,19 @@ public:
 
 private:
     void handleRead();
+    void suspendForResourceError();
+    void scheduleRetry();
+    void retryListening();
 
 private:
     EventLoop* m_loop;
 
     Socket m_listenSocket;
     Channel m_listenChannel;
+    // Reserved descriptor lets EMFILE still accept and reject one peer.
+    service::FileDescriptor m_reserveFd;
+    TimerId m_retryTimerId{0};
+    static constexpr std::chrono::milliseconds kRetryDelay{100};
 
     NewConnectionCallback m_newConnectionCallback;
 

@@ -2,6 +2,7 @@
 
 import os
 import random
+import resource
 import signal
 import struct
 import socket
@@ -57,12 +58,16 @@ def run(binary, scenario):
     command = [binary, str(port)]
     if scenario == "idle":
         command.append("1000")
+    def constrain_fds():
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+
     server = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
         stdout=log,
         stderr=subprocess.STDOUT,
         env=environment,
+        preexec_fn=constrain_fds if scenario.startswith("fd_limit") else None,
     )
     clients = []
     passed = False
@@ -126,6 +131,80 @@ def run(binary, scenario):
             wait_until(server, lambda: fd_count(server) == baseline, "FD recovery")
             print("1001st connection closed; capacity recovered")
 
+        elif scenario in ("fd_limit", "fd_limit_stop"):
+            def resource_errors():
+                with open(log.name, errors="replace") as stream:
+                    return sum("Too many open files" in line for line in stream)
+
+            def cpu_seconds():
+                with open(f"/proc/{server.pid}/stat") as stream:
+                    # Skip pid/comm: comm can itself contain spaces.
+                    fields = stream.read().rsplit(")", 1)[1].split()
+                return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+            for round_number in range(1, 3):
+                before_errors = resource_errors()
+                for _ in range(80):
+                    clients.append(connect(port))
+                wait_until(server,
+                           lambda: resource_errors() > before_errors,
+                           "real EMFILE")
+                start_cpu = cpu_seconds()
+                start = time.monotonic()
+                time.sleep(0.6)
+                elapsed = time.monotonic() - start
+                error_count = resource_errors() - before_errors
+                cpu_used = cpu_seconds() - start_cpu
+                if error_count > 15:
+                    raise AssertionError(f"accept log busy loop: {error_count} errors")
+                if cpu_used > elapsed * 0.5:
+                    raise AssertionError(f"accept CPU busy loop: {cpu_used:.3f}s")
+                refused = 0
+                for client in clients:
+                    client.setblocking(False)
+                    try:
+                        if client.recv(1) == b"":
+                            refused += 1
+                    except ConnectionResetError:
+                        refused += 1
+                    except BlockingIOError:
+                        pass
+                if refused == 0:
+                    raise AssertionError("no exhausted connection was refused")
+                if scenario == "fd_limit_stop":
+                    # Stop just after the next failure, within the
+                    # 100ms backoff window with a retry still queued.
+                    last_errors = resource_errors()
+                    wait_until(server,
+                               lambda: resource_errors() > last_errors,
+                               "accept retry scheduled before stop")
+                    server.send_signal(signal.SIGUSR1)
+                    server.wait(timeout=3)
+                    with open(log.name, errors="replace") as stream:
+                        stopped_log = stream.read()
+                    if "TcpServer stopped" not in stopped_log:
+                        raise AssertionError("server failed to stop during accept backoff")
+                    try:
+                        with connect(port):
+                            raise AssertionError("listener stayed open after stop")
+                    except OSError:
+                        pass
+                    print("server stopped safely with accept retry pending")
+                    break
+                for client in clients:
+                    client.close()
+                clients.clear()
+                wait_until(server, lambda: fd_count(server) == baseline,
+                           "EMFILE FD recovery")
+                with connect(port) as recovered:
+                    recovered.sendall(b"recovered")
+                    if recovered.recv(9) != b"recovered":
+                        raise AssertionError("accept did not recover after EMFILE")
+                wait_until(server, lambda: fd_count(server) == baseline,
+                           "recovered echo FD cleanup")
+                print(f"EMFILE round {round_number}: errors={error_count}, "
+                      f"CPU={cpu_used:.3f}s/{elapsed:.3f}s, refused={refused}, "
+                      f"FD recovered to {baseline}")
         elif scenario == "stream":
             client = connect(port)
             client.settimeout(10)
@@ -327,5 +406,5 @@ def run(binary, scenario):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|slow|stream|idle|rst|stop|stop_fast")
+        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|fd_limit|fd_limit_stop|slow|stream|idle|rst|stop|stop_fast")
     run(sys.argv[1], sys.argv[2])
