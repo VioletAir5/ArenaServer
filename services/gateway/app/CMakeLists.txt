@@ -10,9 +10,9 @@ target_compile_options(ArenaServer PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
 )
 
 target_link_options(ArenaServer PRIVATE
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
 )

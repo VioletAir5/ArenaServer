@@ -12,7 +12,7 @@ target_compile_options(arena_gateway PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
 )
 
 add_subdirectory(src/net)

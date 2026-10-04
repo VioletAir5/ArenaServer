@@ -8,7 +8,7 @@ target_compile_options(arena_shared PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
 )
 
 add_subdirectory(src/os)

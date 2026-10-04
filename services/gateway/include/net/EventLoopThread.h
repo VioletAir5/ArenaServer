@@ -29,6 +29,11 @@ public:
     // before requesting exit. Cross-thread work must be queued.
     EventLoop* startLoop();
 
+    // Thread-safe, including from the worker. Wait for startup, request
+    // quit while the published loop is alive, but do not join.
+    // Pool shutdown uses this to wake every worker before joining any.
+    void requestStop();
+
     // Call outside the worker: request quit and join, then rethrow any
     // worker exception once. No restart after exit. Destruction also
     // joins, but does not propagate worker exceptions.

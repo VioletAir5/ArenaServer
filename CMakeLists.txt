@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Keep undefined-behavior checks by default. The TSan preset runs
+# separately because UBSan vptr probes race inside the installed runtime.
+option(ARENA_ENABLE_UBSAN "Enable undefined-behavior sanitizer" ON)
+
 include(FetchContent)
 
 FetchContent_Declare(

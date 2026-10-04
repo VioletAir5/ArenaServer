@@ -17,23 +17,23 @@ target_compile_options(arena_tests PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
 )
 
 target_compile_options(arena_perf_tests PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
 )
 
 target_link_options(arena_tests PRIVATE
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
     -no-pie
 )
 
 target_link_options(arena_perf_tests PRIVATE
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
     -no-pie
 )
 

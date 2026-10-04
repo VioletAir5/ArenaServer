@@ -19,7 +19,8 @@
                 "CMAKE_C_COMPILER": "/usr/bin/gcc-15",
                 "CMAKE_CXX_COMPILER": "/usr/bin/g++-15",
                 "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_EXPORT_COMPILE_COMMANDS": true
+                "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+                "ARENA_ENABLE_UBSAN": true
             }
         },
         {
@@ -40,12 +41,13 @@
         },
         {
             "name": "gcc15-tsan",
-            "displayName": "GCC 15 TSan / UBSan",
+            "displayName": "GCC 15 TSan",
             "inherits": "gcc15-base",
             "binaryDir": "${sourceDir}/build-tsan",
             "cacheVariables": {
                 "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
-                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread -no-pie"
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread -no-pie",
+                "ARENA_ENABLE_UBSAN": false
             }
         }
     ],
@@ -102,13 +104,13 @@
         {
             "name": "gcc15-tsan",
             "configurePreset": "gcc15-tsan",
-            "description": "EventLoop and EventLoopThread concurrency regressions; excludes fork/resource-limit tests.",
+            "description": "EventLoop, EventLoopThread and EventLoopThreadPool concurrency regressions; excludes fork/resource-limit tests.",
             "output": {
                 "outputOnFailure": true
             },
             "filter": {
                 "include": {
-                    "name": "^(EventLoopThreadTest|EventLoopTest)\\."
+                    "name": "^(EventLoopThreadPoolTest|EventLoopThreadTest|EventLoopTest)\\."
                 }
             },
             "execution": {

@@ -8,10 +8,13 @@ target_compile_options(arena_tcp_server_test_host PRIVATE
     -Wall
     -Wextra
     -Wpedantic
-    -fsanitize=undefined
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
 )
 # Avoid intermittent ASan startup failures with PIE binaries under WSL.
-target_link_options(arena_tcp_server_test_host PRIVATE -fsanitize=undefined -no-pie)
+target_link_options(arena_tcp_server_test_host PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
+    -no-pie
+)
 add_dependencies(arena_tests arena_tcp_server_test_host)
 
 add_test(
@@ -93,3 +96,7 @@ set_tests_properties(
     TcpServerStopsDuringFdExhaustion
     PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network"
 )
+
+# Deterministic worker-construction failure without exhausting sanitizer FDs.
+# Only arena_tests wraps this OS call; production/performance binaries do not.
+target_link_options(arena_tests PRIVATE -Wl,--wrap=timerfd_create)

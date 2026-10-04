@@ -388,3 +388,29 @@ TEST(EventLoopThreadDeathTest, WorkerStopRejectsWhileAnotherCallerJoins)
         testing::ExitedWithCode(0),
         "");
 }
+
+TEST(EventLoopThreadTest, WorkerCanRequestStopWithoutJoining)
+{
+    std::promise<void> stopped;
+    auto done = stopped.get_future();
+    EventLoopThread thread;
+    auto* loop = thread.startLoop();
+    loop->queueInLoop([&]()
+    {
+        thread.requestStop();
+        stopped.set_value();
+    });
+    ASSERT_EQ(done.wait_for(std::chrono::seconds(3)),
+              std::future_status::ready);
+    EXPECT_NO_THROW(thread.stop());
+    EXPECT_NO_THROW(thread.requestStop());
+}
+
+TEST(EventLoopThreadTest, UnstartedStopRequestAllowsLaterStartup)
+{
+    EventLoopThread thread;
+    EXPECT_NO_THROW(thread.requestStop());
+    EXPECT_NE(thread.startLoop(), nullptr);
+    thread.requestStop();
+    EXPECT_NO_THROW(thread.stop());
+}

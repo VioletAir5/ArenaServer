@@ -34,26 +34,36 @@ bool EventLoopThread::isInWorkerThread()
     return m_workerId == std::this_thread::get_id();
 }
 
+void EventLoopThread::requestStop()
+{
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (!m_thread)
+    {
+        return;
+    }
+
+    // A created worker may still be constructing its stack EventLoop.
+    // Both successful startup and construction failure notify this wait.
+    m_cv.wait(lock, [this] { return m_startComplete; });
+    if (m_loop != nullptr)
+    {
+        // The worker clears m_loop under this same lock.
+        m_loop->quit();
+    }
+}
+
 void EventLoopThread::stopThread()
 {
     // Serialize join() without holding the worker's publication lock.
     std::lock_guard<std::mutex> stopLock(m_stopMutex);
     {
-        std::unique_lock<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_thread)
         {
             return;
         }
-
-        // A created worker may still be constructing its stack EventLoop.
-        // Both successful startup and construction failure notify this wait.
-        m_cv.wait(lock, [this] { return m_startComplete; });
-        if (m_loop != nullptr)
-        {
-            // The worker clears m_loop under this same lock.
-            m_loop->quit();
-        }
     }
+    requestStop();
 
     if (m_thread->joinable())
     {
