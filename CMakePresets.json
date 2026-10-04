@@ -1,0 +1,121 @@
+{
+    "version": 4,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 23,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "gcc15-base",
+            "hidden": true,
+            "generator": "Unix Makefiles",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "/usr/bin/gcc-15",
+                "CMAKE_CXX_COMPILER": "/usr/bin/g++-15",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": true
+            }
+        },
+        {
+            "name": "gcc15",
+            "displayName": "GCC 15 Debug",
+            "inherits": "gcc15-base",
+            "binaryDir": "${sourceDir}/build"
+        },
+        {
+            "name": "gcc15-asan",
+            "displayName": "GCC 15 ASan / UBSan",
+            "inherits": "gcc15-base",
+            "binaryDir": "${sourceDir}/build-asan",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+            }
+        },
+        {
+            "name": "gcc15-tsan",
+            "displayName": "GCC 15 TSan / UBSan",
+            "inherits": "gcc15-base",
+            "binaryDir": "${sourceDir}/build-tsan",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread -no-pie"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "gcc15",
+            "configurePreset": "gcc15",
+            "jobs": 4
+        },
+        {
+            "name": "gcc15-asan",
+            "configurePreset": "gcc15-asan",
+            "jobs": 4
+        },
+        {
+            "name": "gcc15-tsan",
+            "configurePreset": "gcc15-tsan",
+            "jobs": 4
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "gcc15",
+            "configurePreset": "gcc15",
+            "output": {
+                "outputOnFailure": true
+            },
+            "filter": {
+                "exclude": {
+                    "name": "Performance"
+                }
+            },
+            "execution": {
+                "jobs": 4,
+                "noTestsAction": "error"
+            }
+        },
+        {
+            "name": "gcc15-asan",
+            "configurePreset": "gcc15-asan",
+            "output": {
+                "outputOnFailure": true
+            },
+            "filter": {
+                "exclude": {
+                    "name": "Performance"
+                }
+            },
+            "execution": {
+                "jobs": 4,
+                "noTestsAction": "error"
+            }
+        },
+        {
+            "name": "gcc15-tsan",
+            "configurePreset": "gcc15-tsan",
+            "description": "EventLoop and EventLoopThread concurrency regressions; excludes fork/resource-limit tests.",
+            "output": {
+                "outputOnFailure": true
+            },
+            "filter": {
+                "include": {
+                    "name": "^(EventLoopThreadTest|EventLoopTest)\\."
+                }
+            },
+            "execution": {
+                "jobs": 1,
+                "timeout": 60,
+                "noTestsAction": "error"
+            }
+        }
+    ]
+}
