@@ -4,8 +4,9 @@
 #include <unistd.h>
 
 #include <cerrno>
-
+#include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 
@@ -15,8 +16,21 @@
 
 namespace service::gateway
 {
+namespace
+{
+EventLoop* requireConnectionLoop(EventLoop* loop)
+{
+    if (loop == nullptr || !loop->isInLoopThread())
+    {
+        throw std::logic_error("TcpConnection construction requires "
+                               "owner EventLoop thread");
+    }
+    return loop;
+}
+} // namespace
+
 TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
-    : m_loop(loop)
+    : m_loop(requireConnectionLoop(loop))
     , m_socket(std::move(socket))
     , m_channel(m_socket.get())
 {
@@ -37,6 +51,16 @@ TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
     );
 
     m_loop->addChannel(&m_channel);
+}
+
+TcpConnection::~TcpConnection() noexcept
+{
+    if (!m_loop->isInLoopThread())
+    {
+        // A destructor cannot marshal its remaining members back to
+        // owner.
+        std::terminate();
+    }
 }
 
 void TcpConnection::handleRead()
@@ -149,7 +173,12 @@ void TcpConnection::send(const void* data, size_t len)
     {
         while (true)
         {
-            ssize_t n = ::send(m_socket.get(), ptr, remaining, MSG_NOSIGNAL);
+            ssize_t n = ::send(
+                m_socket.get(),
+                ptr,
+                remaining,
+                MSG_NOSIGNAL
+            );
 
             if (n > 0)
             {
@@ -213,8 +242,8 @@ void TcpConnection::shutdownWrite()
     }
 
     m_state = m_state == TcpConnectionState::PeerHalfClosed
-        ? TcpConnectionState::WriteDrainingPeerClosed
-        : TcpConnectionState::WriteDraining;
+                  ? TcpConnectionState::WriteDrainingPeerClosed
+                  : TcpConnectionState::WriteDraining;
     if (m_outputBuffer.readableBytes() == 0)
     {
         finishShutdownWrite();
@@ -240,8 +269,8 @@ void TcpConnection::finishShutdownWrite()
     }
     catch (const std::system_error& error)
     {
-        std::cerr << "TcpConnection shutdown write failed fd="
-                  << fd() << ": " << error.what() << '\n';
+        std::cerr << "TcpConnection shutdown write failed fd=" << fd()
+                  << ": " << error.what() << '\n';
         handleClose();
         return;
     }

@@ -2,13 +2,14 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
-#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "net/Acceptor.h"
+#include "net/EventLoopThreadPool.h"
 #include "net/InetAddress.h"
-#include "net/TcpConnection.h"
 #include "net/TimerQueue.h"
 
 namespace service::gateway
@@ -23,52 +24,58 @@ enum class TcpServerState
 class TcpServer
 {
 public:
+    // Construct, query, stop and destroy on the base loop thread.
+    // The base loop must outlive the server. Zero workers uses base
+    // I/O.
     TcpServer(
         EventLoop* loop,
         const InetAddress& listenAddress,
         std::size_t maxConnections,
         std::chrono::milliseconds idleTimeout =
-            std::chrono::seconds(60)
+            std::chrono::seconds(60),
+        std::size_t workerCount = 0
     );
-    ~TcpServer();
+    ~TcpServer() noexcept;
 
     TcpServer(const TcpServer&) = delete;
     TcpServer& operator=(const TcpServer&) = delete;
 
-    // Call on the owning EventLoop thread. Stop accepting, send FIN
-    // after queued output, then force-close stragglers at the deadline.
-    void stop(
-        std::chrono::milliseconds grace = std::chrono::seconds(5)
-    );
-    // Read these on the owning EventLoop thread.
+    // Stop accepting, request FIN on connection owners, then force
+    // close stragglers at the deadline. Stopped includes worker
+    // cleanup and join; it does not quit the externally owned base
+    // loop.
+    void
+    stop(std::chrono::milliseconds grace = std::chrono::seconds(5));
+    // Read only on the base EventLoop thread. Count includes accepted
+    // sockets queued for worker registration until cleanup is
+    // acknowledged.
     bool stopped() const noexcept;
     std::size_t connectionCount() const noexcept;
     std::size_t maxConnections() const noexcept;
+    std::size_t workerCount() const noexcept;
 
 private:
-    void
-    handleNewConnection(Socket&& socket, const InetAddress& peer);
-    void handleConnectionClose(TcpConnection* connection);
-    void removeClosedConnections();
-    void handleSlowTimer();
-    void handleIdleTimer(int fd);
+    struct Worker;
+
+    void handleNewConnection(Socket&&, const InetAddress&);
+    void handleConnectionRemoved(std::uint64_t id);
     void handleStopTimeout();
     void finishStopIfDrained();
+    void cleanupWorkers();
 
     EventLoop* m_loop;
+    // The pool outlives worker state and all connection cleanup.
+    EventLoopThreadPool m_threadPool;
     Acceptor m_acceptor;
-    std::size_t m_maxConnections;
-    std::chrono::milliseconds m_idleTimeout;
-    TimerId m_slowTimerId{0};
+    const std::size_t m_maxConnections;
+    const std::size_t m_workerCount;
     TimerId m_stopTimerId{0};
     TcpServerState m_state{TcpServerState::Running};
-    std::shared_ptr<void> m_callbackGuard{
-        std::make_shared<int>(0)
-    };
-    std::unordered_map<int, std::shared_ptr<TcpConnection>>
-        m_connections;
-    std::unordered_map<int, TimerId> m_idleTimers;
-    std::unordered_set<int> m_pendingRemove;
-    bool m_removeTaskQueued{false};
+    std::shared_ptr<void> m_callbackGuard{std::make_shared<int>(0)};
+    std::vector<std::shared_ptr<Worker>> m_workers;
+    // IDs only; TcpConnection owners live in Worker.
+    // Only base mutates admission records; it never touches connections.
+    std::unordered_set<std::uint64_t> m_admissions;
+    std::uint64_t m_nextConnectionId{1};
 };
 } // namespace service::gateway

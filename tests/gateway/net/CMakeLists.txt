@@ -100,3 +100,18 @@ set_tests_properties(
 # Deterministic worker-construction failure without exhausting sanitizer FDs.
 # Only arena_tests wraps this OS call; production/performance binaries do not.
 target_link_options(arena_tests PRIVATE -Wl,--wrap=timerfd_create)
+
+# Repeat the networking acceptance on four actual worker Reactors.
+foreach(scenario churn limit slow stream idle rst stop stop_fast)
+    add_test(
+        NAME TcpServerWorkers_${scenario}
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
+            "$<TARGET_FILE:arena_tcp_server_test_host>"
+            ${scenario}
+            4
+    )
+    set_tests_properties(TcpServerWorkers_${scenario} PROPERTIES
+        TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;workers"
+    )
+endforeach()

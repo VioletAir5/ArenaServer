@@ -45,7 +45,7 @@ def connect(port):
     return client
 
 
-def run(binary, scenario):
+def run(binary, scenario, worker_count=0):
     port = reserve_port()
     log = tempfile.NamedTemporaryFile(
         prefix="arena-tcp-integration-", suffix=".log", delete=False
@@ -55,9 +55,10 @@ def run(binary, scenario):
         "ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1:abort_on_error=1"
     )
     environment.setdefault("UBSAN_OPTIONS", "halt_on_error=1")
-    command = [binary, str(port)]
-    if scenario == "idle":
-        command.append("1000")
+    command = [
+        binary, str(port), "1000" if scenario == "idle" else "60000",
+        str(worker_count),
+    ]
     def constrain_fds():
         resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
@@ -382,7 +383,9 @@ def run(binary, scenario):
         if server.returncode != 0:
             raise AssertionError(f"server exited {server.returncode}: {output[-2000:]}")
         if ("ERROR: AddressSanitizer" in output or "LeakSanitizer" in output
-                or "AddressSanitizer:DEADLYSIGNAL" in output):
+                or "AddressSanitizer:DEADLYSIGNAL" in output
+                or "WARNING: ThreadSanitizer" in output
+                or "runtime error:" in output):
             raise AssertionError(f"sanitizer error: {output[-2000:]}")
         if scenario == "limit" and "connection limit reached" not in output:
             raise AssertionError("missing explicit connection-limit log")
@@ -405,6 +408,6 @@ def run(binary, scenario):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|fd_limit|fd_limit_stop|slow|stream|idle|rst|stop|stop_fast")
-    run(sys.argv[1], sys.argv[2])
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit("usage: TcpServerIntegrationTest.py HOST churn|limit|fd_limit|fd_limit_stop|slow|stream|idle|rst|stop|stop_fast [WORKER_COUNT]")
+    run(sys.argv[1], sys.argv[2], int(sys.argv[3]) if len(sys.argv) == 4 else 0)

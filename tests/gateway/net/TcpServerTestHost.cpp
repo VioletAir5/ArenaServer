@@ -18,7 +18,7 @@
 // and stop the event loop cleanly, including under LeakSanitizer.
 int main(int argc, char** argv)
 {
-    if (argc != 2 && argc != 3)
+    if (argc < 2 || argc > 4)
     {
         return 2;
     }
@@ -91,13 +91,17 @@ int main(int argc, char** argv)
     {
         service::gateway::InetAddress address("127.0.0.1", port);
         const auto
-            idleTimeout = argc == 3
+            idleTimeout = argc >= 3
                               ? std::chrono::milliseconds(
                                     std::strtoul(argv[2], nullptr, 10)
                                 )
                               : std::chrono::seconds(60);
-        service::gateway::TcpServer
-            server(&loop, address, 1000, idleTimeout);
+        const auto workerCount = argc == 4
+                                     ? std::strtoul(argv[3], nullptr, 10)
+                                     : 0;
+        service::gateway::TcpServer server(
+            &loop, address, 1000, idleTimeout, workerCount
+        );
         serverPtr = &server;
         std::cerr << "TEST_HOST_READY" << std::endl;
         loop.loop();

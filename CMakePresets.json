@@ -104,13 +104,13 @@
         {
             "name": "gcc15-tsan",
             "configurePreset": "gcc15-tsan",
-            "description": "EventLoop, EventLoopThread and EventLoopThreadPool concurrency regressions; excludes fork/resource-limit tests.",
+            "description": "Reactor/TCP ownership and four-worker network acceptance; excludes GTest death and FD-exhaustion tests.",
             "output": {
                 "outputOnFailure": true
             },
             "filter": {
                 "include": {
-                    "name": "^(EventLoopThreadPoolTest|EventLoopThreadTest|EventLoopTest)\\."
+                    "name": "^(EventLoopThreadPoolTest|EventLoopThreadTest|EventLoopTest|TcpServerWorkerTest|TcpServerTest|TcpServerOwnershipTest|TcpConnectionTest|ConnectionCallbackTest)\\.|^TcpTermination/ConnectionOwnershipTest\\.|^TcpServerWorkers_"
                 }
             },
             "execution": {

@@ -35,7 +35,12 @@ public:
     static constexpr std::size_t kHardOutputLimit = kMaxBufferSize;
     static constexpr std::chrono::seconds kSlowClientTimeout{5};
 
+    // Construct/register on the owning loop. Transfer the Socket to
+    // that thread before construction; connection state and teardown
+    // stay there.
     TcpConnection(EventLoop*, Socket);
+    // Final release belongs to owner, after removing its Channel.
+    ~TcpConnection() noexcept;
 
     void handleRead();
     void handleWrite();
@@ -89,8 +94,7 @@ private:
 
     std::chrono::steady_clock::time_point m_highWaterSince{};
     std::chrono::steady_clock::time_point m_lastActivity{
-        std::chrono::steady_clock::now()
-    };
+        std::chrono::steady_clock::now()};
 
     TcpConnectionState m_state{TcpConnectionState::Connected};
     bool m_aboveHighWater{false};

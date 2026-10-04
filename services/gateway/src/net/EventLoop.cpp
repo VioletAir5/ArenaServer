@@ -158,16 +158,34 @@ std::size_t EventLoop::pendingTimerCount() const
 }
 void EventLoop::addChannel(Channel* channel)
 {
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "EventLoop::addChannel requires owner thread"
+        );
+    }
     m_poller.addChannel(channel);
 }
 
 void EventLoop::updateChannel(Channel* channel)
 {
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "EventLoop::updateChannel requires owner thread"
+        );
+    }
     m_poller.updateChannel(channel);
 }
 
 void EventLoop::removeChannel(Channel* channel)
 {
+    if (!isInLoopThread())
+    {
+        throw std::logic_error(
+            "EventLoop::removeChannel requires owner thread"
+        );
+    }
     m_poller.removeChannel(channel);
     // epoll DEL cannot retract events already copied by poll().
     // Keep the vector shape stable while a callback removes another
