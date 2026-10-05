@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -95,7 +94,6 @@ public:
     bool closing() const noexcept;
 
 private:
-    static std::uint64_t allocateId();
     void notifyHighWaterIfNeeded();
     void notifyLowWaterIfNeeded();
     void finishShutdownWrite();
@@ -123,6 +121,5 @@ private:
     bool m_aboveHighWater{false};
     bool m_readPaused{false};
 
-    static std::atomic_uint64_t m_nextId;
 };
 } // namespace service::gateway

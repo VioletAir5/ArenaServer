@@ -83,6 +83,20 @@ def run(binary, scenario, worker_count=0):
         wait_until(server, ready, "server startup")
         baseline = fd_count(server)
 
+        if scenario.startswith("fd_limit"):
+            # GCC UBSan's first RTTI probe may need a pipe. Exercise the
+            # complete read/write/EOF/cleanup path before filling the FD table,
+            # so the runtime can cache valid vtable checks while FDs are free.
+            with connect(port) as warmup:
+                warmup.sendall(b"warmup")
+                if warmup.recv(6) != b"warmup":
+                    raise AssertionError("resource-test warmup echo mismatch")
+                warmup.shutdown(socket.SHUT_WR)
+                if warmup.recv(1) != b"":
+                    raise AssertionError("resource-test warmup did not close")
+            wait_until(server, lambda: fd_count(server) == baseline,
+                       "resource-test warmup FD recovery")
+
         if scenario == "churn":
             for round_number in range(1, 4):
                 for _ in range(CAPACITY):

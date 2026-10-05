@@ -1,6 +1,14 @@
 #include <chrono>
+#include <csignal>
+#include <functional>
+#include <iostream>
 #include <memory>
+#include <string_view>
 
+#include <boost/asio/signal_set.hpp>
+#include <boost/asio/steady_timer.hpp>
+
+#include "net/AsioTcpServer.h"
 #include "net/EventLoop.h"
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
@@ -8,13 +16,68 @@
 
 using namespace service::gateway;
 
-int main()
+int main(int argc, char** argv)
 {
-    EventLoop loop;
+    const std::string_view backend = argc == 2 ? argv[1] : "epoll";
+    if (argc > 2 || (backend != "epoll" && backend != "asio"))
+    {
+        std::cerr << "Usage: ArenaServer [epoll|asio]\n";
+        return 2;
+    }
+    const InetAddress address("127.0.0.1", 8888);
+    if (backend == "epoll")
+    {
+        EventLoop loop;
+        std::unique_ptr<ITcpServer>
+            server = std::make_unique<TcpServer>(
+                &loop,
+                address,
+                1000,
+                std::chrono::seconds(60),
+                4
+            );
+        loop.loop();
+        return 0;
+    }
 
-    InetAddress addr("127.0.0.1", 8888);
-    std::unique_ptr<ITcpServer> server = std::make_unique<TcpServer>(
-        &loop, addr, 1000, std::chrono::seconds(60), 4);
-
-    loop.loop();
+    boost::asio::io_context context;
+    boost::asio::signal_set signals(context, SIGINT, SIGTERM);
+    boost::asio::steady_timer poll(context);
+    std::unique_ptr<ITcpServer>
+        server = std::make_unique<AsioTcpServer>(
+            context,
+            address,
+            1000,
+            std::chrono::seconds(60),
+            4
+        );
+    std::function<void()> waitStopped;
+    waitStopped = [&]
+    {
+        if (server->stopped())
+        {
+            return;
+        }
+        poll.expires_after(std::chrono::milliseconds(10));
+        poll.async_wait(
+            [&](auto error)
+            {
+                if (!error)
+                {
+                    waitStopped();
+                }
+            }
+        );
+    };
+    signals.async_wait(
+        [&](auto error, int)
+        {
+            if (!error)
+            {
+                server->stop();
+                waitStopped();
+            }
+        }
+    );
+    context.run();
 }

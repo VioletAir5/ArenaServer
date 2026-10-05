@@ -16,6 +16,8 @@
 #include "net/EventLoop.h"
 #include "net/Socket.h"
 
+#include "ConnectionId.h"
+
 namespace service::gateway
 {
 namespace
@@ -31,11 +33,9 @@ EventLoop* requireConnectionLoop(EventLoop* loop)
 }
 } // namespace
 
-std::atomic_uint64_t TcpConnection::m_nextId{1};
-
 TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
     : m_loop(requireConnectionLoop(loop))
-    , m_id(allocateId())
+    , m_id(detail::nextConnectionId())
     , m_socket(std::move(socket))
     , m_channel(m_socket.get())
 {
@@ -506,21 +506,6 @@ TcpConnection::lastActivity() const noexcept
 bool TcpConnection::closing() const noexcept
 {
     return m_state == TcpConnectionState::Disconnected;
-}
-
-std::uint64_t TcpConnection::allocateId()
-{
-    auto next = m_nextId.load(std::memory_order_relaxed);
-    while (next != 0)
-    {
-        // Zero is a permanent exhaustion sentinel, never a valid ID.
-        if (m_nextId.compare_exchange_weak(
-                next, next + 1, std::memory_order_relaxed))
-        {
-            return next;
-        }
-    }
-    throw std::overflow_error("connection identity exhausted");
 }
 
 void TcpConnection::notifyHighWaterIfNeeded()

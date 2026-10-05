@@ -41,8 +41,9 @@ public:
     // Resume delivery of already available bytes as well as future data.
     virtual void resumeRead() = 0;
 
-    // User-space output bytes awaiting a successful write. Excludes
-    // bytes already handed to the kernel.
+    // Output bytes whose successful write has not yet been observed.
+    // Async implementations include in-flight bytes until completion;
+    // excludes bytes already acknowledged by a successful write result.
     virtual std::size_t pendingBytes() const noexcept = 0;
 };
 } // namespace service::gateway

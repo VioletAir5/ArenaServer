@@ -115,3 +115,22 @@ foreach(scenario churn limit slow stream idle rst stop stop_fast)
         TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;workers"
     )
 endforeach()
+
+add_executable(arena_asio_tcp_server_test_host AsioTcpServerTestHost.cpp)
+target_link_libraries(arena_asio_tcp_server_test_host PRIVATE arena_gateway)
+target_compile_options(arena_asio_tcp_server_test_host PRIVATE
+    -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_asio_tcp_server_test_host PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+add_dependencies(arena_tests arena_asio_tcp_server_test_host)
+foreach(workers 0 4)
+    foreach(scenario churn limit slow stream idle rst stop stop_fast fd_limit fd_limit_stop)
+        add_test(NAME AsioTcpServer_${scenario}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/TcpServerIntegrationTest.py"
+                "$<TARGET_FILE:arena_asio_tcp_server_test_host>" ${scenario} ${workers})
+        set_tests_properties(AsioTcpServer_${scenario}_${workers} PROPERTIES
+            TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;asio")
+    endforeach()
+endforeach()
