@@ -1,12 +1,15 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string_view>
 
 #include "net/Channel.h"
 #include "net/EventLoop.h"
+#include "net/IConnection.h"
 #include "net/PacketBuffer.h"
 #include "net/Socket.h"
 
@@ -21,14 +24,13 @@ enum struct TcpConnectionState
     WriteHalfClosed,
     Disconnected
 };
-class TcpConnection
+
+class TcpConnection final : public IConnection
 {
 public:
     using CloseCallback = std::function<void(TcpConnection*)>;
-    using MessageCallback = std::function<
-        void(TcpConnection&, std::string_view)>;
-    using WatermarkCallback = std::function<
-        void(TcpConnection&, std::size_t)>;
+    using MessageCallback = std::function<void(TcpConnection&, std::string_view)>;
+    using WatermarkCallback = std::function<void(TcpConnection&, std::size_t)>;
 
     static constexpr std::size_t kLowWaterMark = 256 * 1024;
     static constexpr std::size_t kHighWaterMark = 512 * 1024;
@@ -40,8 +42,29 @@ public:
     // stay there.
     TcpConnection(EventLoop*, Socket);
     // Final release belongs to owner, after removing its Channel.
-    ~TcpConnection() noexcept;
+    ~TcpConnection() noexcept override;
 
+    TcpConnection(const TcpConnection&) = delete;
+    TcpConnection(TcpConnection&&) = delete;
+    TcpConnection& operator=(const TcpConnection&) = delete;
+    TcpConnection& operator=(TcpConnection&&) = delete;
+
+    // IConnection operations run on the owning EventLoop thread,
+    // except the immutable id(). No automatic cross-thread dispatch.
+    // Process-wide identity, distinct from server-local admission tickets.
+    std::uint64_t id() const noexcept override;
+    void send(std::span<const std::byte> data) override;
+    void shutdown() override;
+    void close() override;
+    bool connected() const noexcept override;
+    void pauseRead() override;
+    void resumeRead() override;
+    std::size_t pendingBytes() const noexcept override;
+
+    // Compatibility overload for existing byte-pointer callers.
+    void send(const void* data, std::size_t length);
+
+    // Event dispatch on the owner thread.
     void handleRead();
     void handleWrite();
     void handleClose();
@@ -57,7 +80,6 @@ public:
     void setHighWaterMarkCallback(WatermarkCallback);
     void setLowWaterMarkCallback(WatermarkCallback);
 
-    void send(const void* data, size_t len);
     // Owner EventLoop thread only. Flush queued bytes, then send FIN;
     // keep reading until the peer also closes its write half.
     void shutdownWrite();
@@ -69,17 +91,18 @@ public:
     int fd() const noexcept;
     // Read only on the owning EventLoop thread.
     std::size_t pendingOutputBytes() const noexcept;
-    std::chrono::steady_clock::time_point
-    lastActivity() const noexcept;
+    std::chrono::steady_clock::time_point lastActivity() const noexcept;
     bool closing() const noexcept;
 
 private:
+    static std::uint64_t allocateId();
     void notifyHighWaterIfNeeded();
     void notifyLowWaterIfNeeded();
     void finishShutdownWrite();
     void handleIoError(int error);
 
     EventLoop* m_loop;
+    const std::uint64_t m_id;
 
     CloseCallback m_closeCallback;
     MessageCallback m_messageCallback;
@@ -99,5 +122,7 @@ private:
     TcpConnectionState m_state{TcpConnectionState::Connected};
     bool m_aboveHighWater{false};
     bool m_readPaused{false};
+
+    static std::atomic_uint64_t m_nextId;
 };
 } // namespace service::gateway

@@ -4,6 +4,8 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <stdexcept>
@@ -29,8 +31,11 @@ EventLoop* requireConnectionLoop(EventLoop* loop)
 }
 } // namespace
 
+std::atomic_uint64_t TcpConnection::m_nextId{1};
+
 TcpConnection::TcpConnection(EventLoop* loop, Socket socket)
     : m_loop(requireConnectionLoop(loop))
+    , m_id(allocateId())
     , m_socket(std::move(socket))
     , m_channel(m_socket.get())
 {
@@ -61,6 +66,125 @@ TcpConnection::~TcpConnection() noexcept
         // owner.
         std::terminate();
     }
+}
+
+std::uint64_t TcpConnection::id() const noexcept
+{
+    return m_id;
+}
+
+void TcpConnection::send(std::span<const std::byte> data)
+{
+    if ((m_state != TcpConnectionState::Connected &&
+         m_state != TcpConnectionState::PeerHalfClosed) ||
+        data.size() == 0)
+    {
+        return;
+    }
+
+    const char* ptr = reinterpret_cast<const char*>(data.data());
+
+    size_t remaining = data.size();
+
+    // 如果现在没有积压数据，
+    // 可以先尝试直接 write。
+    if (m_outputBuffer.readableBytes() == 0)
+    {
+        while (true)
+        {
+            ssize_t n = ::send(
+                m_socket.get(),
+                ptr,
+                remaining,
+                MSG_NOSIGNAL
+            );
+
+            if (n > 0)
+            {
+                m_lastActivity = std::chrono::steady_clock::now();
+                ptr += n;
+                remaining -= static_cast<size_t>(n);
+
+                if (remaining == 0)
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            if (n < 0 && errno == EINTR)
+            {
+                continue;
+            }
+
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            {
+                break;
+            }
+
+            handleIoError(errno);
+            return;
+        }
+    }
+
+    if (remaining > 0)
+    {
+        if (remaining >
+                kHardOutputLimit - m_outputBuffer.readableBytes() ||
+            !m_outputBuffer.append(ptr, remaining))
+        {
+            std::cerr << "TcpConnection output limit reached fd="
+                      << fd() << '\n';
+            handleClose();
+            return;
+        }
+
+        notifyHighWaterIfNeeded();
+        if (m_state == TcpConnectionState::Disconnected)
+        {
+            return;
+        }
+        if (!m_channel.isWriting())
+        {
+            m_channel.enableWriting();
+        }
+    }
+}
+
+void TcpConnection::shutdown()
+{
+    shutdownWrite();
+}
+
+void TcpConnection::close()
+{
+    handleClose();
+}
+
+bool TcpConnection::connected() const noexcept
+{
+    return m_state != TcpConnectionState::Disconnected;
+}
+
+void TcpConnection::pauseRead()
+{
+    pauseReading();
+}
+
+void TcpConnection::resumeRead()
+{
+    resumeReading();
+}
+
+std::size_t TcpConnection::pendingBytes() const noexcept
+{
+    return pendingOutputBytes();
+}
+
+void TcpConnection::send(const void* data, std::size_t length)
+{
+    send(std::as_bytes(std::span(static_cast<const char*>(data), length)));
 }
 
 void TcpConnection::handleRead()
@@ -154,139 +278,6 @@ void TcpConnection::handleRead()
         return;
     }
 }
-void TcpConnection::send(const void* data, size_t len)
-{
-    if ((m_state != TcpConnectionState::Connected &&
-         m_state != TcpConnectionState::PeerHalfClosed) ||
-        len == 0)
-    {
-        return;
-    }
-
-    const char* ptr = static_cast<const char*>(data);
-
-    size_t remaining = len;
-
-    // 如果现在没有积压数据，
-    // 可以先尝试直接 write。
-    if (m_outputBuffer.readableBytes() == 0)
-    {
-        while (true)
-        {
-            ssize_t n = ::send(
-                m_socket.get(),
-                ptr,
-                remaining,
-                MSG_NOSIGNAL
-            );
-
-            if (n > 0)
-            {
-                m_lastActivity = std::chrono::steady_clock::now();
-                ptr += n;
-                remaining -= static_cast<size_t>(n);
-
-                if (remaining == 0)
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (n < 0 && errno == EINTR)
-            {
-                continue;
-            }
-
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-            {
-                break;
-            }
-
-            handleIoError(errno);
-            return;
-        }
-    }
-
-    if (remaining > 0)
-    {
-        if (remaining >
-                kHardOutputLimit - m_outputBuffer.readableBytes() ||
-            !m_outputBuffer.append(ptr, remaining))
-        {
-            std::cerr << "TcpConnection output limit reached fd="
-                      << fd() << '\n';
-            handleClose();
-            return;
-        }
-
-        notifyHighWaterIfNeeded();
-        if (m_state == TcpConnectionState::Disconnected)
-        {
-            return;
-        }
-        if (!m_channel.isWriting())
-        {
-            m_channel.enableWriting();
-        }
-    }
-}
-
-void TcpConnection::shutdownWrite()
-{
-    if (m_state != TcpConnectionState::Connected &&
-        m_state != TcpConnectionState::PeerHalfClosed)
-    {
-        return;
-    }
-
-    m_state = m_state == TcpConnectionState::PeerHalfClosed
-                  ? TcpConnectionState::WriteDrainingPeerClosed
-                  : TcpConnectionState::WriteDraining;
-    if (m_outputBuffer.readableBytes() == 0)
-    {
-        finishShutdownWrite();
-    }
-    else if (!m_channel.isWriting())
-    {
-        m_channel.enableWriting();
-    }
-}
-
-void TcpConnection::finishShutdownWrite()
-{
-    if ((m_state != TcpConnectionState::WriteDraining &&
-         m_state != TcpConnectionState::WriteDrainingPeerClosed) ||
-        m_outputBuffer.readableBytes() != 0)
-    {
-        return;
-    }
-
-    try
-    {
-        m_socket.shutdownWrite();
-    }
-    catch (const std::system_error& error)
-    {
-        std::cerr << "TcpConnection shutdown write failed fd=" << fd()
-                  << ": " << error.what() << '\n';
-        handleClose();
-        return;
-    }
-
-    if (m_state == TcpConnectionState::WriteDrainingPeerClosed)
-    {
-        handleClose();
-        return;
-    }
-
-    m_state = TcpConnectionState::WriteHalfClosed;
-    if (m_channel.isWriting())
-    {
-        m_channel.disableWriting();
-    }
-}
 
 void TcpConnection::handleWrite()
 {
@@ -351,6 +342,98 @@ void TcpConnection::handleWrite()
     }
 }
 
+void TcpConnection::handleClose()
+{
+    if (m_state == TcpConnectionState::Disconnected)
+    {
+        return;
+    }
+
+    m_state = TcpConnectionState::Disconnected;
+
+    // 不在这里 close(fd)
+    // 不在这里 removeChannel()
+    // 不在这里 delete this
+
+    if (m_closeCallback)
+    {
+        m_closeCallback(this);
+    }
+}
+
+void TcpConnection::handleError()
+{
+    if (m_state == TcpConnectionState::Disconnected)
+    {
+        return;
+    }
+
+    int error = 0;
+    socklen_t len = sizeof(error);
+
+    if (::getsockopt(
+            m_socket.get(),
+            SOL_SOCKET,
+            SO_ERROR,
+            &error,
+            &len
+        ) < 0)
+    {
+        error = errno;
+    }
+
+    if (error == 0)
+    {
+        // EPOLLHUP without SO_ERROR can be an orderly close. Drain
+        // readable bytes/EOF instead of discarding pending output.
+        handleRead();
+        return;
+    }
+
+    handleIoError(error);
+}
+
+void TcpConnection::setCloseCallback(CloseCallback cb)
+{
+    m_closeCallback = std::move(cb);
+}
+
+void TcpConnection::setMessageCallback(MessageCallback cb)
+{
+    m_messageCallback = std::move(cb);
+}
+
+void TcpConnection::setHighWaterMarkCallback(WatermarkCallback cb)
+{
+    m_highWaterMarkCallback = std::move(cb);
+}
+
+void TcpConnection::setLowWaterMarkCallback(WatermarkCallback cb)
+{
+    m_lowWaterMarkCallback = std::move(cb);
+}
+
+void TcpConnection::shutdownWrite()
+{
+    if (m_state != TcpConnectionState::Connected &&
+        m_state != TcpConnectionState::PeerHalfClosed)
+    {
+        return;
+    }
+
+    m_state = m_state == TcpConnectionState::PeerHalfClosed
+                  ? TcpConnectionState::WriteDrainingPeerClosed
+                  : TcpConnectionState::WriteDraining;
+    if (m_outputBuffer.readableBytes() == 0)
+    {
+        finishShutdownWrite();
+    }
+    else if (!m_channel.isWriting())
+    {
+        m_channel.enableWriting();
+    }
+}
+
 void TcpConnection::pauseReading()
 {
     if (m_state == TcpConnectionState::Disconnected ||
@@ -381,6 +464,63 @@ void TcpConnection::resumeReading()
     // Re-enabling EPOLLIN in ET mode may not create another edge for
     // bytes already in the socket. Drain them before returning.
     handleRead();
+}
+
+void TcpConnection::closeIfSlow(
+    std::chrono::steady_clock::time_point now
+)
+{
+    if (m_state == TcpConnectionState::Disconnected ||
+        !m_aboveHighWater ||
+        now - m_highWaterSince < kSlowClientTimeout)
+    {
+        return;
+    }
+
+    std::cerr << "TcpConnection slow client timeout fd=" << fd()
+              << '\n';
+    handleClose();
+}
+
+Channel& TcpConnection::channel() noexcept
+{
+    return m_channel;
+}
+
+int TcpConnection::fd() const noexcept
+{
+    return m_socket.get();
+}
+
+std::size_t TcpConnection::pendingOutputBytes() const noexcept
+{
+    return m_outputBuffer.readableBytes();
+}
+
+std::chrono::steady_clock::time_point
+TcpConnection::lastActivity() const noexcept
+{
+    return m_lastActivity;
+}
+
+bool TcpConnection::closing() const noexcept
+{
+    return m_state == TcpConnectionState::Disconnected;
+}
+
+std::uint64_t TcpConnection::allocateId()
+{
+    auto next = m_nextId.load(std::memory_order_relaxed);
+    while (next != 0)
+    {
+        // Zero is a permanent exhaustion sentinel, never a valid ID.
+        if (m_nextId.compare_exchange_weak(
+                next, next + 1, std::memory_order_relaxed))
+        {
+            return next;
+        }
+    }
+    throw std::overflow_error("connection identity exhausted");
 }
 
 void TcpConnection::notifyHighWaterIfNeeded()
@@ -417,52 +557,38 @@ void TcpConnection::notifyLowWaterIfNeeded()
     }
 }
 
-void TcpConnection::closeIfSlow(
-    std::chrono::steady_clock::time_point now
-)
+void TcpConnection::finishShutdownWrite()
 {
-    if (m_state == TcpConnectionState::Disconnected ||
-        !m_aboveHighWater ||
-        now - m_highWaterSince < kSlowClientTimeout)
+    if ((m_state != TcpConnectionState::WriteDraining &&
+         m_state != TcpConnectionState::WriteDrainingPeerClosed) ||
+        m_outputBuffer.readableBytes() != 0)
     {
         return;
     }
 
-    std::cerr << "TcpConnection slow client timeout fd=" << fd()
-              << '\n';
-    handleClose();
-}
-
-void TcpConnection::handleError()
-{
-    if (m_state == TcpConnectionState::Disconnected)
+    try
     {
+        m_socket.shutdownWrite();
+    }
+    catch (const std::system_error& error)
+    {
+        std::cerr << "TcpConnection shutdown write failed fd=" << fd()
+                  << ": " << error.what() << '\n';
+        handleClose();
         return;
     }
 
-    int error = 0;
-    socklen_t len = sizeof(error);
-
-    if (::getsockopt(
-            m_socket.get(),
-            SOL_SOCKET,
-            SO_ERROR,
-            &error,
-            &len
-        ) < 0)
+    if (m_state == TcpConnectionState::WriteDrainingPeerClosed)
     {
-        error = errno;
-    }
-
-    if (error == 0)
-    {
-        // EPOLLHUP without SO_ERROR can be an orderly close. Drain
-        // readable bytes/EOF instead of discarding pending output.
-        handleRead();
+        handleClose();
         return;
     }
 
-    handleIoError(error);
+    m_state = TcpConnectionState::WriteHalfClosed;
+    if (m_channel.isWriting())
+    {
+        m_channel.disableWriting();
+    }
 }
 
 void TcpConnection::handleIoError(int error)
@@ -483,69 +609,5 @@ void TcpConnection::handleIoError(int error)
                   << ", error=" << error << '\n';
     }
     handleClose();
-}
-
-void TcpConnection::handleClose()
-{
-    if (m_state == TcpConnectionState::Disconnected)
-    {
-        return;
-    }
-
-    m_state = TcpConnectionState::Disconnected;
-
-    // 不在这里 close(fd)
-    // 不在这里 removeChannel()
-    // 不在这里 delete this
-
-    if (m_closeCallback)
-    {
-        m_closeCallback(this);
-    }
-}
-
-void TcpConnection::setCloseCallback(CloseCallback cb)
-{
-    m_closeCallback = std::move(cb);
-}
-
-void TcpConnection::setMessageCallback(MessageCallback cb)
-{
-    m_messageCallback = std::move(cb);
-}
-
-void TcpConnection::setHighWaterMarkCallback(WatermarkCallback cb)
-{
-    m_highWaterMarkCallback = std::move(cb);
-}
-
-void TcpConnection::setLowWaterMarkCallback(WatermarkCallback cb)
-{
-    m_lowWaterMarkCallback = std::move(cb);
-}
-
-Channel& TcpConnection::channel() noexcept
-{
-    return m_channel;
-}
-
-int TcpConnection::fd() const noexcept
-{
-    return m_socket.get();
-}
-
-std::size_t TcpConnection::pendingOutputBytes() const noexcept
-{
-    return m_outputBuffer.readableBytes();
-}
-std::chrono::steady_clock::time_point
-TcpConnection::lastActivity() const noexcept
-{
-    return m_lastActivity;
-}
-
-bool TcpConnection::closing() const noexcept
-{
-    return m_state == TcpConnectionState::Disconnected;
 }
 } // namespace service::gateway
