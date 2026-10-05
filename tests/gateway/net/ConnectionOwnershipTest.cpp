@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "net/EventLoop.h"
+#include "net/ITcpServer.h"
 #include "net/InetAddress.h"
 #include "net/Socket.h"
 #include "net/TcpConnection.h"
@@ -281,7 +282,8 @@ TEST(TcpServerOwnershipTest, QueuedRemovalIsSafeAfterServerDestruction)
     reservation.close();
 
     EventLoop loop;
-    auto server = std::make_unique<TcpServer>(&loop, address, 4);
+    std::unique_ptr<service::gateway::ITcpServer> server =
+        std::make_unique<TcpServer>(&loop, address, 4);
     Socket peer = Socket::createTcp();
     ASSERT_EQ(::connect(peer.get(), address.sockaddrPtr(),
                         address.length()), 0);

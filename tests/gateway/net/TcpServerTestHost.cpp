@@ -10,6 +10,7 @@
 
 #include "net/Channel.h"
 #include "net/EventLoop.h"
+#include "net/ITcpServer.h"
 #include "net/InetAddress.h"
 #include "net/TcpServer.h"
 #include "os/FileDescriptor.h"
@@ -41,7 +42,7 @@ int main(int argc, char** argv)
     }
 
     service::gateway::EventLoop loop;
-    service::gateway::TcpServer* serverPtr = nullptr;
+    service::gateway::ITcpServer* serverPtr = nullptr;
     service::gateway::TimerId stopPollId = 0;
     service::gateway::Channel stopChannel(stopFd.get());
     stopChannel.setEvents(EPOLLIN);

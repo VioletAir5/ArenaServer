@@ -1,3 +1,5 @@
+#include "net/ITcpServer.h"
+
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -99,8 +101,11 @@ TEST(TcpServerWorkerTest, StopsAndJoinsIdlePoolBeforeReportingStopped)
     EventLoop base;
     const auto baseline = openFds();
     {
-        TcpServer server(&base, InetAddress(0, true), 16, 60s, 4);
+        TcpServer implementation(&base, InetAddress(0, true), 16, 60s, 4);
+        ITcpServer& server = implementation;
         EXPECT_EQ(server.workerCount(), 4u);
+        EXPECT_EQ(server.maxConnections(), 16u);
+        EXPECT_EQ(server.connectionCount(), 0u);
         EXPECT_FALSE(server.stopped());
         EXPECT_EQ(
             openFds(),
@@ -126,7 +131,7 @@ TEST(
         EventLoop base;
         std::vector<Socket> peers;
         const auto address = unusedAddress();
-        auto server = std::make_unique<TcpServer>(
+        std::unique_ptr<ITcpServer> server = std::make_unique<TcpServer>(
             &base,
             address,
             128,
@@ -188,7 +193,8 @@ TEST(
     EventLoop base;
     const auto address = unusedAddress();
     std::vector<Socket> peers;
-    TcpServer server(&base, address, 16, 60s, 4);
+    TcpServer implementation(&base, address, 16, 60s, 4);
+    ITcpServer& server = implementation;
     for (int i = 0; i < 8; ++i)
     {
         peers.push_back(connectTo(address));
@@ -294,4 +300,19 @@ TEST(
         testing::ExitedWithCode(0),
         ""
     );
+}
+
+TEST(ITcpServerTest, NegativeGraceDoesNotChangeRunningState)
+{
+    EventLoop base;
+    std::unique_ptr<ITcpServer> server = std::make_unique<TcpServer>(
+        &base, InetAddress(0, true), 4);
+
+    EXPECT_EQ(server->workerCount(), 0u);
+    EXPECT_THROW(server->stop(-1ms), std::invalid_argument);
+    EXPECT_FALSE(server->stopped());
+    EXPECT_EQ(server->connectionCount(), 0u);
+    server->stop(0ms);
+    EXPECT_TRUE(server->stopped());
+    EXPECT_NO_THROW(server->stop());
 }

@@ -10,6 +10,7 @@
 #include "net/Acceptor.h"
 #include "net/EventLoopThreadPool.h"
 #include "net/InetAddress.h"
+#include "net/ITcpServer.h"
 #include "net/TimerQueue.h"
 
 namespace service::gateway
@@ -21,7 +22,7 @@ enum class TcpServerState
     Stopped
 };
 
-class TcpServer
+class TcpServer final : public ITcpServer
 {
 public:
     // Construct, query, stop and destroy on the base loop thread.
@@ -35,7 +36,7 @@ public:
             std::chrono::seconds(60),
         std::size_t workerCount = 0
     );
-    ~TcpServer() noexcept;
+    ~TcpServer() noexcept override;
 
     TcpServer(const TcpServer&) = delete;
     TcpServer& operator=(const TcpServer&) = delete;
@@ -44,15 +45,15 @@ public:
     // close stragglers at the deadline. Stopped includes worker
     // cleanup and join; it does not quit the externally owned base
     // loop.
-    void
-    stop(std::chrono::milliseconds grace = std::chrono::seconds(5));
+    void stop(
+        std::chrono::milliseconds grace = kDefaultStopGrace) override;
     // Read only on the base EventLoop thread. Count includes accepted
     // sockets queued for worker registration until cleanup is
     // acknowledged.
-    bool stopped() const noexcept;
-    std::size_t connectionCount() const noexcept;
-    std::size_t maxConnections() const noexcept;
-    std::size_t workerCount() const noexcept;
+    bool stopped() const noexcept override;
+    std::size_t connectionCount() const noexcept override;
+    std::size_t maxConnections() const noexcept override;
+    std::size_t workerCount() const noexcept override;
 
 private:
     struct Worker;
