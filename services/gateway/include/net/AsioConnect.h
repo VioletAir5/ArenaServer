@@ -66,6 +66,26 @@ private:
     using ReadBuffer = std::array<std::byte, 8192>;
     using WriteBuffer = std::vector<std::byte>;
 
+    // TCP half-close lifecycle; start() is an independent activation step.
+    enum class State
+    {
+        Connected,
+        PeerHalfClosed,
+        WriteDraining,
+        WriteDrainingPeerClosed,
+        WriteHalfClosed,
+        Closed
+    };
+
+    // A completed read may wait here while delivery is paused.
+    enum class ReadState
+    {
+        Idle,
+        InFlight,
+        Ready,
+        Delivering
+    };
+
     void requireOwner() const;
     void readNext();
     void deliverRead();
@@ -97,16 +117,11 @@ private:
     std::size_t m_frontOffset{0};
     std::size_t m_pendingBytes{0};
 
+    State m_state{State::Connected};
     bool m_started{false};
-    bool m_closed{false};
+    ReadState m_readState{ReadState::Idle};
     bool m_readPaused{false};
-    bool m_reading{false};
-    bool m_readReady{false};
-    bool m_delivering{false};
     bool m_writing{false};
-    bool m_shutdownRequested{false};
-    bool m_writeHalfClosed{false};
-    bool m_peerHalfClosed{false};
     bool m_aboveHighWater{false};
 };
 } // namespace service::gateway

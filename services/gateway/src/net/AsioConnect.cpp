@@ -63,7 +63,8 @@ std::uint64_t AsioConnect::id() const noexcept
 void AsioConnect::send(std::span<const std::byte> bytes)
 {
     requireOwner();
-    if (m_closed || m_shutdownRequested || bytes.empty())
+    if ((m_state != State::Connected &&
+         m_state != State::PeerHalfClosed) || bytes.empty())
     {
         return;
     }
@@ -100,30 +101,33 @@ void AsioConnect::send(std::span<const std::byte> bytes)
 void AsioConnect::shutdown()
 {
     requireOwner();
-    if (m_closed || m_shutdownRequested)
+    if (m_state != State::Connected &&
+        m_state != State::PeerHalfClosed)
     {
         return;
     }
-    m_shutdownRequested = true;
+    m_state = m_state == State::PeerHalfClosed
+                  ? State::WriteDrainingPeerClosed
+                  : State::WriteDraining;
     finishWrite();
 }
 
 void AsioConnect::close()
 {
     requireOwner();
-    if (m_closed)
+    if (m_state == State::Closed)
     {
         return;
     }
     auto keepAlive = weak_from_this().lock();
-    m_closed = true;
+    m_state = State::Closed;
     boost::system::error_code ignored;
     m_socket.close(ignored);
     m_idleTimer.cancel(ignored);
     m_slowTimer.cancel(ignored);
     m_output.clear();
     m_frontOffset = m_pendingBytes = 0;
-    m_readReady = false;
+    m_readState = ReadState::Idle;
     // Completion handlers retain buffers, never the connection.
     // Notify once; the server defers map erasure until this dispatch
     // has returned.
@@ -148,7 +152,7 @@ void AsioConnect::close()
 
 bool AsioConnect::connected() const noexcept
 {
-    return !m_closed;
+    return m_state != State::Closed;
 }
 
 void AsioConnect::pauseRead()
@@ -162,7 +166,7 @@ void AsioConnect::resumeRead()
     requireOwner();
     auto keepAlive = weak_from_this().lock();
     m_readPaused = false;
-    if (m_readReady && !m_delivering)
+    if (m_readState == ReadState::Ready)
     {
         deliverRead();
     }
@@ -198,7 +202,7 @@ void AsioConnect::setCloseCallback(CloseCallback callback)
 void AsioConnect::start()
 {
     requireOwner();
-    if (m_started || m_closed)
+    if (m_started || m_state == State::Closed)
     {
         return;
     }
@@ -234,12 +238,15 @@ void AsioConnect::requireOwner() const
 
 void AsioConnect::readNext()
 {
-    if (!m_started || m_closed || m_peerHalfClosed || m_readPaused ||
-        m_reading || m_readReady || m_delivering)
+    if (!m_started ||
+        (m_state != State::Connected &&
+         m_state != State::WriteDraining &&
+         m_state != State::WriteHalfClosed) ||
+        m_readPaused || m_readState != ReadState::Idle)
     {
         return;
     }
-    m_reading = true;
+    m_readState = ReadState::InFlight;
     auto buffer = m_input;
     m_socket.async_read_some(
         boost::asio::buffer(*buffer),
@@ -247,14 +254,13 @@ void AsioConnect::readNext()
          buffer](boost::system::error_code error, std::size_t bytes)
         {
             auto self = weak.lock();
-            if (!self || self->m_closed)
+            if (!self || self->m_state == State::Closed)
             {
                 return;
             }
-            self->m_reading = false;
             self->m_readBytes = bytes;
             self->m_readError = error;
-            self->m_readReady = true;
+            self->m_readState = ReadState::Ready;
             if (bytes != 0)
             {
                 self->m_lastActivity = Clock::now();
@@ -269,14 +275,14 @@ void AsioConnect::readNext()
 
 void AsioConnect::deliverRead()
 {
-    if (m_closed || !m_readReady || m_readPaused || m_delivering)
+    if (m_state == State::Closed ||
+        m_readState != ReadState::Ready || m_readPaused)
     {
         return;
     }
     const auto bytes = m_readBytes;
     const auto error = m_readError;
-    m_readReady = false;
-    m_delivering = true;
+    m_readState = ReadState::Delivering;
     if (bytes != 0 && m_messageCallback)
     {
         auto callback = m_messageCallback;
@@ -298,14 +304,21 @@ void AsioConnect::deliverRead()
             close();
         }
     }
-    m_delivering = false;
-    if (m_closed)
+    m_readState = ReadState::Idle;
+    if (m_state == State::Closed)
     {
         return;
     }
     if (error == boost::asio::error::eof)
     {
-        m_peerHalfClosed = true;
+        if (m_state == State::WriteHalfClosed)
+        {
+            close();
+            return;
+        }
+        m_state = m_state == State::WriteDraining
+                      ? State::WriteDrainingPeerClosed
+                      : State::PeerHalfClosed;
         finishWrite();
     }
     else if (error)
@@ -320,7 +333,8 @@ void AsioConnect::deliverRead()
 
 void AsioConnect::writeNext()
 {
-    if (!m_started || m_closed || m_writing || m_output.empty())
+    if (!m_started || m_state == State::Closed ||
+        m_writing || m_output.empty())
     {
         return;
     }
@@ -336,7 +350,7 @@ void AsioConnect::writeNext()
          buffer](boost::system::error_code error, std::size_t bytes)
         {
             auto self = weak.lock();
-            if (!self || self->m_closed)
+            if (!self || self->m_state == State::Closed)
             {
                 return;
             }
@@ -366,11 +380,12 @@ void AsioConnect::writeNext()
 
 void AsioConnect::finishWrite()
 {
-    if (m_closed || m_pendingBytes != 0)
+    if (m_state == State::Closed || m_pendingBytes != 0)
     {
         return;
     }
-    if (m_shutdownRequested && !m_writeHalfClosed)
+    if (m_state == State::WriteDraining ||
+        m_state == State::WriteDrainingPeerClosed)
     {
         boost::system::error_code error;
         m_socket.shutdown(
@@ -382,9 +397,14 @@ void AsioConnect::finishWrite()
             ioError(error);
             return;
         }
-        m_writeHalfClosed = true;
+        if (m_state == State::WriteDrainingPeerClosed)
+        {
+            close();
+            return;
+        }
+        m_state = State::WriteHalfClosed;
     }
-    if (m_peerHalfClosed)
+    if (m_state == State::PeerHalfClosed)
     {
         close();
     }
@@ -392,7 +412,7 @@ void AsioConnect::finishWrite()
 
 void AsioConnect::updateWatermark()
 {
-    if (m_closed)
+    if (m_state == State::Closed)
     {
         return;
     }
@@ -407,7 +427,7 @@ void AsioConnect::updateWatermark()
             [weak = weak_from_this(), phase](auto error)
             {
                 auto self = weak.lock();
-                if (!error && self && !self->m_closed &&
+                if (!error && self && self->m_state != State::Closed &&
                     self->m_aboveHighWater &&
                     self->m_highWaterSince == phase)
                 {
@@ -451,7 +471,7 @@ void AsioConnect::armIdleTimer()
         [weak = weak_from_this()](auto error)
         {
             auto self = weak.lock();
-            if (error || !self || self->m_closed)
+            if (error || !self || self->m_state == State::Closed)
             {
                 return;
             }

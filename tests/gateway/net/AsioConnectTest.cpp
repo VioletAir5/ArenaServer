@@ -125,6 +125,27 @@ TEST_F(AsioConnectTest, PausedInFlightReadIsDeliveredOnResume)
     EXPECT_EQ(received, "held bytes next");
 }
 
+TEST_F(AsioConnectTest, QueuedSendAndShutdownBeforeStartDrainAfterStart)
+{
+    const std::string payload = "queued before start";
+    connection->send(std::as_bytes(std::span(payload)));
+    connection->shutdown();
+    EXPECT_EQ(connection->pendingBytes(), payload.size());
+
+    connection->start();
+    pump();
+    EXPECT_EQ(receivePeer(), payload);
+    char byte;
+    boost::system::error_code error;
+    peer.read_some(boost::asio::buffer(&byte, 1), error);
+    EXPECT_EQ(error, boost::asio::error::eof);
+    EXPECT_TRUE(connection->connected());
+
+    peer.shutdown(Tcp::socket::shutdown_send);
+    pump();
+    EXPECT_FALSE(connection->connected());
+}
+
 TEST_F(AsioConnectTest, ShutdownDrainsAndStillReceivesUntilPeerFin)
 {
     std::string received;
