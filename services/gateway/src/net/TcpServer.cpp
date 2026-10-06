@@ -45,10 +45,12 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     Worker(
         EventLoop* owner,
         std::chrono::milliseconds timeout,
+        ConnectionHandlerFactory factory,
         RemovedCallback removed
     )
         : loop(owner)
         , idleTimeout(timeout)
+        , handlerFactory(std::move(factory))
         , onRemoved(std::move(removed))
     {
     }
@@ -77,10 +79,23 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
                 std::move(socket)
             );
             connection->channel().tie(connection);
+            auto handler = handlerFactory
+                               ? handlerFactory()
+                               : ConnectionMessageCallback(
+                                     [](IConnection& conn, auto bytes)
+                                     { conn.send(bytes); }
+                                 );
+            if (!handler)
+            {
+                throw std::invalid_argument("empty connection handler"
+                );
+            }
             connection->setMessageCallback(
-                [](TcpConnection& conn, std::string_view bytes)
-                { conn.send(bytes.data(), bytes.size()); }
+                [handler = std::move(handler
+                 )](TcpConnection& conn, std::string_view bytes)
+                { handler(conn, std::as_bytes(std::span(bytes))); }
             );
+
             connection->setHighWaterMarkCallback(
                 [](TcpConnection& conn, std::size_t)
                 { conn.pauseReading(); }
@@ -260,6 +275,7 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
 
     EventLoop* const loop;
     const std::chrono::milliseconds idleTimeout;
+    ConnectionHandlerFactory handlerFactory;
     const RemovedCallback onRemoved;
     TimerId slowTimerId{0};
     std::unordered_map<Id, std::shared_ptr<TcpConnection>>
@@ -274,7 +290,8 @@ TcpServer::TcpServer(
     const InetAddress& listenAddress,
     std::size_t maxConnections,
     std::chrono::milliseconds idleTimeout,
-    std::size_t workerCount
+    std::size_t workerCount,
+    ConnectionHandlerFactory handlerFactory
 )
     : m_loop(requireLoop(loop))
     , m_threadPool(m_loop, workerCount)
@@ -293,6 +310,7 @@ TcpServer::TcpServer(
         m_workers.push_back(std::make_shared<Worker>(
             owner,
             idleTimeout,
+            handlerFactory,
             [base = m_loop, this, guard](std::uint64_t id)
             {
                 // Never dereference TcpServer on a worker thread.

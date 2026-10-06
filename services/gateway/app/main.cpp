@@ -12,17 +12,25 @@
 #include "net/EventLoop.h"
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
+#include "net/PacketEcho.h"
 #include "net/TcpServer.h"
 
 using namespace service::gateway;
 
 int main(int argc, char** argv)
 {
-    const std::string_view backend = argc == 2 ? argv[1] : "epoll";
-    if (argc > 2 || (backend != "epoll" && backend != "asio"))
+    const std::string_view backend = argc >= 2 ? argv[1] : "epoll";
+    const std::string_view protocol = argc == 3 ? argv[2] : "raw";
+    if (argc > 3 || (backend != "epoll" && backend != "asio") ||
+        (protocol != "raw" && protocol != "packet"))
     {
-        std::cerr << "Usage: ArenaServer [epoll|asio]\n";
+        std::cerr << "Usage: ArenaServer [epoll|asio] [raw|packet]\n";
         return 2;
+    }
+    ConnectionHandlerFactory handlerFactory;
+    if (protocol == "packet")
+    {
+        handlerFactory = [] { return makePacketEchoHandler(); };
     }
     const InetAddress address("127.0.0.1", 8888);
     if (backend == "epoll")
@@ -34,7 +42,8 @@ int main(int argc, char** argv)
                 address,
                 1000,
                 std::chrono::seconds(60),
-                4
+                4,
+                handlerFactory
             );
         loop.loop();
         return 0;
@@ -49,7 +58,8 @@ int main(int argc, char** argv)
             address,
             1000,
             std::chrono::seconds(60),
-            4
+            4,
+            handlerFactory
         );
     std::function<void()> waitStopped;
     waitStopped = [&]

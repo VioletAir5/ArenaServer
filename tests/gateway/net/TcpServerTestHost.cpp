@@ -7,11 +7,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <string_view>
 
 #include "net/Channel.h"
 #include "net/EventLoop.h"
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
+#include "net/PacketEcho.h"
 #include "net/TcpServer.h"
 #include "os/FileDescriptor.h"
 
@@ -19,9 +21,19 @@
 // and stop the event loop cleanly, including under LeakSanitizer.
 int main(int argc, char** argv)
 {
-    if (argc < 2 || argc > 4)
+    if (argc < 2 || argc > 5)
     {
         return 2;
+    }
+    service::gateway::ConnectionHandlerFactory handlerFactory;
+    if (argc == 5)
+    {
+        if (std::string_view(argv[4]) != "packet")
+        {
+            return 2;
+        }
+        handlerFactory = []
+        { return service::gateway::makePacketEchoHandler(); };
     }
 
     sigset_t signals;
@@ -97,11 +109,19 @@ int main(int argc, char** argv)
                                     std::strtoul(argv[2], nullptr, 10)
                                 )
                               : std::chrono::seconds(60);
-        const auto workerCount = argc == 4
-                                     ? std::strtoul(argv[3], nullptr, 10)
-                                     : 0;
+        const auto workerCount = argc >= 4 ? std::strtoul(
+                                                 argv[3],
+                                                 nullptr,
+                                                 10
+                                             )
+                                           : 0;
         service::gateway::TcpServer server(
-            &loop, address, 1000, idleTimeout, workerCount
+            &loop,
+            address,
+            1000,
+            idleTimeout,
+            workerCount,
+            handlerFactory
         );
         serverPtr = &server;
         std::cerr << "TEST_HOST_READY" << std::endl;

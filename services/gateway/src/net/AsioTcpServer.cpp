@@ -69,6 +69,7 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
     std::optional<Guard> guard;
     std::thread thread;
     const std::chrono::milliseconds idleTimeout;
+    ConnectionHandlerFactory handlerFactory;
     std::function<void(std::uint64_t)> onRemoved;
     std::unordered_map<std::uint64_t, std::shared_ptr<AsioConnect>>
         connections;
@@ -82,12 +83,14 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
         Context& base,
         bool owned,
         std::chrono::milliseconds idle,
+        ConnectionHandlerFactory factory,
         std::function<void(std::uint64_t)> removed
     )
         : ownedContext(owned ? std::make_unique<Context>() : nullptr)
         , context(ownedContext ? *ownedContext : base)
         , prime(context)
         , idleTimeout(idle)
+        , handlerFactory(std::move(factory))
         , onRemoved(std::move(removed))
     {
         if (ownedContext)
@@ -172,9 +175,18 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
                 std::move(socket),
                 idleTimeout
             );
-            connection->setMessageCallback(
-                [](IConnection& c, auto bytes) { c.send(bytes); }
-            );
+            auto handler = handlerFactory
+                               ? handlerFactory()
+                               : ConnectionMessageCallback(
+                                     [](IConnection& c, auto bytes)
+                                     { c.send(bytes); }
+                                 );
+            if (!handler)
+            {
+                throw std::invalid_argument("empty connection handler"
+                );
+            }
+            connection->setMessageCallback(std::move(handler));
             connection->setHighWaterMarkCallback(
                 [](IConnection& c, auto) { c.pauseRead(); }
             );
@@ -304,6 +316,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
     const std::size_t capacity;
     const std::chrono::milliseconds idleTimeout;
     const std::size_t configuredWorkers;
+    const ConnectionHandlerFactory handlerFactory;
     std::vector<std::shared_ptr<AsioWorker>> workers;
     std::shared_ptr<Tcp::socket> pendingAccept;
     std::unordered_set<std::uint64_t> admissions;
@@ -317,7 +330,8 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
         Context& context,
         std::size_t max,
         std::chrono::milliseconds idle,
-        std::size_t count
+        std::size_t count,
+        ConnectionHandlerFactory factory
     )
         : base(context)
         , acceptor(context)
@@ -327,6 +341,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
         , capacity(max)
         , idleTimeout(idle)
         , configuredWorkers(count)
+        , handlerFactory(std::move(factory))
     {
         if (max == 0 || idle <= std::chrono::milliseconds::zero())
         {
@@ -388,6 +403,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                 base,
                 configuredWorkers != 0,
                 idleTimeout,
+                handlerFactory,
                 [weak = weak_from_this()](std::uint64_t ticket)
                 {
                     auto impl = weak.lock();
@@ -690,9 +706,12 @@ AsioTcpServer::AsioTcpServer(
     const InetAddress& address,
     std::size_t max,
     std::chrono::milliseconds idle,
-    std::size_t workers
+    std::size_t workers,
+    ConnectionHandlerFactory handlerFactory
 )
-    : m_impl(std::make_shared<Impl>(context, max, idle, workers))
+    : m_impl(std::make_shared<Impl>(
+          context, max, idle, workers, std::move(handlerFactory)
+      ))
 {
     try
     {

@@ -134,3 +134,20 @@ foreach(workers 0 4)
             TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;asio")
     endforeach()
 endforeach()
+
+# The same protocol acceptance suite crosses each real transport/worker setup.
+foreach(backend epoll asio)
+    if(backend STREQUAL "epoll")
+        set(packet_host arena_tcp_server_test_host)
+    else()
+        set(packet_host arena_asio_tcp_server_test_host)
+    endif()
+    foreach(workers 0 4)
+        add_test(NAME PacketCodecTransport_${backend}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/PacketCodecIntegrationTest.py"
+                "$<TARGET_FILE:${packet_host}>" ${workers})
+        set_tests_properties(PacketCodecTransport_${backend}_${workers} PROPERTIES
+            TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;protocol")
+    endforeach()
+endforeach()

@@ -2,18 +2,31 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <string_view>
 
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/AsioTcpServer.h"
+#include "net/PacketEcho.h"
 
 int main(int argc, char** argv)
 {
-    if (argc < 2 || argc > 4)
+    if (argc < 2 || argc > 5)
     {
         return 2;
     }
+    service::gateway::ConnectionHandlerFactory handlerFactory;
+    if (argc == 5)
+    {
+        if (std::string_view(argv[4]) != "packet")
+        {
+            return 2;
+        }
+        handlerFactory = []
+        { return service::gateway::makePacketEchoHandler(); };
+    }
+
     using namespace service::gateway;
     boost::asio::io_context context;
     boost::asio::signal_set signals(context, SIGTERM, SIGUSR1);
@@ -24,7 +37,7 @@ int main(int argc, char** argv)
     const auto idle = std::chrono::milliseconds(
         argc >= 3 ? std::strtoul(argv[2], nullptr, 10) : 60000
     );
-    const auto workers = argc == 4
+    const auto workers = argc >= 4
                              ? std::strtoul(argv[3], nullptr, 10)
                              : 0;
     AsioTcpServer server(
@@ -32,7 +45,8 @@ int main(int argc, char** argv)
         InetAddress("127.0.0.1", port),
         1000,
         idle,
-        workers
+        workers,
+        handlerFactory
     );
     std::function<void()> waitStopped;
     waitStopped = [&]

@@ -8,9 +8,10 @@
 #include <vector>
 
 #include "net/Acceptor.h"
+#include "net/ConnectionHandler.h"
 #include "net/EventLoopThreadPool.h"
-#include "net/InetAddress.h"
 #include "net/ITcpServer.h"
+#include "net/InetAddress.h"
 #include "net/TimerQueue.h"
 
 namespace service::gateway
@@ -34,7 +35,8 @@ public:
         std::size_t maxConnections,
         std::chrono::milliseconds idleTimeout =
             std::chrono::seconds(60),
-        std::size_t workerCount = 0
+        std::size_t workerCount = 0,
+        ConnectionHandlerFactory handlerFactory = {}
     );
     ~TcpServer() noexcept override;
 
@@ -45,8 +47,8 @@ public:
     // close stragglers at the deadline. Stopped includes worker
     // cleanup and join; it does not quit the externally owned base
     // loop.
-    void stop(
-        std::chrono::milliseconds grace = kDefaultStopGrace) override;
+    void stop(std::chrono::milliseconds grace = kDefaultStopGrace)
+        override;
     // Read only on the base EventLoop thread. Count includes accepted
     // sockets queued for worker registration until cleanup is
     // acknowledged.
@@ -75,7 +77,8 @@ private:
     std::shared_ptr<void> m_callbackGuard{std::make_shared<int>(0)};
     std::vector<std::shared_ptr<Worker>> m_workers;
     // IDs only; TcpConnection owners live in Worker.
-    // Only base mutates admission records; it never touches connections.
+    // Only base mutates admission records; it never touches
+    // connections.
     std::unordered_set<std::uint64_t> m_admissions;
     std::uint64_t m_nextConnectionId{1};
 };

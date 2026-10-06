@@ -4,6 +4,7 @@
 
 #include <boost/asio/io_context.hpp>
 
+#include "net/ConnectionHandler.h"
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
 
@@ -23,7 +24,8 @@ public:
         std::size_t maxConnections,
         std::chrono::milliseconds idleTimeout =
             std::chrono::seconds(60),
-        std::size_t workerCount = 0
+        std::size_t workerCount = 0,
+        ConnectionHandlerFactory handlerFactory = {}
     );
     ~AsioTcpServer() noexcept override;
 
