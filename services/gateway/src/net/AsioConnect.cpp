@@ -3,6 +3,8 @@
 #include <fcntl.h>
 
 #include <algorithm>
+#include <boost/asio/bind_executor.hpp>
+#include <boost/asio/post.hpp>
 #include <cerrno>
 #include <exception>
 #include <iostream>
@@ -21,6 +23,7 @@ AsioConnect::AsioConnect(
 )
     : m_owner(std::this_thread::get_id())
     , m_id(detail::nextConnectionId())
+    , m_strand(boost::asio::make_strand(context))
     , m_socket(std::move(socket))
     , m_idleTimer(context)
     , m_slowTimer(context)
@@ -62,38 +65,121 @@ std::uint64_t AsioConnect::id() const noexcept
 
 void AsioConnect::send(std::span<const std::byte> bytes)
 {
-    requireOwner();
-    if ((m_state != State::Connected &&
-         m_state != State::PeerHalfClosed) || bytes.empty())
+    if (bytes.empty())
     {
         return;
     }
-    auto keepAlive = weak_from_this().lock();
-    if (bytes.size() > kHardOutputLimit - m_pendingBytes)
+    const bool owner = std::this_thread::get_id() == m_owner;
+    if (!owner && weak_from_this().expired())
+    {
+        throw std::logic_error(
+            "AsioConnect foreign send requires shared ownership"
+        );
+    }
+    // Owner-side watermark callbacks may close and release their caller.
+    auto keepAlive = owner ? weak_from_this().lock()
+                           : std::shared_ptr<AsioConnect>{};
+    bool overflow = false;
+    bool scheduleDrain = false;
+    {
+        std::lock_guard lock(m_sendMutex);
+        if (!m_acceptingSends)
+        {
+            return;
+        }
+        if (bytes.size() > kHardOutputLimit - m_pendingBytes)
+        {
+            m_acceptingSends = false;
+            overflow = true;
+        }
+        else
+        {
+            // Only the ingress queue is shared. Its tail is never used
+            // by an active async write, so small calls can coalesce.
+            if (!m_sendQueue.empty() &&
+                m_sendQueue.back()->size() + bytes.size() <= 64 * 1024)
+            {
+                auto& tail = *m_sendQueue.back();
+                tail.insert(tail.end(), bytes.begin(), bytes.end());
+            }
+            else
+            {
+                auto buffer = std::make_shared<WriteBuffer>();
+                buffer->reserve(std::max<std::size_t>(8192, bytes.size()));
+                buffer->assign(bytes.begin(), bytes.end());
+                m_sendQueue.push_back(std::move(buffer));
+            }
+            m_pendingBytes += bytes.size();
+            if (!owner && !m_sendDrainPosted)
+            {
+                m_sendDrainPosted = true;
+                scheduleDrain = true;
+            }
+        }
+    }
+    if (overflow)
     {
         std::cerr << "AsioConnect output hard limit reached\n";
-        close();
+        if (owner)
+        {
+            closeOnce();
+        }
+        else
+        {
+            boost::asio::post(m_strand, [weak = weak_from_this()]
+            {
+                if (auto self = weak.lock())
+                {
+                    self->closeOnce();
+                }
+            });
+        }
         return;
     }
-    // Each operation captures its own immutable buffer. Appending or
-    // closing the queue cannot invalidate memory still used by a
-    // cancelled operation. Coalesce small sends into a tail not used
-    // by the active write. This bounds per-chunk metadata as well as
-    // payload memory for tiny sends.
-    if (!m_output.empty() && (!m_writing || m_output.size() > 1) &&
-        m_output.back()->size() + bytes.size() <= 64 * 1024)
+    if (owner)
     {
-        auto& tail = *m_output.back();
-        tail.insert(tail.end(), bytes.begin(), bytes.end());
+        drainSendQueue();
     }
-    else
+    else if (scheduleDrain)
     {
-        auto buffer = std::make_shared<WriteBuffer>();
-        buffer->reserve(std::max<std::size_t>(8192, bytes.size()));
-        buffer->assign(bytes.begin(), bytes.end());
-        m_output.push_back(std::move(buffer));
+        boost::asio::post(m_strand, [weak = weak_from_this()]
+        {
+            if (auto self = weak.lock())
+            {
+                self->drainSendQueue();
+            }
+        });
     }
-    m_pendingBytes += bytes.size();
+}
+
+void AsioConnect::drainSendQueue()
+{
+    requireOwner();
+    std::deque<std::shared_ptr<WriteBuffer>> incoming;
+    {
+        std::lock_guard lock(m_sendMutex);
+        incoming.swap(m_sendQueue);
+        m_sendDrainPosted = false;
+    }
+    if (m_state == State::Closed || incoming.empty())
+    {
+        return;
+    }
+    for (auto& buffer : incoming)
+    {
+        // The active front buffer must not move while Asio uses it.
+        if (!m_output.empty() &&
+            (!m_writing || m_output.size() > 1) &&
+            m_output.back()->size() + buffer->size() <= 64 * 1024)
+        {
+            auto& tail = *m_output.back();
+            tail.insert(tail.end(), buffer->begin(), buffer->end());
+        }
+        else
+        {
+            m_output.push_back(std::move(buffer));
+        }
+    }
     updateWatermark();
     writeNext();
 }
@@ -101,18 +187,30 @@ void AsioConnect::send(std::span<const std::byte> bytes)
 void AsioConnect::shutdown()
 {
     requireOwner();
+    auto keepAlive = weak_from_this().lock();
     if (m_state != State::Connected &&
         m_state != State::PeerHalfClosed)
     {
         return;
     }
+    {
+        std::lock_guard lock(m_sendMutex);
+        m_acceptingSends = false;
+    }
     m_state = m_state == State::PeerHalfClosed
                   ? State::WriteDrainingPeerClosed
                   : State::WriteDraining;
+    drainSendQueue();
     finishWrite();
 }
 
 void AsioConnect::close()
+{
+    requireOwner();
+    closeOnce();
+}
+
+void AsioConnect::closeOnce()
 {
     requireOwner();
     if (m_state == State::Closed)
@@ -121,16 +219,22 @@ void AsioConnect::close()
     }
     auto keepAlive = weak_from_this().lock();
     m_state = State::Closed;
+    {
+        std::lock_guard lock(m_sendMutex);
+        m_acceptingSends = false;
+        m_sendQueue.clear();
+        m_sendDrainPosted = false;
+        m_pendingBytes = 0;
+    }
     boost::system::error_code ignored;
     m_socket.close(ignored);
     m_idleTimer.cancel(ignored);
     m_slowTimer.cancel(ignored);
     m_output.clear();
-    m_frontOffset = m_pendingBytes = 0;
+    m_frontOffset = 0;
     m_readState = ReadState::Idle;
-    // Completion handlers retain buffers, never the connection.
-    // Notify once; the server defers map erasure until this dispatch
-    // has returned.
+    // In-flight handlers retain their buffers, never the connection.
+    // Notify once; the server defers map erasure until dispatch returns.
     if (m_closeCallback)
     {
         auto callback = m_closeCallback;
@@ -175,6 +279,7 @@ void AsioConnect::resumeRead()
 
 std::size_t AsioConnect::pendingBytes() const noexcept
 {
+    std::lock_guard lock(m_sendMutex);
     return m_pendingBytes;
 }
 
@@ -202,6 +307,7 @@ void AsioConnect::setCloseCallback(CloseCallback callback)
 void AsioConnect::start()
 {
     requireOwner();
+    auto keepAlive = weak_from_this().lock();
     if (m_started || m_state == State::Closed)
     {
         return;
@@ -215,6 +321,7 @@ void AsioConnect::start()
     m_started = true;
     m_lastActivity = Clock::now();
     armIdleTimer();
+    drainSendQueue();
     readNext();
     writeNext();
 }
@@ -250,11 +357,21 @@ void AsioConnect::readNext()
     auto buffer = m_input;
     m_socket.async_read_some(
         boost::asio::buffer(*buffer),
+        boost::asio::bind_executor(m_strand,
         [weak = weak_from_this(),
          buffer](boost::system::error_code error, std::size_t bytes)
         {
             auto self = weak.lock();
-            if (!self || self->m_state == State::Closed)
+            if (!self)
+            {
+                return;
+            }
+            if (error == boost::asio::error::operation_aborted)
+            {
+                self->closeOnce();
+                return;
+            }
+            if (self->m_state == State::Closed)
             {
                 return;
             }
@@ -269,7 +386,7 @@ void AsioConnect::readNext()
             {
                 self->deliverRead();
             }
-        }
+        })
     );
 }
 
@@ -346,17 +463,30 @@ void AsioConnect::writeNext()
             buffer->data() + offset,
             buffer->size() - offset
         ),
+        boost::asio::bind_executor(m_strand,
         [weak = weak_from_this(),
          buffer](boost::system::error_code error, std::size_t bytes)
         {
             auto self = weak.lock();
-            if (!self || self->m_state == State::Closed)
+            if (!self)
+            {
+                return;
+            }
+            if (error == boost::asio::error::operation_aborted)
+            {
+                self->closeOnce();
+                return;
+            }
+            if (self->m_state == State::Closed)
             {
                 return;
             }
             self->m_writing = false;
             self->m_frontOffset += bytes;
-            self->m_pendingBytes -= bytes;
+            {
+                std::lock_guard lock(self->m_sendMutex);
+                self->m_pendingBytes -= bytes;
+            }
             if (bytes != 0)
             {
                 self->m_lastActivity = Clock::now();
@@ -374,13 +504,13 @@ void AsioConnect::writeNext()
             self->updateWatermark();
             self->writeNext();
             self->finishWrite();
-        }
+        })
     );
 }
 
 void AsioConnect::finishWrite()
 {
-    if (m_state == State::Closed || m_pendingBytes != 0)
+    if (m_state == State::Closed || pendingBytes() != 0)
     {
         return;
     }
@@ -416,17 +546,23 @@ void AsioConnect::updateWatermark()
     {
         return;
     }
+    const auto pending = pendingBytes();
     WatermarkCallback callback;
-    if (!m_aboveHighWater && m_pendingBytes >= kHighWaterMark)
+    if (!m_aboveHighWater && pending >= kHighWaterMark)
     {
         m_aboveHighWater = true;
         m_highWaterSince = Clock::now();
         const auto phase = m_highWaterSince;
         m_slowTimer.expires_at(phase + kSlowClientTimeout);
         m_slowTimer.async_wait(
+            boost::asio::bind_executor(m_strand,
             [weak = weak_from_this(), phase](auto error)
             {
                 auto self = weak.lock();
+                if (error == boost::asio::error::operation_aborted)
+                {
+                    return;
+                }
                 if (!error && self && self->m_state != State::Closed &&
                     self->m_aboveHighWater &&
                     self->m_highWaterSince == phase)
@@ -434,11 +570,11 @@ void AsioConnect::updateWatermark()
                     std::cerr << "AsioConnect slow client timeout\n";
                     self->close();
                 }
-            }
+            })
         );
         callback = m_highWaterCallback;
     }
-    else if (m_aboveHighWater && m_pendingBytes <= kLowWaterMark)
+    else if (m_aboveHighWater && pending <= kLowWaterMark)
     {
         m_aboveHighWater = false;
         boost::system::error_code ignored;
@@ -449,7 +585,7 @@ void AsioConnect::updateWatermark()
     {
         try
         {
-            callback(*this, m_pendingBytes);
+            callback(*this, pending);
         }
         catch (const std::exception& e)
         {
@@ -468,9 +604,14 @@ void AsioConnect::armIdleTimer()
 {
     m_idleTimer.expires_at(m_lastActivity + m_idleTimeout);
     m_idleTimer.async_wait(
+        boost::asio::bind_executor(m_strand,
         [weak = weak_from_this()](auto error)
         {
             auto self = weak.lock();
+            if (error == boost::asio::error::operation_aborted)
+            {
+                return;
+            }
             if (error || !self || self->m_state == State::Closed)
             {
                 return;
@@ -485,7 +626,7 @@ void AsioConnect::armIdleTimer()
             {
                 self->armIdleTimer();
             }
-        }
+        })
     );
 }
 
@@ -500,6 +641,6 @@ void AsioConnect::ioError(const boost::system::error_code& error)
         std::cerr << "AsioConnect I/O error: " << error.message()
                   << '\n';
     }
-    close();
+    closeOnce();
 }
 } // namespace service::gateway

@@ -3,8 +3,11 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <string>
+#include <vector>
 #include <thread>
 
 #include <boost/asio/write.hpp>
@@ -270,6 +273,199 @@ TEST_F(AsioConnectTest, WatermarksAndHardLimitBoundOutput)
     EXPECT_EQ(connection->pendingBytes(), 0);
     connection->close();
     EXPECT_EQ(closed, 1);
+}
+
+TEST_F(AsioConnectTest, WatermarkCallbackCanCloseAndReleaseOwner)
+{
+    std::weak_ptr<AsioConnect> weak = connection;
+    connection->setHighWaterMarkCallback(
+        [&](IConnection& transport, std::size_t)
+        {
+            transport.close();
+            connection.reset();
+        }
+    );
+    connection->start();
+    const std::string payload(AsioConnect::kHighWaterMark, 'w');
+    connection->send(std::as_bytes(std::span(payload)));
+    EXPECT_TRUE(weak.expired());
+    pump();
+}
+
+TEST_F(AsioConnectTest, ConcurrentSendsKeepOneOrderedWriteStream)
+{
+    const int socketBuffer = 4096;
+    ASSERT_EQ(::setsockopt(connection->fd(), SOL_SOCKET, SO_SNDBUF,
+                           &socketBuffer, sizeof(socketBuffer)), 0);
+    connection->start();
+    const std::string first(256 * 1024, 'I');
+    connection->send(std::as_bytes(std::span(first)));
+    pump(5ms);
+    ASSERT_GT(connection->pendingBytes(), 0);
+
+    constexpr int producers = 4;
+    constexpr int recordsPerProducer = 8;
+    constexpr int recordSize = 4096;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    for (int producer = 0; producer < producers; ++producer)
+    {
+        threads.emplace_back([&, producer]
+        {
+            ++ready;
+            while (!go.load())
+            {
+                std::this_thread::yield();
+            }
+            for (int record = 0; record < recordsPerProducer; ++record)
+            {
+                const char value = static_cast<char>(
+                    33 + producer * recordsPerProducer + record
+                );
+                const std::string payload(recordSize, value);
+                connection->send(std::as_bytes(std::span(payload)));
+            }
+        });
+    }
+    while (ready.load() != producers)
+    {
+        std::this_thread::yield();
+    }
+    go = true;
+    for (auto& thread : threads)
+    {
+        thread.join();
+    }
+    EXPECT_LE(connection->pendingBytes(), AsioConnect::kHardOutputLimit);
+
+    const auto expected = first.size() +
+        producers * recordsPerProducer * recordSize;
+    std::string received;
+    for (int i = 0; i < 500 && received.size() < expected; ++i)
+    {
+        pump(5ms);
+        received += receivePeer();
+    }
+    ASSERT_EQ(received.size(), expected);
+    EXPECT_EQ(received.substr(0, first.size()), first);
+    std::array<int, producers * recordsPerProducer> seen{};
+    for (std::size_t offset = first.size(); offset < expected;
+         offset += recordSize)
+    {
+        const char value = received[offset];
+        ASSERT_GE(value, 33);
+        ASSERT_LT(value, 33 + static_cast<int>(seen.size()));
+        ++seen[value - 33];
+        EXPECT_EQ(received.substr(offset, recordSize),
+                  std::string(recordSize, value));
+    }
+    for (const int count : seen)
+    {
+        EXPECT_EQ(count, 1);
+    }
+    EXPECT_EQ(connection->pendingBytes(), 0);
+}
+
+TEST_F(AsioConnectTest, ForeignQueuedSendDrainsBeforeShutdownFin)
+{
+    connection->start();
+    const std::string payload(64 * 1024, 'f');
+    std::thread sender([&]
+    {
+        connection->send(std::as_bytes(std::span(payload)));
+    });
+    sender.join();
+    EXPECT_EQ(connection->pendingBytes(), payload.size());
+    connection->shutdown();
+    pump();
+    EXPECT_EQ(receivePeer(), payload);
+    char byte;
+    boost::system::error_code error;
+    peer.read_some(boost::asio::buffer(&byte, 1), error);
+    EXPECT_EQ(error, boost::asio::error::eof);
+    EXPECT_EQ(connection->pendingBytes(), 0);
+}
+
+TEST_F(AsioConnectTest, ConcurrentOutputLimitClosesOnce)
+{
+    int closes = 0;
+    connection->setCloseCallback([&](auto*) { ++closes; });
+    connection->start();
+    const std::string payload(600 * 1024, 'x');
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i)
+    {
+        threads.emplace_back([&]
+        {
+            ++ready;
+            while (!go.load())
+            {
+                std::this_thread::yield();
+            }
+            connection->send(std::as_bytes(std::span(payload)));
+        });
+    }
+    while (ready.load() != 4)
+    {
+        std::this_thread::yield();
+    }
+    go = true;
+    for (auto& thread : threads)
+    {
+        thread.join();
+    }
+    EXPECT_LE(connection->pendingBytes(), AsioConnect::kHardOutputLimit);
+    pump();
+    EXPECT_FALSE(connection->connected());
+    EXPECT_EQ(connection->pendingBytes(), 0);
+    EXPECT_EQ(closes, 1);
+    pump();
+    EXPECT_EQ(closes, 1);
+}
+
+TEST_F(AsioConnectTest, CloseOnceDiscardsQueuedAndCancelledOperations)
+{
+    int closes = 0;
+    int messages = 0;
+    connection->setCloseCallback([&](auto*) { ++closes; });
+    connection->setMessageCallback(
+        [&](IConnection&, auto) { ++messages; }
+    );
+    const int socketBuffer = 4096;
+    ASSERT_EQ(::setsockopt(connection->fd(), SOL_SOCKET, SO_SNDBUF,
+                           &socketBuffer, sizeof(socketBuffer)), 0);
+    connection->start();
+    const std::string active(AsioConnect::kHighWaterMark, 'a');
+    connection->send(std::as_bytes(std::span(active)));
+    const std::string queued(64 * 1024, 'q');
+    std::thread sender([&]
+    {
+        connection->send(std::as_bytes(std::span(queued)));
+    });
+    sender.join();
+    ASSERT_GT(connection->pendingBytes(), 0);
+
+    connection->close();
+    connection->close();
+    std::thread lateSender([&]
+    {
+        connection->send(std::as_bytes(std::span(queued)));
+    });
+    lateSender.join();
+    EXPECT_EQ(connection->pendingBytes(), 0);
+    EXPECT_EQ(closes, 1);
+    pump();
+    EXPECT_EQ(closes, 1);
+    EXPECT_EQ(messages, 0);
+    EXPECT_EQ(connection->pendingBytes(), 0);
+
+    std::weak_ptr<AsioConnect> weak = connection;
+    connection.reset();
+    EXPECT_TRUE(weak.expired());
+    pump();
 }
 
 TEST_F(AsioConnectTest, CancelledIoDoesNotRetainConnection)

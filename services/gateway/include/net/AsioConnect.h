@@ -5,10 +5,13 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/IConnection.h"
@@ -16,9 +19,10 @@
 namespace service::gateway
 {
 // Run the context on exactly one owner thread. Construct, start,
-// mutate, and finally release on that thread; id() is the sole
-// cross-thread query. start() requires shared ownership and must
-// follow callback registration.
+// mutate (except send), and finally release on that thread. send()
+// copies and queues bytes from any thread; foreign callers need shared
+// ownership. id() is also cross-thread safe. start() follows callback
+// setup and requires shared ownership.
 class AsioConnect final
     : public IConnection,
       public std::enable_shared_from_this<AsioConnect>
@@ -87,6 +91,8 @@ private:
     };
 
     void requireOwner() const;
+    void drainSendQueue();
+    void closeOnce();
     void readNext();
     void deliverRead();
     void writeNext();
@@ -97,6 +103,7 @@ private:
 
     const std::thread::id m_owner;
     const std::uint64_t m_id;
+    boost::asio::strand<boost::asio::io_context::executor_type> m_strand;
     boost::asio::ip::tcp::socket m_socket;
     boost::asio::steady_timer m_idleTimer;
     boost::asio::steady_timer m_slowTimer;
@@ -111,11 +118,18 @@ private:
 
     std::shared_ptr<ReadBuffer> m_input{
         std::make_shared<ReadBuffer>()};
+    // Concurrent callers enter here; the owner drains into m_output.
+    mutable std::mutex m_sendMutex;
+    std::deque<std::shared_ptr<WriteBuffer>> m_sendQueue;
+    bool m_acceptingSends{true};
+    bool m_sendDrainPosted{false};
+    std::size_t m_pendingBytes{0};
+
+    // Only the owner thread mutates the active output queue.
     std::deque<std::shared_ptr<WriteBuffer>> m_output;
     std::size_t m_readBytes{0};
     boost::system::error_code m_readError;
     std::size_t m_frontOffset{0};
-    std::size_t m_pendingBytes{0};
 
     State m_state{State::Connected};
     bool m_started{false};
