@@ -1,10 +1,9 @@
 #include "net/PacketEcho.h"
 
-#include <exception>
-#include <iostream>
-#include <memory>
-#include <stdexcept>
+#include <span>
+#include <utility>
 
+#include "net/PacketPipeline.h"
 #include "protocol/PacketCodec.hpp"
 
 namespace service::gateway
@@ -12,65 +11,32 @@ namespace service::gateway
 ConnectionMessageCallback
 makePacketEchoHandler(std::size_t maxBodySize)
 {
-    if (maxBodySize > kMaxPacketSize)
+    PacketPipeline pipeline;
+    pipeline.addStage([](PacketContext& context)
     {
-        throw std::invalid_argument(
-            "gateway packet body limit exceeds 256 KiB"
+        return context.header.m_type ==
+                       protocol::PacketHeader::kEchoRequest
+                   ? PacketStageResult::Continue
+                   : PacketStageResult::Reject;
+    });
+    pipeline.addStage([](PacketContext& context)
+    {
+        auto response = protocol::PacketCodec::encode(
+            protocol::PacketHeader::kEchoResponse,
+            context.header.m_requestId,
+            std::as_bytes(std::span(context.payload))
         );
-    }
-    auto codec = std::make_shared<protocol::PacketCodec>(maxBodySize);
-    return [codec](
-               IConnection& connection,
-               std::span<const std::byte> bytes
-           )
-    {
-        try
+        if (!response)
         {
-            const auto status = codec->feed(
-                bytes,
-                [&](const protocol::PacketHeader& request,
-                    std::string_view payload)
-                {
-                    if (request.m_type !=
-                        protocol::PacketHeader::kEchoRequest)
-                    {
-                        connection.close();
-                        return false;
-                    }
-                    auto response = protocol::PacketCodec::encode(
-                        protocol::PacketHeader::kEchoResponse,
-                        request.m_requestId,
-                        std::as_bytes(std::span(payload))
-                    );
-                    if (!response)
-                    {
-                        connection.close();
-                        return false;
-                    }
-                    connection.send(std::as_bytes(std::span(
-                        response->peek(),
-                        response->readableBytes()
-                    )));
-                    return connection.connected();
-                }
-            );
-            if (status == protocol::FrameDecodeStatus::Invalid)
-            {
-                std::cerr << "PacketCodec invalid frame id="
-                          << connection.id() << '\n';
-                connection.close();
-            }
+            return PacketStageResult::Reject;
         }
-        catch (const std::exception& error)
-        {
-            std::cerr << "PacketCodec callback failed: "
-                      << error.what() << '\n';
-            connection.close();
-        }
-        catch (...)
-        {
-            connection.close();
-        }
-    };
+        context.connection.send(std::as_bytes(std::span(
+            response->peek(), response->readableBytes()
+        )));
+        return context.connection.connected()
+                   ? PacketStageResult::Handled
+                   : PacketStageResult::Reject;
+    });
+    return makePacketHandler(std::move(pipeline), maxBodySize);
 }
 } // namespace service::gateway
