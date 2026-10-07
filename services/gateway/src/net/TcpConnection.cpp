@@ -75,71 +75,181 @@ std::uint64_t TcpConnection::id() const noexcept
 
 void TcpConnection::send(std::span<const std::byte> data)
 {
-    if ((m_state != TcpConnectionState::Connected &&
-         m_state != TcpConnectionState::PeerHalfClosed) ||
-        data.size() == 0)
+    if (data.empty())
     {
         return;
     }
+    const bool owner = m_loop->isInLoopThread();
+    if (!owner && weak_from_this().expired())
+    {
+        throw std::logic_error(
+            "TcpConnection foreign send requires shared ownership"
+        );
+    }
+    // A watermark callback may close and release the caller on the owner.
+    auto keepAlive = owner ? weak_from_this().lock()
+                           : std::shared_ptr<TcpConnection>{};
+    bool overflow = false;
+    bool scheduleDrain = false;
+    {
+        std::lock_guard lock(m_sendMutex);
+        if (!m_acceptingSends)
+        {
+            return;
+        }
+        if (data.size() > kHardOutputLimit - m_pendingBytes)
+        {
+            m_acceptingSends = false;
+            overflow = true;
+        }
+        else
+        {
+            // Only ingress buffers are mutable; the owner has not
+            // borrowed this tail for a socket write.
+            if (!m_sendQueue.empty() &&
+                m_sendQueue.back().size() + data.size() <= 64 * 1024)
+            {
+                auto& tail = m_sendQueue.back();
+                tail.insert(tail.end(), data.begin(), data.end());
+            }
+            else
+            {
+                m_sendQueue.emplace_back(data.begin(), data.end());
+            }
+            m_pendingBytes += data.size();
+            if (!owner && !m_sendDrainPosted)
+            {
+                m_sendDrainPosted = true;
+                scheduleDrain = true;
+            }
+        }
+    }
+    if (overflow)
+    {
+        if (owner)
+        {
+            handleClose();
+        }
+        else
+        {
+            m_loop->queueInLoop([weak = weak_from_this()]
+            {
+                if (auto self = weak.lock())
+                {
+                    self->handleClose();
+                }
+            });
+        }
+        return;
+    }
+    if (owner)
+    {
+        drainSendQueue();
+    }
+    else if (scheduleDrain)
+    {
+        m_loop->queueInLoop([weak = weak_from_this()]
+        {
+            if (auto self = weak.lock())
+            {
+                self->drainSendQueue();
+            }
+        });
+    }
+}
 
+void TcpConnection::drainSendQueue()
+{
+    if (!m_loop->isInLoopThread())
+    {
+        throw std::logic_error("TcpConnection send drain requires owner");
+    }
+    if (m_drainingSends)
+    {
+        return;
+    }
+    m_drainingSends = true;
+    struct ResetFlag
+    {
+        bool& flag;
+        ~ResetFlag() { flag = false; }
+    } reset{m_drainingSends};
+    for (;;)
+    {
+        std::deque<std::vector<std::byte>> incoming;
+        {
+            std::lock_guard lock(m_sendMutex);
+            incoming.swap(m_sendQueue);
+            m_sendDrainPosted = false;
+        }
+        if (incoming.empty() || m_state == TcpConnectionState::Disconnected)
+        {
+            break;
+        }
+        for (const auto& bytes : incoming)
+        {
+            if (m_state == TcpConnectionState::Disconnected)
+            {
+                break;
+            }
+            sendInLoop(bytes);
+        }
+    }
+    if (m_state == TcpConnectionState::WriteDraining ||
+        m_state == TcpConnectionState::WriteDrainingPeerClosed)
+    {
+        finishShutdownWrite();
+    }
+    else if (m_state == TcpConnectionState::PeerHalfClosed &&
+             pendingBytes() == 0)
+    {
+        handleClose();
+    }
+}
+
+void TcpConnection::sendInLoop(std::span<const std::byte> data)
+{
     const char* ptr = reinterpret_cast<const char*>(data.data());
-
-    size_t remaining = data.size();
-
-    // 如果现在没有积压数据，
-    // 可以先尝试直接 write。
+    std::size_t remaining = data.size();
     if (m_outputBuffer.readableBytes() == 0)
     {
-        while (true)
+        while (remaining != 0)
         {
-            ssize_t n = ::send(
-                m_socket.get(),
-                ptr,
-                remaining,
-                MSG_NOSIGNAL
+            const ssize_t n = ::send(
+                m_socket.get(), ptr, remaining, MSG_NOSIGNAL
             );
-
             if (n > 0)
             {
                 m_lastActivity = std::chrono::steady_clock::now();
                 ptr += n;
-                remaining -= static_cast<size_t>(n);
-
-                if (remaining == 0)
+                remaining -= static_cast<std::size_t>(n);
                 {
-                    return;
+                    std::lock_guard lock(m_sendMutex);
+                    m_pendingBytes -= static_cast<std::size_t>(n);
                 }
-
                 continue;
             }
-
             if (n < 0 && errno == EINTR)
             {
                 continue;
             }
-
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             {
                 break;
             }
-
             handleIoError(errno);
             return;
         }
     }
-
-    if (remaining > 0)
+    if (remaining != 0)
     {
-        if (remaining >
-                kHardOutputLimit - m_outputBuffer.readableBytes() ||
-            !m_outputBuffer.append(ptr, remaining))
+        if (!m_outputBuffer.append(ptr, remaining))
         {
             std::cerr << "TcpConnection output limit reached fd="
                       << fd() << '\n';
             handleClose();
             return;
         }
-
         notifyHighWaterIfNeeded();
         if (m_state == TcpConnectionState::Disconnected)
         {
@@ -150,8 +260,11 @@ void TcpConnection::send(std::span<const std::byte> data)
             m_channel.enableWriting();
         }
     }
+    else
+    {
+        notifyLowWaterIfNeeded();
+    }
 }
-
 void TcpConnection::shutdown()
 {
     shutdownWrite();
@@ -179,7 +292,8 @@ void TcpConnection::resumeRead()
 
 std::size_t TcpConnection::pendingBytes() const noexcept
 {
-    return pendingOutputBytes();
+    std::lock_guard lock(m_sendMutex);
+    return m_pendingBytes;
 }
 
 void TcpConnection::send(const void* data, std::size_t length)
@@ -243,23 +357,26 @@ void TcpConnection::handleRead()
             else if (m_state == TcpConnectionState::WriteDraining)
             {
                 m_state = TcpConnectionState::WriteDrainingPeerClosed;
-                if (m_outputBuffer.readableBytes() == 0)
+                if (pendingBytes() == 0)
                 {
                     finishShutdownWrite();
                 }
-                else
+                else if (m_outputBuffer.readableBytes() != 0)
                 {
                     m_channel.enableWriting();
                 }
             }
-            else if (m_outputBuffer.readableBytes() == 0)
+            else if (pendingBytes() == 0)
             {
                 handleClose();
             }
             else
             {
                 m_state = TcpConnectionState::PeerHalfClosed;
-                m_channel.enableWriting();
+                if (m_outputBuffer.readableBytes() != 0)
+                {
+                    m_channel.enableWriting();
+                }
             }
             return;
         }
@@ -299,6 +416,10 @@ void TcpConnection::handleWrite()
         {
             m_lastActivity = std::chrono::steady_clock::now();
             m_outputBuffer.skip(static_cast<size_t>(n));
+            {
+                std::lock_guard lock(m_sendMutex);
+                m_pendingBytes -= static_cast<std::size_t>(n);
+            }
             continue;
         }
 
@@ -320,6 +441,14 @@ void TcpConnection::handleWrite()
     if (m_state == TcpConnectionState::Disconnected ||
         m_outputBuffer.readableBytes() != 0)
     {
+        return;
+    }
+    if (pendingBytes() != 0)
+    {
+        if (m_channel.isWriting())
+        {
+            m_channel.disableWriting();
+        }
         return;
     }
 
@@ -350,6 +479,13 @@ void TcpConnection::handleClose()
     }
 
     m_state = TcpConnectionState::Disconnected;
+    {
+        std::lock_guard lock(m_sendMutex);
+        m_acceptingSends = false;
+        m_sendQueue.clear();
+        m_sendDrainPosted = false;
+        m_pendingBytes = 0;
+    }
 
     // 不在这里 close(fd)
     // 不在这里 removeChannel()
@@ -420,11 +556,19 @@ void TcpConnection::shutdownWrite()
     {
         return;
     }
-
+    {
+        std::lock_guard lock(m_sendMutex);
+        m_acceptingSends = false;
+    }
+    drainSendQueue();
+    if (m_state == TcpConnectionState::Disconnected)
+    {
+        return;
+    }
     m_state = m_state == TcpConnectionState::PeerHalfClosed
                   ? TcpConnectionState::WriteDrainingPeerClosed
                   : TcpConnectionState::WriteDraining;
-    if (m_outputBuffer.readableBytes() == 0)
+    if (pendingBytes() == 0)
     {
         finishShutdownWrite();
     }
@@ -494,7 +638,7 @@ int TcpConnection::fd() const noexcept
 
 std::size_t TcpConnection::pendingOutputBytes() const noexcept
 {
-    return m_outputBuffer.readableBytes();
+    return pendingBytes();
 }
 
 std::chrono::steady_clock::time_point
@@ -511,7 +655,7 @@ bool TcpConnection::closing() const noexcept
 void TcpConnection::notifyHighWaterIfNeeded()
 {
     if (m_aboveHighWater ||
-        m_outputBuffer.readableBytes() < kHighWaterMark)
+        pendingBytes() < kHighWaterMark)
     {
         return;
     }
@@ -522,7 +666,7 @@ void TcpConnection::notifyHighWaterIfNeeded()
     {
         m_highWaterMarkCallback(
             *this,
-            m_outputBuffer.readableBytes()
+            pendingBytes()
         );
     }
 }
@@ -530,7 +674,7 @@ void TcpConnection::notifyHighWaterIfNeeded()
 void TcpConnection::notifyLowWaterIfNeeded()
 {
     if (!m_aboveHighWater ||
-        m_outputBuffer.readableBytes() > kLowWaterMark)
+        pendingBytes() > kLowWaterMark)
     {
         return;
     }
@@ -538,7 +682,7 @@ void TcpConnection::notifyLowWaterIfNeeded()
     m_aboveHighWater = false;
     if (m_lowWaterMarkCallback)
     {
-        m_lowWaterMarkCallback(*this, m_outputBuffer.readableBytes());
+        m_lowWaterMarkCallback(*this, pendingBytes());
     }
 }
 
@@ -546,7 +690,7 @@ void TcpConnection::finishShutdownWrite()
 {
     if ((m_state != TcpConnectionState::WriteDraining &&
          m_state != TcpConnectionState::WriteDrainingPeerClosed) ||
-        m_outputBuffer.readableBytes() != 0)
+        pendingBytes() != 0)
     {
         return;
     }

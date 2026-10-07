@@ -7,11 +7,10 @@
 
 namespace service::gateway
 {
-// Unless a concrete implementation documents a stronger guarantee,
-// operations other than id(), and final release, belong to the owning
-// execution context. AsioConnect::send accepts concurrent callers;
-// TcpConnection::send remains owner-thread only. Ptr shares lifetime,
-// not general cross-thread access.
+// Operations and final release belong to the owning execution context,
+// except immutable id() and documented concrete-method exceptions.
+// AsioConnect::send and TcpConnection::send accept concurrent callers.
+// Ptr shares lifetime, not general cross-thread access.
 class IConnection
 {
 public:

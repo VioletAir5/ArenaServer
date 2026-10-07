@@ -3,8 +3,12 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string_view>
+#include <vector>
 
 #include "net/Channel.h"
 #include "net/EventLoop.h"
@@ -24,7 +28,8 @@ enum struct TcpConnectionState
     Disconnected
 };
 
-class TcpConnection final : public IConnection
+class TcpConnection final : public IConnection,
+                            public std::enable_shared_from_this<TcpConnection>
 {
 public:
     using CloseCallback = std::function<void(TcpConnection*)>;
@@ -48,8 +53,9 @@ public:
     TcpConnection& operator=(const TcpConnection&) = delete;
     TcpConnection& operator=(TcpConnection&&) = delete;
 
-    // IConnection operations run on the owning EventLoop thread,
-    // except the immutable id(). No automatic cross-thread dispatch.
+    // send() copies bytes from any thread. Foreign callers must hold shared
+    // ownership while calling; final release and other operations stay on
+    // the owning EventLoop thread. id() is immutable and cross-thread safe.
     // Process-wide identity, distinct from server-local admission tickets.
     std::uint64_t id() const noexcept override;
     void send(std::span<const std::byte> data) override;
@@ -94,6 +100,8 @@ public:
     bool closing() const noexcept;
 
 private:
+    void drainSendQueue();
+    void sendInLoop(std::span<const std::byte> data);
     void notifyHighWaterIfNeeded();
     void notifyLowWaterIfNeeded();
     void finishShutdownWrite();
@@ -112,6 +120,15 @@ private:
 
     PacketBuffer m_inputBuffer;
     PacketBuffer m_outputBuffer;
+
+    // Foreign callers only touch this ingress queue. The owner moves bytes
+    // into m_outputBuffer and is the sole socket and Channel mutator.
+    mutable std::mutex m_sendMutex;
+    std::deque<std::vector<std::byte>> m_sendQueue;
+    std::size_t m_pendingBytes{0};
+    bool m_acceptingSends{true};
+    bool m_sendDrainPosted{false};
+    bool m_drainingSends{false};
 
     std::chrono::steady_clock::time_point m_highWaterSince{};
     std::chrono::steady_clock::time_point m_lastActivity{

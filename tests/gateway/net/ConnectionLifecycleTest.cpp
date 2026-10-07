@@ -6,8 +6,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -46,6 +49,201 @@ struct SocketPair
     FileDescriptor peer;
 };
 } // namespace
+
+TEST(TcpConnectionTest, ConcurrentSendsDrainOrderedRecordsOnOwner)
+{
+    using namespace std::chrono_literals;
+    SocketPair pair;
+    const int flags = ::fcntl(pair.peer.get(), F_GETFL);
+    ASSERT_GE(flags, 0);
+    ASSERT_EQ(::fcntl(pair.peer.get(), F_SETFL, flags & ~O_NONBLOCK), 0);
+    EventLoop loop;
+    auto connection = std::make_shared<TcpConnection>(
+        &loop, Socket(std::move(pair.connection))
+    );
+    connection->channel().tie(connection);
+    constexpr int producers = 4;
+    constexpr int records = 8;
+    constexpr int recordSize = 4096;
+    std::array<std::thread, producers> senders;
+    std::atomic<int> finished{0};
+    for (int producer = 0; producer < producers; ++producer)
+    {
+        senders[producer] = std::thread([&, producer]
+        {
+            for (int record = 0; record < records; ++record)
+            {
+                const std::string payload(
+                    recordSize, static_cast<char>(
+                        33 + producer * records + record
+                    )
+                );
+                connection->send(payload.data(), payload.size());
+            }
+            if (++finished == producers)
+            {
+                loop.queueInLoop([weak = std::weak_ptr(connection)]
+                {
+                    if (auto self = weak.lock())
+                    {
+                        self->shutdownWrite();
+                    }
+                });
+            }
+        });
+    }
+
+    std::string received;
+    int readError = 0;
+    std::thread reader([&]
+    {
+        char buffer[8192];
+        for (;;)
+        {
+            const ssize_t count = ::read(
+                pair.peer.get(), buffer, sizeof(buffer)
+            );
+            if (count > 0)
+            {
+                received.append(buffer, static_cast<std::size_t>(count));
+            }
+            else
+            {
+                if (count < 0)
+                {
+                    readError = errno;
+                }
+                break;
+            }
+        }
+        loop.quit();
+    });
+    bool timedOut = false;
+    loop.runAfter(3s, [&]
+    {
+        timedOut = true;
+        ::shutdown(connection->fd(), SHUT_WR);
+        loop.quit();
+    });
+    loop.loop();
+    for (auto& sender : senders)
+    {
+        sender.join();
+    }
+    reader.join();
+    EXPECT_FALSE(timedOut);
+    EXPECT_EQ(readError, 0);
+    EXPECT_EQ(received.size(),
+              producers * records * recordSize);
+    if (received.size() == producers * records * recordSize)
+    {
+        std::array<int, producers * records> seen{};
+        for (std::size_t offset = 0; offset < received.size();
+             offset += recordSize)
+        {
+            const char value = received[offset];
+            ASSERT_GE(value, 33);
+            ASSERT_LT(value, 33 + static_cast<int>(seen.size()));
+            ++seen[value - 33];
+            EXPECT_EQ(received.substr(offset, recordSize),
+                      std::string(recordSize, value));
+        }
+        for (int count : seen)
+        {
+            EXPECT_EQ(count, 1);
+        }
+    }
+    EXPECT_EQ(connection->pendingBytes(), 0);
+    loop.removeChannel(&connection->channel());
+    connection.reset();
+}
+
+TEST(TcpConnectionTest, PeerFinWaitsForAcceptedForeignSend)
+{
+    SocketPair pair;
+    EventLoop loop;
+    auto connection = std::make_shared<TcpConnection>(
+        &loop, Socket(std::move(pair.connection))
+    );
+    const std::string payload = "reply before close";
+    std::thread sender([&]
+    {
+        connection->send(payload.data(), payload.size());
+    });
+    sender.join();
+    ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
+    connection->handleRead();
+    ASSERT_TRUE(connection->connected());
+    loop.queueInLoop([&] { loop.quit(); });
+    loop.loop();
+    EXPECT_FALSE(connection->connected());
+    EXPECT_EQ(connection->pendingBytes(), 0);
+    char buffer[64]{};
+    ASSERT_EQ(::read(pair.peer.get(), buffer, sizeof(buffer)),
+              static_cast<ssize_t>(payload.size()));
+    EXPECT_EQ(std::string_view(buffer, payload.size()), payload);
+    loop.removeChannel(&connection->channel());
+}
+TEST(TcpConnectionTest, ForeignOutputLimitClosesAndReleasesQueue)
+{
+    SocketPair pair;
+    EventLoop loop;
+    auto connection = std::make_shared<TcpConnection>(
+        &loop, Socket(std::move(pair.connection))
+    );
+    int closes = 0;
+    connection->setCloseCallback([&](TcpConnection*) { ++closes; });
+    const std::string payload(600 * 1024, 'x');
+    std::thread first([&]
+    {
+        connection->send(payload.data(), payload.size());
+    });
+    first.join();
+    std::thread second([&]
+    {
+        connection->send(payload.data(), payload.size());
+    });
+    second.join();
+    EXPECT_LE(connection->pendingBytes(),
+              TcpConnection::kHardOutputLimit);
+    loop.queueInLoop([&] { loop.quit(); });
+    loop.loop();
+    EXPECT_FALSE(connection->connected());
+    EXPECT_EQ(connection->pendingBytes(), 0);
+    EXPECT_EQ(closes, 1);
+    loop.removeChannel(&connection->channel());
+}
+TEST(TcpConnectionTest, CloseDropsForeignQueuedSendsAndWeakDrain)
+{
+    SocketPair pair;
+    EventLoop loop;
+    auto connection = std::make_shared<TcpConnection>(
+        &loop, Socket(std::move(pair.connection))
+    );
+    const std::string payload(64 * 1024, 'q');
+    std::thread sender([&]
+    {
+        connection->send(payload.data(), payload.size());
+    });
+    sender.join();
+    ASSERT_EQ(connection->pendingBytes(), payload.size());
+    connection->close();
+    EXPECT_EQ(connection->pendingBytes(), 0);
+    std::thread lateSender([&]
+    {
+        connection->send(payload.data(), payload.size());
+    });
+    lateSender.join();
+    EXPECT_EQ(connection->pendingBytes(), 0);
+    loop.removeChannel(&connection->channel());
+    std::weak_ptr<TcpConnection> weak = connection;
+    connection.reset();
+    EXPECT_TRUE(weak.expired());
+    loop.queueInLoop([&] { loop.quit(); });
+    loop.loop();
+    char byte;
+    EXPECT_EQ(::read(pair.peer.get(), &byte, 1), 0);
+}
 
 TEST(TcpConnectionTest, ReadsAndEchoesIncomingBytes)
 {
