@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package arena.protocol;
+
+// Stable payload schema inside the existing length-prefixed PacketCodec frame.
+// Never renumber a field or reuse a retired tag. Tag 2 was legacy_client_tag
+// in the frozen v1 compatibility fixture.
+message Envelope {
+  uint64 request_id = 1;
+  reserved 2;
+  reserved "legacy_client_tag";
+  uint64 sent_at_unix_ms = 3;
+
+  oneof payload {
+    LoginRequest login_request = 10;
+    LoginResponse login_response = 11;
+    Ping ping = 12;
+    Pong pong = 13;
+    Error error = 14;
+  }
+}
+
+message LoginRequest {
+  string account = 1;
+  bytes credential = 2;
+  string client_version = 3;
+}
+
+message LoginResponse {
+  bool accepted = 1;
+  string session_token = 2;
+  Error error = 3;
+}
+
+message Ping {
+  uint64 nonce = 1;
+}
+
+message Pong {
+  uint64 nonce = 1;
+}
+
+message Error {
+  uint32 code = 1;
+  string message = 2;
+  repeated Error causes = 3;
+}

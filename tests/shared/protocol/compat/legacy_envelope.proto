@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package arena.protocol.legacy;
+
+// Frozen v1 client fixture. Keep its tags and wire types unchanged.
+message Envelope {
+  uint64 request_id = 1;
+  string legacy_client_tag = 2;
+
+  oneof payload {
+    LoginRequest login_request = 10;
+    LoginResponse login_response = 11;
+    Ping ping = 12;
+    Pong pong = 13;
+    Error error = 14;
+  }
+}
+
+message LoginRequest {
+  string account = 1;
+  bytes credential = 2;
+}
+
+message LoginResponse {
+  bool accepted = 1;
+  string session_token = 2;
+  Error error = 3;
+}
+
+message Ping {
+  uint64 nonce = 1;
+}
+
+message Pong {
+  uint64 nonce = 1;
+}
+
+message Error {
+  uint32 code = 1;
+  string message = 2;
+}
