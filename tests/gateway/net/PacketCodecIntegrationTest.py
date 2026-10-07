@@ -15,9 +15,11 @@ sys.dont_write_bytecode = True
 from TcpServerIntegrationTest import connect, fd_count, reserve_port, wait_until
 
 BODY_LIMIT = 256 * 1024
+MAGIC = 0x4152454E
+HEADER_SIZE = 15
 
 def packet(payload, request_id=1, packet_type=1, version=1):
-    return struct.pack("!IHIB", len(payload) + 7, packet_type, request_id, version) + payload
+    return struct.pack("!IIHIB", MAGIC, len(payload) + 7, packet_type, request_id, version) + payload
 
 def receive_exact(peer, length):
     result = bytearray()
@@ -65,7 +67,7 @@ def run(binary, workers):
         # Every header byte is fragmented; no callback on a partial frame.
         with connect(port) as peer:
             wire = packet(b"\x00\xffbinary",0x01020304)
-            for byte in wire[:10]:
+            for byte in wire[:HEADER_SIZE-1]:
                 peer.sendall(bytes([byte]))
             peer.settimeout(.05)
             try:
@@ -74,7 +76,7 @@ def run(binary, workers):
             except socket.timeout:
                 pass
             peer.settimeout(5)
-            peer.sendall(wire[10:])
+            peer.sendall(wire[HEADER_SIZE-1:])
             expected = packet(b"\x00\xffbinary",0x01020304,2)
             assert receive_exact(peer,len(expected)) == expected
 
@@ -116,14 +118,15 @@ def run(binary, workers):
             peer.shutdown(socket.SHUT_WR)
             assert peer.recv(1) == b""
 
-        # Invalid length is rejected after only four bytes, before payload.
-        invalid = [struct.pack("!I",size) for size in (0,6,BODY_LIMIT+1,4*1024*1024+1)]
+        # Invalid magic is rejected after four bytes; length after eight bytes.
+        invalid = [struct.pack("!II",MAGIC,size) for size in (0,6,BODY_LIMIT+1,4*1024*1024+1)]
+        invalid += [struct.pack("!I", 0xDEADBEEF)]
         invalid += [packet(b"",1,3),packet(b"",1,1,2),packet(b"",1,2)]
         for wire in invalid:
             with connect(port) as peer:
                 peer.sendall(wire)
                 expect_closed(peer)
-        for prefix in (3,4,10,13):
+        for prefix in (3,4,7,8,14,17):
             with connect(port) as peer:
                 peer.sendall(packet(b"truncated body",3)[:prefix])
                 peer.shutdown(socket.SHUT_WR)

@@ -25,9 +25,9 @@ PacketCodec::PacketCodec(std::size_t limit)
     : m_maxBodySize(checkedLimit(limit))
     , m_input(
           std::min<std::size_t>(
-              4096, limit + PacketHeader::kLengthSize
+              4096, limit + PacketHeader::kPrefixSize
           ),
-          limit + PacketHeader::kLengthSize,
+          limit + PacketHeader::kPrefixSize,
           0
       )
 {
@@ -60,8 +60,8 @@ FrameDecodeStatus PacketCodec::feed(
         for (;;)
         {
             const auto size = m_input.readableBytes();
-            std::size_t target = PacketHeader::kLengthSize;
-            if (size >= PacketHeader::kLengthSize)
+            std::size_t target = PacketHeader::kMagicSize;
+            if (size >= PacketHeader::kMagicSize)
             {
                 PacketHeader header;
                 auto status = PacketHeaderCodec::decode(
@@ -69,21 +69,31 @@ FrameDecodeStatus PacketCodec::feed(
                     size,
                     header
                 );
-                std::uint32_t networkLength;
-                std::memcpy(
-                    &networkLength,
-                    m_input.peek(),
-                    sizeof(networkLength)
-                );
-                const auto bodyLength = ::ntohl(networkLength);
-                if (status == HeaderDecodeStatus::Invalid ||
-                    bodyLength > m_maxBodySize)
+                if (status == HeaderDecodeStatus::Invalid)
                 {
                     return m_status = FrameDecodeStatus::Invalid;
                 }
-                target = size < PacketHeader::kHeaderSize
-                             ? PacketHeader::kHeaderSize
-                             : PacketHeader::kLengthSize + bodyLength;
+                if (size < PacketHeader::kPrefixSize)
+                {
+                    target = PacketHeader::kPrefixSize;
+                }
+                else
+                {
+                    std::uint32_t networkLength;
+                    std::memcpy(
+                        &networkLength,
+                        m_input.peek() + PacketHeader::kMagicSize,
+                        sizeof(networkLength)
+                    );
+                    const auto bodyLength = ::ntohl(networkLength);
+                    if (bodyLength > m_maxBodySize)
+                    {
+                        return m_status = FrameDecodeStatus::Invalid;
+                    }
+                    target = size < PacketHeader::kHeaderSize
+                                 ? PacketHeader::kHeaderSize
+                                 : PacketHeader::kPrefixSize + bodyLength;
+                }
                 if (size == target &&
                     status == HeaderDecodeStatus::Complete)
                 {

@@ -92,7 +92,9 @@ TEST(PacketCodecTest, ProcessesAggregateLargerThanItsBound)
 TEST(PacketCodecTest, RejectsConfiguredLengthAsSoonAsPrefixArrives)
 {
     PacketCodec codec(32);
-    const std::array<std::byte, 4> length{
+    const std::array<std::byte, 8> prefix{
+        std::byte{0x41}, std::byte{0x52},
+        std::byte{0x45}, std::byte{0x4e},
         std::byte{0},
         std::byte{0},
         std::byte{0},
@@ -104,10 +106,10 @@ TEST(PacketCodecTest, RejectsConfiguredLengthAsSoonAsPrefixArrives)
         return true;
     };
     EXPECT_EQ(
-        codec.feed(length, receive),
+        codec.feed(prefix, receive),
         FrameDecodeStatus::Invalid
     );
-    EXPECT_EQ(codec.pendingBytes(), 4);
+    EXPECT_EQ(codec.pendingBytes(), PacketHeader::kPrefixSize);
     EXPECT_EQ(
         codec.feed(bytes(frame("valid")), receive),
         FrameDecodeStatus::Invalid
@@ -117,7 +119,7 @@ TEST(PacketCodecTest, RejectsConfiguredLengthAsSoonAsPrefixArrives)
 
 TEST(PacketCodecTest, RejectsMalformedHeaderBeforeBodyRetention)
 {
-    for (auto offset : {5u, 10u})
+    for (auto offset : {9u, 14u})
     {
         auto wire = frame(std::string(128, 'x'));
         wire[offset] = static_cast<char>(99);
@@ -253,4 +255,21 @@ TEST(
         PacketCodec(PacketHeader::kMaxPacketSize + 1),
         std::invalid_argument
     );
+}
+
+TEST(PacketCodecTest, RejectsBadMagicAtFourBytes)
+{
+    PacketCodec codec;
+    const std::array<std::byte, 4> badMagic{
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}};
+    int delivered = 0;
+    auto receive = [&](auto&, auto) {
+        ++delivered;
+        return true;
+    };
+    EXPECT_EQ(codec.feed(badMagic, receive), FrameDecodeStatus::Invalid);
+    EXPECT_EQ(codec.pendingBytes(), badMagic.size());
+    EXPECT_EQ(codec.feed(bytes(frame("ignored")), receive),
+              FrameDecodeStatus::Invalid);
+    EXPECT_EQ(delivered, 0);
 }

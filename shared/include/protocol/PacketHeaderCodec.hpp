@@ -32,7 +32,8 @@ public:
     // buffer unchanged.
     static bool encode(Buffer& buffer, const PacketHeader& header);
 
-    // Rejects an invalid length as soon as its four bytes arrive.
+    // Rejects an invalid magic after four bytes and an invalid body
+    // length after the eight-byte prefix.
     // The output is unchanged until a complete valid header is
     // available.
     static HeaderDecodeStatus decode(

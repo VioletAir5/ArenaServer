@@ -85,7 +85,7 @@ TEST(PacketHeaderCodecTest, EncodesExactBigEndianHeaderAndDecodesIt)
     ASSERT_TRUE(PacketHeaderCodec::encode(buffer, header));
 
     const std::array<unsigned char, PacketHeader::kHeaderSize>
-        expected{0, 0, 0, 10, 0, 1, 1, 2, 3, 4, 1};
+        expected{65, 82, 69, 78, 0, 0, 0, 10, 0, 1, 1, 2, 3, 4, 1};
     ASSERT_EQ(buffer.readableBytes(), PacketHeader::kHeaderSize + 3);
     EXPECT_EQ(
         std::memcmp(buffer.peek(), expected.data(), expected.size()),
@@ -114,7 +114,7 @@ TEST(PacketHeaderCodecTest, EncodesExactBigEndianHeaderAndDecodesIt)
 TEST(PacketHeaderCodecTest, RejectsIncompleteAndInvalidLengthsEarly)
 {
     const std::array<char, PacketHeader::kHeaderSize>
-        valid{0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1};
+        valid{65, 82, 69, 78, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1};
     PacketHeader output;
     output.m_requestId = 42;
     EXPECT_EQ(
@@ -126,21 +126,21 @@ TEST(PacketHeaderCodecTest, RejectsIncompleteAndInvalidLengthsEarly)
         HeaderDecodeStatus::Incomplete
     );
     EXPECT_EQ(
-        PacketHeaderCodec::decode(valid.data(), 10, output),
+        PacketHeaderCodec::decode(valid.data(), 14, output),
         HeaderDecodeStatus::Incomplete
     );
     EXPECT_EQ(output.m_requestId, 42U);
 
     auto invalid = valid;
-    invalid[3] = 6;
+    invalid[7] = 6;
     EXPECT_EQ(
-        PacketHeaderCodec::decode(invalid.data(), 4, output),
+        PacketHeaderCodec::decode(invalid.data(), 8, output),
         HeaderDecodeStatus::Invalid
     );
     invalid = valid;
-    invalid[0] = 1; // 0x01000007 exceeds 4 MiB.
+    invalid[4] = 1; // 0x01000007 exceeds 4 MiB.
     EXPECT_EQ(
-        PacketHeaderCodec::decode(invalid.data(), 4, output),
+        PacketHeaderCodec::decode(invalid.data(), 8, output),
         HeaderDecodeStatus::Invalid
     );
     EXPECT_EQ(output.m_requestId, 42U);
@@ -149,14 +149,14 @@ TEST(PacketHeaderCodecTest, RejectsIncompleteAndInvalidLengthsEarly)
 TEST(PacketHeaderCodecTest, RejectsUnknownTypeAndVersion)
 {
     std::array<char, PacketHeader::kHeaderSize>
-        bytes{0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1};
+        bytes{65, 82, 69, 78, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1};
     PacketHeader output;
-    bytes[5] = 3;
+    bytes[9] = 3;
     EXPECT_EQ(
         PacketHeaderCodec::decode(bytes.data(), bytes.size(), output),
         HeaderDecodeStatus::Invalid
     );
-    bytes[5] = 1;
+    bytes[9] = 1;
     bytes.back() = 2;
     EXPECT_EQ(
         PacketHeaderCodec::decode(bytes.data(), bytes.size(), output),
@@ -195,7 +195,7 @@ TEST(PacketHeaderCodecTest, AcceptsMaximumLegalBodyLength)
     header.m_type = PacketHeader::kEchoResponse;
     header.m_requestId = 0xffffffffU;
     const std::array<char, PacketHeader::kHeaderSize>
-        wire{0, 64, 0, 0, 0, 2, -1, -1, -1, -1, 1};
+        wire{65, 82, 69, 78, 0, 64, 0, 0, 0, 2, -1, -1, -1, -1, 1};
     PacketHeader decoded;
     EXPECT_EQ(
         PacketHeaderCodec::decode(wire.data(), wire.size(), decoded),
@@ -260,7 +260,7 @@ TEST(PacketHeaderCodecTest, ParsesFragmentedAndCoalescedFrames)
 TEST(PacketHeaderCodecTest, InvalidLengthStopsBeforePayloadAllocation)
 {
     Buffer input;
-    const char oversized[] = {1, 0, 0, 0};
+    const char oversized[] = {65, 82, 69, 78, 1, 0, 0, 0};
     ASSERT_TRUE(input.append(oversized, sizeof(oversized)));
     int delivered = 0;
     EXPECT_EQ(
@@ -334,7 +334,7 @@ TEST(PacketHeaderCodecTest, OneByteThroughMaximumPayloadBoundaries)
         ASSERT_TRUE(PacketHeaderCodec::encode(output, header));
         ASSERT_EQ(
             output.readableBytes(),
-            PacketHeader::kLengthSize + header.m_length
+            PacketHeader::kPrefixSize + header.m_length
         );
 
         Buffer input;
@@ -484,11 +484,11 @@ TEST(
           std::uint32_t{0xffffffffU}})
     {
         SCOPED_TRACE(bodyLength);
+        const std::uint32_t networkMagic = ::htonl(PacketHeader::kMagic);
         const std::uint32_t networkLength = ::htonl(bodyLength);
         Buffer input;
-        ASSERT_TRUE(
-            input.append(&networkLength, sizeof(networkLength))
-        );
+        ASSERT_TRUE(input.append(&networkMagic, sizeof(networkMagic)));
+        ASSERT_TRUE(input.append(&networkLength, sizeof(networkLength)));
         PacketHeader output;
         output.m_requestId = 77;
         EXPECT_EQ(
@@ -513,7 +513,7 @@ TEST(
         );
         EXPECT_EQ(output.m_requestId, 77U);
         EXPECT_EQ(delivered, 0);
-        EXPECT_EQ(input.readableBytes(), PacketHeader::kLengthSize);
+        EXPECT_EQ(input.readableBytes(), PacketHeader::kPrefixSize);
     }
 }
 
@@ -569,4 +569,25 @@ TEST(
         EXPECT_EQ(delivered, 1);
         EXPECT_EQ(input.readableBytes(), 0);
     }
+}
+
+TEST(PacketHeaderCodecTest, RejectsBadMagicBeforeLengthAndEncode)
+{
+    const std::array<char, PacketHeader::kHeaderSize> wire{
+        0, 0, 0, 0, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1};
+    PacketHeader decoded;
+    decoded.m_requestId = 42;
+    EXPECT_EQ(PacketHeaderCodec::decode(wire.data(), 3, decoded),
+              HeaderDecodeStatus::Incomplete);
+    EXPECT_EQ(PacketHeaderCodec::decode(wire.data(), 4, decoded),
+              HeaderDecodeStatus::Invalid);
+    EXPECT_EQ(decoded.m_requestId, 42U);
+
+    Buffer buffer;
+    PacketHeader header;
+    header.m_magic = 0;
+    header.m_length = PacketHeader::kMetadataSize;
+    header.m_type = PacketHeader::kEchoRequest;
+    EXPECT_FALSE(PacketHeaderCodec::encode(buffer, header));
+    EXPECT_EQ(buffer.readableBytes(), 0);
 }

@@ -12,7 +12,8 @@ namespace
 {
 bool valid(const PacketHeader& header) noexcept
 {
-    return header.m_length >= PacketHeader::kMetadataSize &&
+    return header.m_magic == PacketHeader::kMagic &&
+           header.m_length >= PacketHeader::kMetadataSize &&
            header.m_length <= PacketHeader::kMaxPacketSize &&
            header.m_version == PacketHeader::kCurrentVersion &&
            (header.m_type == PacketHeader::kEchoRequest ||
@@ -37,15 +38,23 @@ bool PacketHeaderCodec::encode(
     const std::uint16_t networkType = ::htons(header.m_type);
     const std::uint32_t networkRequestId = ::htonl(header.m_requestId
     );
-    std::memcpy(bytes.data(), &networkLength, sizeof(networkLength));
+    const std::uint32_t networkMagic = ::htonl(header.m_magic);
+
+    std::memcpy(bytes.data(), &networkMagic, sizeof(networkMagic));
     std::memcpy(
-        bytes.data() + PacketHeader::kLengthSize,
+        bytes.data() + PacketHeader::kMagicSize,
+        &networkLength,
+        sizeof(networkLength)
+    );
+    std::memcpy(
+        bytes.data() + PacketHeader::kMagicSize +
+            PacketHeader::kLengthSize,
         &networkType,
         sizeof(networkType)
     );
     std::memcpy(
-        bytes.data() + PacketHeader::kLengthSize +
-            PacketHeader::kTypeSize,
+        bytes.data() + PacketHeader::kMagicSize +
+            PacketHeader::kLengthSize + PacketHeader::kTypeSize,
         &networkRequestId,
         sizeof(networkRequestId)
     );
@@ -57,7 +66,7 @@ HeaderDecodeStatus PacketHeaderCodec::decode(
     const char* data, std::size_t len, PacketHeader& header
 ) noexcept
 {
-    if (len < PacketHeader::kLengthSize)
+    if (len < PacketHeader::kMagicSize)
     {
         return HeaderDecodeStatus::Incomplete;
     }
@@ -66,9 +75,28 @@ HeaderDecodeStatus PacketHeaderCodec::decode(
         return HeaderDecodeStatus::Invalid;
     }
 
-    std::uint32_t networkLength = 0;
-    std::memcpy(&networkLength, data, sizeof(networkLength));
+    std::uint32_t networkMagic = 0;
+    std::memcpy(&networkMagic, data, sizeof(networkMagic));
+
     PacketHeader candidate;
+    candidate.m_magic = ::ntohl(networkMagic);
+    if (candidate.m_magic != PacketHeader::kMagic)
+    {
+        return HeaderDecodeStatus::Invalid;
+    }
+
+    if (len < PacketHeader::kPrefixSize)
+    {
+        return HeaderDecodeStatus::Incomplete;
+    }
+
+    std::uint32_t networkLength = 0;
+    std::memcpy(
+        &networkLength,
+        data + PacketHeader::kMagicSize,
+        sizeof(networkLength)
+    );
+
     candidate.m_length = ::ntohl(networkLength);
     if (candidate.m_length < PacketHeader::kMetadataSize ||
         candidate.m_length > PacketHeader::kMaxPacketSize)
@@ -84,12 +112,13 @@ HeaderDecodeStatus PacketHeaderCodec::decode(
     std::uint32_t networkRequestId = 0;
     std::memcpy(
         &networkType,
-        data + PacketHeader::kLengthSize,
+        data + PacketHeader::kMagicSize + PacketHeader::kLengthSize,
         sizeof(networkType)
     );
     std::memcpy(
         &networkRequestId,
-        data + PacketHeader::kLengthSize + PacketHeader::kTypeSize,
+        data + PacketHeader::kMagicSize + PacketHeader::kLengthSize +
+            PacketHeader::kTypeSize,
         sizeof(networkRequestId)
     );
     candidate.m_type = ::ntohs(networkType);
@@ -126,7 +155,7 @@ FrameDecodeStatus PacketHeaderCodec::decodeFrames(
             return FrameDecodeStatus::Invalid;
         }
 
-        const std::size_t frameSize = PacketHeader::kLengthSize +
+        const std::size_t frameSize = PacketHeader::kPrefixSize +
                                       header.m_length;
         if (input.readableBytes() < frameSize)
         {
