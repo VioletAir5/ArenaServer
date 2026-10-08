@@ -13,24 +13,35 @@
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
 #include "net/PacketEcho.h"
+#include "net/PreLoginHandshake.h"
 #include "net/TcpServer.h"
+#include "net/WebSocketServer.h"
 
 using namespace service::gateway;
 
 int main(int argc, char** argv)
 {
     const std::string_view backend = argc >= 2 ? argv[1] : "epoll";
-    const std::string_view protocol = argc == 3 ? argv[2] : "raw";
-    if (argc > 3 || (backend != "epoll" && backend != "asio") ||
-        (protocol != "raw" && protocol != "packet"))
+    const std::string_view protocol = argc >= 3 ? argv[2] : "raw";
+    if (argc > 4 || (backend != "epoll" && backend != "asio") ||
+        (protocol != "raw" && protocol != "packet" &&
+         protocol != "handshake") ||
+        (protocol == "handshake" && backend != "asio") ||
+        (argc == 4 && protocol != "handshake"))
     {
-        std::cerr << "Usage: ArenaServer [epoll|asio] [raw|packet]\n";
+        std::cerr << "Usage: ArenaServer [epoll|asio] "
+                     "[raw|packet|handshake] [ws-origin]\n";
         return 2;
     }
     ConnectionHandlerFactory handlerFactory;
     if (protocol == "packet")
     {
         handlerFactory = [] { return makePacketEchoHandler(); };
+    }
+    if (protocol == "handshake")
+    {
+        handlerFactory = []
+        { return makePreLoginHandshakeHandler(); };
     }
     const InetAddress address("127.0.0.1", 8888);
     if (backend == "epoll")
@@ -61,6 +72,19 @@ int main(int argc, char** argv)
             4,
             handlerFactory
         );
+    std::unique_ptr<WebSocketServer> wsServer;
+    if (protocol == "handshake")
+    {
+        const std::string origin = argc == 4
+                                       ? argv[3]
+                                       : "http://localhost:3000";
+        wsServer = std::make_unique<WebSocketServer>(
+            context,
+            InetAddress("127.0.0.1", 8889),
+            origin,
+            handlerFactory
+        );
+    }
     std::function<void()> waitStopped;
     waitStopped = [&]
     {
@@ -85,6 +109,10 @@ int main(int argc, char** argv)
             if (!error)
             {
                 server->stop();
+                if (wsServer)
+                {
+                    wsServer->stop();
+                }
                 waitStopped();
             }
         }

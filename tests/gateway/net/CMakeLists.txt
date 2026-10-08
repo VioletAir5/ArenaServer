@@ -151,3 +151,24 @@ foreach(backend epoll asio)
             TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;protocol")
     endforeach()
 endforeach()
+
+add_executable(arena_websocket_test_host WebSocketTestHost.cpp)
+target_link_libraries(arena_websocket_test_host PRIVATE arena_gateway)
+target_compile_options(arena_websocket_test_host PRIVATE
+    -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
+)
+target_link_options(arena_websocket_test_host PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie
+)
+add_dependencies(arena_tests arena_websocket_test_host)
+add_test(NAME WebSocketTransport_HandshakeLimits
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/WebSocketIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>"
+)
+set_tests_properties(WebSocketTransport_HandshakeLimits PROPERTIES
+    LABELS "integration;network;websocket"
+    TIMEOUT 30
+    RUN_SERIAL TRUE
+)
