@@ -16,6 +16,8 @@
 #include "net/PreLoginHandshake.h"
 #include "net/WebSocketServer.h"
 
+#include "ConnectionContextTestHandler.h"
+
 using namespace service::gateway;
 
 int main(int argc, char** argv)
@@ -29,8 +31,10 @@ int main(int argc, char** argv)
     const std::string origin = argv[3];
     const std::string mode = argv[4];
     boost::asio::io_context context;
-    ConnectionHandlerFactory handshake = []
+    ConnectionHandlerFactory handshake = [](ConnectionContext::Ptr)
     { return makePreLoginHandshakeHandler(); };
+    if (mode == "context")
+        handshake = makeContextTestFactory();
     AsioTcpServer tcp(
         context,
         InetAddress("127.0.0.1", tcpPort),
@@ -42,7 +46,7 @@ int main(int argc, char** argv)
     ConnectionHandlerFactory wsFactory = handshake;
     if (mode == "flood")
     {
-        wsFactory = []
+        wsFactory = [](ConnectionContext::Ptr)
         {
             return [](IConnection& connection,
                       std::span<const std::byte>)

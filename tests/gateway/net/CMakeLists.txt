@@ -172,3 +172,26 @@ set_tests_properties(WebSocketTransport_HandshakeLimits PROPERTIES
     TIMEOUT 30
     RUN_SERIAL TRUE
 )
+
+# Admission metadata crosses the real owner handoff in each backend.
+foreach(backend epoll asio)
+    if(backend STREQUAL "epoll")
+        set(context_host arena_tcp_server_test_host)
+    else()
+        set(context_host arena_asio_tcp_server_test_host)
+    endif()
+    foreach(workers 0 4)
+        add_test(NAME ConnectionContextTransport_${backend}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ConnectionContextIntegrationTest.py"
+                "$<TARGET_FILE:${context_host}>" tcp ${workers})
+        set_tests_properties(ConnectionContextTransport_${backend}_${workers}
+            PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;context")
+    endforeach()
+endforeach()
+add_test(NAME ConnectionContextTransport_ws
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ConnectionContextIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
+set_tests_properties(ConnectionContextTransport_ws PROPERTIES
+    TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;context;websocket")

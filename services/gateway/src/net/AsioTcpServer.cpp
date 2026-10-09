@@ -153,7 +153,9 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
 
     void
     add(std::uint64_t ticket,
-        const std::shared_ptr<AcceptedFd>& accepted)
+        const std::shared_ptr<AcceptedFd>& accepted,
+        InetAddress peer,
+        ConnectionContext::Clock::time_point acceptedAt)
     {
         if (cleaning || forceClosing)
         {
@@ -175,17 +177,15 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
                 std::move(socket),
                 idleTimeout
             );
-            auto handler = handlerFactory
-                               ? handlerFactory()
-                               : ConnectionMessageCallback(
-                                     [](IConnection& c, auto bytes)
-                                     { c.send(bytes); }
-                                 );
-            if (!handler)
-            {
-                throw std::invalid_argument("empty connection handler"
-                );
-            }
+            auto contextInfo = std::make_shared<ConnectionContext>(
+                connection->id(),
+                std::move(peer),
+                acceptedAt
+            );
+            auto handler = makeConnectionHandler(
+                handlerFactory,
+                std::move(contextInfo)
+            );
             connection->setMessageCallback(std::move(handler));
             connection->setHighWaterMarkCallback(
                 [](IConnection& c, auto) { c.pauseRead(); }
@@ -458,6 +458,8 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                     self->acceptError(error);
                     return;
                 }
+                const auto acceptedAt = ConnectionContext::Clock::now(
+                );
                 if (self->admissions.size() >= self->capacity)
                 {
                     std::cerr
@@ -467,6 +469,18 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                 }
                 else
                 {
+                    const auto endpoint = socket->remote_endpoint(
+                        error
+                    );
+                    if (error)
+                    {
+                        self->acceptError(error);
+                        return;
+                    }
+                    const InetAddress peer(
+                        endpoint.address().to_v4().to_string(),
+                        endpoint.port()
+                    );
                     const int flags = ::fcntl(
                         socket->native_handle(),
                         F_GETFD
@@ -507,8 +521,18 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                     try
                     {
                         worker->dispatch(
-                            [worker, accepted, ticket]
-                            { worker->add(ticket, accepted); }
+                            [worker,
+                             accepted,
+                             ticket,
+                             peer,
+                             acceptedAt] {
+                                worker->add(
+                                    ticket,
+                                    accepted,
+                                    peer,
+                                    acceptedAt
+                                );
+                            }
                         );
                     }
                     catch (...)

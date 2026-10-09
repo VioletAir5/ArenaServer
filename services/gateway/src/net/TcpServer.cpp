@@ -55,7 +55,12 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     {
     }
 
-    void addConnection(Id id, Socket socket)
+    void addConnection(
+        Id id,
+        Socket socket,
+        InetAddress peer,
+        ConnectionContext::Clock::time_point acceptedAt
+    )
     {
         std::shared_ptr<TcpConnection> connection;
         try
@@ -79,17 +84,15 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
                 std::move(socket)
             );
             connection->channel().tie(connection);
-            auto handler = handlerFactory
-                               ? handlerFactory()
-                               : ConnectionMessageCallback(
-                                     [](IConnection& conn, auto bytes)
-                                     { conn.send(bytes); }
-                                 );
-            if (!handler)
-            {
-                throw std::invalid_argument("empty connection handler"
-                );
-            }
+            auto context = std::make_shared<ConnectionContext>(
+                connection->id(),
+                std::move(peer),
+                acceptedAt
+            );
+            auto handler = makeConnectionHandler(
+                handlerFactory,
+                std::move(context)
+            );
             connection->setMessageCallback(
                 [handler = std::move(handler
                  )](TcpConnection& conn, std::string_view bytes)
@@ -521,6 +524,7 @@ void TcpServer::handleNewConnection(
     Socket&& socket, const InetAddress& peer
 )
 {
+    const auto acceptedAt = ConnectionContext::Clock::now();
     if (m_state != TcpServerState::Running)
     {
         return;
@@ -556,8 +560,15 @@ void TcpServer::handleNewConnection(
     try
     {
         owner->runInLoop(
-            [selected, id, accepted]()
-            { selected->addConnection(id, std::move(*accepted)); }
+            [selected, id, accepted, peer, acceptedAt]()
+            {
+                selected->addConnection(
+                    id,
+                    std::move(*accepted),
+                    peer,
+                    acceptedAt
+                );
+            }
         );
     }
     catch (...)

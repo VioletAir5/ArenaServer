@@ -17,6 +17,8 @@
 #include "net/TcpServer.h"
 #include "os/FileDescriptor.h"
 
+#include "ConnectionContextTestHandler.h"
+
 // A separate process lets the integration test inspect /proc/<pid>/fd
 // and stop the event loop cleanly, including under LeakSanitizer.
 int main(int argc, char** argv)
@@ -28,12 +30,18 @@ int main(int argc, char** argv)
     service::gateway::ConnectionHandlerFactory handlerFactory;
     if (argc == 5)
     {
-        if (std::string_view(argv[4]) != "packet")
+        if (std::string_view(argv[4]) == "context")
+        {
+            handlerFactory = makeContextTestFactory();
+        }
+        else if (std::string_view(argv[4]) != "packet")
         {
             return 2;
         }
-        handlerFactory = []
-        { return service::gateway::makePacketEchoHandler(); };
+        if (!handlerFactory)
+            handlerFactory =
+                [](service::gateway::ConnectionContext::Ptr)
+            { return service::gateway::makePacketEchoHandler(); };
     }
 
     sigset_t signals;

@@ -357,8 +357,8 @@ private:
     void writeNext()
     {
         const auto state = m_state.load();
-        if ((state != State::Open &&
-             state != State::ClosePendingWrite) ||
+        if ((state != State::Open && state != State::ClosePendingWrite
+            ) ||
             m_writing)
             return;
         if (state == State::ClosePendingWrite)
@@ -409,7 +409,8 @@ private:
     void startClose(websocket::close_code code, std::string reason)
     {
         const auto state = m_state.load();
-        if (state == State::Closed || state == State::ClosePendingWrite ||
+        if (state == State::Closed ||
+            state == State::ClosePendingWrite ||
             state == State::CloseHandshake)
             return;
         if (state != State::Open)
@@ -481,8 +482,9 @@ private:
     std::deque<std::shared_ptr<std::string>> m_output;
     std::size_t m_pendingBytes{0};
     bool m_acceptingSends{true};
-    // The connection owner changes the lifecycle; connected() may read it
-    // from another thread. Read/write activity is orthogonal to this state.
+    // The connection owner changes the lifecycle; connected() may
+    // read it from another thread. Read/write activity is orthogonal
+    // to this state.
     std::atomic<State> m_state{State::ReadingHttp};
     bool m_reading{false};
     bool m_readPaused{false};
@@ -545,6 +547,8 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
             {
                 if (!error && !self->stopping)
                 {
+                    const auto
+                        acceptedAt = ConnectionContext::Clock::now();
                     if (self->connections.size() >= self->capacity)
                     {
                         Error ignored;
@@ -556,11 +560,23 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                         {
                             const auto id = detail::nextConnectionId(
                             );
-                            auto handler = self->factory();
-                            if (!handler)
-                                throw std::invalid_argument(
-                                    "empty handler"
-                                );
+                            const auto
+                                endpoint = socket.remote_endpoint();
+                            auto contextInfo = std::make_shared<
+                                ConnectionContext>(
+                                id,
+                                InetAddress(
+                                    endpoint.address()
+                                        .to_v4()
+                                        .to_string(),
+                                    endpoint.port()
+                                ),
+                                acceptedAt
+                            );
+                            auto handler = makeConnectionHandler(
+                                self->factory,
+                                std::move(contextInfo)
+                            );
                             auto session = std::make_shared<
                                 WebSocketConnection>(
                                 self->context,

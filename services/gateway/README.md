@@ -36,8 +36,39 @@ connection callback owns the chain. Links and node state are used on the
 connection owner; callback copies retain the same decoder and chain, so create
 a fresh callback for each connection through ConnectionHandlerFactory.
 
-IP policies need trusted peer metadata supplied at connection admission;
-IConnection currently exposes no peer address. A login deadline also needs an
-owner timer so an inactive client can expire without sending another packet.
-IP rate limits, whitelists, authentication, and login deadlines are future
-policies; this change supplies their handler interface.
+Connection policies receive trusted peer metadata through ConnectionContext,
+passed to ConnectionHandlerFactory on each connection owner. IConnection
+continues to provide transport operations.
+
+## Connection context
+
+ConnectionHandlerFactory now accepts ConnectionContext::Ptr, a shared pointer
+to immutable metadata: the process-wide connection ID, socket peer IPv4 address
+and port, and steady_clock acceptance time. Acceptance time is recorded in the
+successful accept path before worker handoff and, for WS, before HTTP Upgrade.
+The context and a fresh ConnectionSession are created on the target owner.
+
+For example:
+
+~~~cpp
+ConnectionHandlerFactory factory = [](ConnectionContext::Ptr context) {
+    std::cout << context->connectionId << " peer="
+              << context->peer.toString() << '\n';
+    return makePacketEchoHandler();
+};
+~~~
+
+makeConnectionHandler retains the context for the callback lifetime even if
+the factory ignores it. Factories may retain the context or its session in
+Handler nodes; create a fresh callback per connection.
+
+ConnectionSession starts Pending. markAuthenticated() changes Pending to
+Authenticated; expireLogin() changes Pending to Expired. Both return false
+after either terminal transition. Every session read and mutation requires
+the owner thread and throws logic_error otherwise; shared_ptr only extends
+lifetime. The context/session own no connection, socket, or timer.
+
+Authentication, login deadline checks/timers, token buckets, IP connection
+limits, and packet whitelist policies remain subsequent steps. Ping does not
+change login state. The session transition methods alone enforce no deadline
+and do not close the transport.

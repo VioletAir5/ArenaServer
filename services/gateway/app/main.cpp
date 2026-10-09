@@ -36,11 +36,12 @@ int main(int argc, char** argv)
     ConnectionHandlerFactory handlerFactory;
     if (protocol == "packet")
     {
-        handlerFactory = [] { return makePacketEchoHandler(); };
+        handlerFactory = [](ConnectionContext::Ptr)
+        { return makePacketEchoHandler(); };
     }
     if (protocol == "handshake")
     {
-        handlerFactory = []
+        handlerFactory = [](ConnectionContext::Ptr)
         { return makePreLoginHandshakeHandler(); };
     }
     const InetAddress address("127.0.0.1", 8888);
