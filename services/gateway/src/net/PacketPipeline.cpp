@@ -13,43 +13,48 @@
 
 namespace service::gateway
 {
-void PacketPipeline::addStage(Stage stage)
+void PacketHandler::setNext(std::unique_ptr<PacketHandler> next)
 {
-    if (!stage)
-    {
-        throw std::invalid_argument("empty packet stage");
-    }
-    m_stages.push_back(std::move(stage));
+    m_next = std::move(next);
 }
 
-PacketStageResult PacketPipeline::process(PacketContext& context) const
+PacketHandleResult PacketHandler::handle(PacketContext& context)
 {
-    for (const auto& stage : m_stages)
-    {
-        const auto result = stage(context);
-        if (result != PacketStageResult::Continue)
-        {
-            return result;
-        }
-    }
-    return PacketStageResult::Continue;
+    return m_next ? m_next->handle(context)
+                  : PacketHandleResult::Reject;
 }
 
-PacketStageResult PacketPipeline::decodeEnvelope(PacketContext& context)
+PacketPipeline::PacketPipeline(std::unique_ptr<PacketHandler> first)
+    : m_first(std::move(first))
+{
+    if (!m_first)
+    {
+        throw std::invalid_argument("empty packet handler chain");
+    }
+}
+
+PacketHandleResult PacketPipeline::process(PacketContext& context)
+{
+    return m_first->handle(context);
+}
+
+PacketHandleResult
+EnvelopeDecodeHandler::handle(PacketContext& context)
 {
     arena::protocol::Envelope decoded;
     if (!protocol::EnvelopeCodec::decode(
-            std::as_bytes(std::span(context.payload)), decoded))
+            std::as_bytes(std::span(context.payload)),
+            decoded
+        ))
     {
-        return PacketStageResult::Reject;
+        return PacketHandleResult::Reject;
     }
     context.envelope.emplace(std::move(decoded));
-    return PacketStageResult::Continue;
+    return PacketHandler::handle(context);
 }
 
-ConnectionMessageCallback makePacketHandler(
-    PacketPipeline pipeline, std::size_t maxBodySize
-)
+ConnectionMessageCallback
+makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize)
 {
     if (maxBodySize > kMaxPacketSize)
     {
@@ -58,7 +63,9 @@ ConnectionMessageCallback makePacketHandler(
         );
     }
     auto codec = std::make_shared<protocol::PacketCodec>(maxBodySize);
-    return [codec, pipeline = std::move(pipeline)](
+    auto chain = std::make_shared<PacketPipeline>(std::move(pipeline)
+    );
+    return [codec, chain = std::move(chain)](
                IConnection& connection,
                std::span<const std::byte> bytes
            )
@@ -70,9 +77,12 @@ ConnectionMessageCallback makePacketHandler(
                 [&](const protocol::PacketHeader& header,
                     std::string_view payload)
                 {
-                    PacketContext context{connection, header, payload};
-                    if (pipeline.process(context) ==
-                        PacketStageResult::Reject)
+                    PacketContext context{
+                        connection,
+                        header,
+                        payload};
+                    if (chain->process(context) ==
+                        PacketHandleResult::Reject)
                     {
                         connection.close();
                         return false;

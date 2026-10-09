@@ -1,19 +1,20 @@
 #pragma once
 
 #include <cstddef>
-#include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
-#include <vector>
 
-#include "envelope.pb.h"
 #include "net/ConnectionHandler.h"
 #include "protocol/PacketHeader.hpp"
 
+#include "envelope.pb.h"
+
 namespace service::gateway
 {
-// A context exists for one complete frame. payload refers to PacketCodec's
-// input and must not be retained after the callback returns.
+// A context exists for one complete frame. header and payload refer
+// to PacketCodec's input and must not be retained after the callback
+// returns.
 struct PacketContext
 {
     IConnection& connection;
@@ -22,34 +23,54 @@ struct PacketContext
     std::optional<arena::protocol::Envelope> envelope{};
 };
 
-enum class PacketStageResult
+enum class PacketHandleResult
 {
-    Continue, // Run the next stage.
-    Handled,  // Stop this chain; accept the current frame.
-    Reject    // Stop this chain and close the connection.
+    Handled, // Accept this frame and stop the chain.
+    Reject   // Stop the chain and close the connection.
 };
 
-// Configured once per connection, run serially by that connection's owner.
-// Framing stays in PacketCodec; stages only see complete frames.
+// Each connection owns a fresh chain. Configure links before
+// installing it; handle() and node state belong to that connection's
+// execution context.
+class PacketHandler
+{
+public:
+    virtual ~PacketHandler() = default;
+
+    void setNext(std::unique_ptr<PacketHandler> next);
+
+    // A filter that passes, or a router that does not match, calls
+    // this base implementation to forward. An unhandled frame is
+    // rejected at the tail.
+    virtual PacketHandleResult handle(PacketContext& context);
+
+private:
+    std::unique_ptr<PacketHandler> m_next;
+};
+
+// Opt-in protobuf decoding. Downstream handlers can read
+// context.envelope.
+class EnvelopeDecodeHandler final : public PacketHandler
+{
+public:
+    PacketHandleResult handle(PacketContext& context) override;
+};
+
+// Owns the chain head. Framing stays in PacketCodec; nodes see
+// complete frames.
 class PacketPipeline
 {
 public:
-    using Stage = std::function<PacketStageResult(PacketContext&)>;
-
-    void addStage(Stage stage);
-    PacketStageResult process(PacketContext& context) const;
-
-    // Opt-in stage for protobuf payloads. Later stages can read
-    // context.envelope; malformed or over-limit payloads are rejected.
-    static PacketStageResult decodeEnvelope(PacketContext& context);
+    explicit PacketPipeline(std::unique_ptr<PacketHandler> first);
+    PacketHandleResult process(PacketContext& context);
 
 private:
-    std::vector<Stage> m_stages;
+    std::unique_ptr<PacketHandler> m_first;
 };
 
-// Creates a per-connection decoder and attaches the ordered pipeline to
-// complete-frame callbacks. Reject closes the connection.
-ConnectionMessageCallback makePacketHandler(
-    PacketPipeline pipeline, std::size_t maxBodySize
-);
+// Creates a per-connection decoder and attaches the chain to complete
+// frames. Reject (including an unhandled frame) and callback
+// exceptions close it.
+ConnectionMessageCallback
+makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize);
 } // namespace service::gateway
