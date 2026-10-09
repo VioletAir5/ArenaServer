@@ -47,6 +47,16 @@ class WebSocketConnection final
     : public IConnection,
       public std::enable_shared_from_this<WebSocketConnection>
 {
+    enum class State
+    {
+        ReadingHttp,
+        Upgrading,
+        Open,
+        ClosePendingWrite,
+        CloseHandshake,
+        Closed
+    };
+
 public:
     WebSocketConnection(
         asio::io_context& context,
@@ -79,7 +89,7 @@ public:
     }
     bool connected() const noexcept override
     {
-        return m_open.load();
+        return m_state.load() == State::Open;
     }
     std::size_t pendingBytes() const noexcept override
     {
@@ -164,7 +174,8 @@ public:
             m_strand,
             [self](Error error)
             {
-                if (!error && !self->m_upgraded)
+                if (!error && self->m_state.load() != State::Open &&
+                    self->m_state.load() != State::Closed)
                 {
                     std::cerr << "WebSocket handshake timeout id="
                               << self->m_id << '\n';
@@ -186,10 +197,8 @@ public:
 
     void abort() noexcept
     {
-        if (m_finished)
+        if (m_state.exchange(State::Closed) == State::Closed)
             return;
-        m_finished = true;
-        m_open = false;
         {
             std::lock_guard lock(m_sendMutex);
             m_acceptingSends = false;
@@ -207,6 +216,8 @@ public:
 private:
     void onRequest(Error error)
     {
+        if (m_state.load() != State::ReadingHttp)
+            return;
         if (error)
         {
             abort();
@@ -242,18 +253,21 @@ private:
             return;
         }
         auto self = shared_from_this();
+        m_state = State::Upgrading;
         m_ws.async_accept(
             request,
             asio::bind_executor(
                 m_strand,
                 [self](Error acceptError)
                 {
+                    if (self->m_state.load() != State::Upgrading)
+                        return;
                     if (acceptError)
                     {
                         self->abort();
                         return;
                     }
-                    self->m_upgraded = true;
+                    self->m_state = State::Open;
                     Error ignored;
                     self->m_handshakeTimer.cancel(ignored);
                     self->readNext();
@@ -264,7 +278,7 @@ private:
 
     void readNext()
     {
-        if (!m_upgraded || m_finished || m_closing || m_readPaused ||
+        if (m_state.load() != State::Open || m_readPaused ||
             m_reading)
             return;
         m_reading = true;
@@ -282,7 +296,7 @@ private:
     void onRead(Error error)
     {
         m_reading = false;
-        if (m_finished)
+        if (m_state.load() == State::Closed)
             return;
         if (error == websocket::error::closed)
         {
@@ -342,9 +356,12 @@ private:
 
     void writeNext()
     {
-        if (m_finished || !m_upgraded || m_writing)
+        const auto state = m_state.load();
+        if ((state != State::Open &&
+             state != State::ClosePendingWrite) ||
+            m_writing)
             return;
-        if (m_closing)
+        if (state == State::ClosePendingWrite)
         {
             performClose();
             return;
@@ -371,7 +388,7 @@ private:
     void onWrite(Error error)
     {
         m_writing = false;
-        if (m_finished)
+        if (m_state.load() == State::Closed)
             return;
         if (error)
         {
@@ -391,10 +408,16 @@ private:
 
     void startClose(websocket::close_code code, std::string reason)
     {
-        if (m_finished || m_closing)
+        const auto state = m_state.load();
+        if (state == State::Closed || state == State::ClosePendingWrite ||
+            state == State::CloseHandshake)
             return;
-        m_closing = true;
-        m_open = false;
+        if (state != State::Open)
+        {
+            abort();
+            return;
+        }
+        m_state = State::ClosePendingWrite;
         m_closeCode = code;
         m_closeReason = std::move(reason);
         {
@@ -425,9 +448,9 @@ private:
 
     void performClose()
     {
-        if (m_finished || m_closeStarted)
+        if (m_state.load() != State::ClosePendingWrite)
             return;
-        m_closeStarted = true;
+        m_state = State::CloseHandshake;
         websocket::close_reason reason{m_closeCode};
         reason.reason = m_closeReason;
         std::cerr << "WebSocket local close id=" << m_id
@@ -458,14 +481,12 @@ private:
     std::deque<std::shared_ptr<std::string>> m_output;
     std::size_t m_pendingBytes{0};
     bool m_acceptingSends{true};
-    std::atomic<bool> m_open{true};
-    bool m_upgraded{false};
+    // The connection owner changes the lifecycle; connected() may read it
+    // from another thread. Read/write activity is orthogonal to this state.
+    std::atomic<State> m_state{State::ReadingHttp};
     bool m_reading{false};
     bool m_readPaused{false};
     bool m_writing{false};
-    bool m_closing{false};
-    bool m_closeStarted{false};
-    bool m_finished{false};
     websocket::close_code m_closeCode{websocket::close_code::normal};
     std::string m_closeReason;
 };
