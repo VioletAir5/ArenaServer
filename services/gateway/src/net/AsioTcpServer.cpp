@@ -21,6 +21,8 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/AsioConnect.h"
+#include "net/ConnectionRuntime.h"
+#include "net/ConnectionSchedulers.h"
 
 namespace service::gateway
 {
@@ -70,9 +72,18 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
     std::thread thread;
     const std::chrono::milliseconds idleTimeout;
     ConnectionHandlerFactory handlerFactory;
+    ConnectionFeatureFactory featureFactory;
     std::function<void(std::uint64_t)> onRemoved;
-    std::unordered_map<std::uint64_t, std::shared_ptr<AsioConnect>>
-        connections;
+    struct Entry
+    {
+        std::shared_ptr<ConnectionRuntime> runtime;
+        AsioConnect* transport;
+        AsioConnect* operator->() const noexcept
+        {
+            return transport;
+        }
+    };
+    std::unordered_map<std::uint64_t, Entry> connections;
     std::unordered_set<std::uint64_t> removals;
     bool removalQueued{false};
     bool draining{false};
@@ -84,6 +95,7 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
         bool owned,
         std::chrono::milliseconds idle,
         ConnectionHandlerFactory factory,
+        ConnectionFeatureFactory features,
         std::function<void(std::uint64_t)> removed
     )
         : ownedContext(owned ? std::make_unique<Context>() : nullptr)
@@ -91,6 +103,7 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
         , prime(context)
         , idleTimeout(idle)
         , handlerFactory(std::move(factory))
+        , featureFactory(std::move(features))
         , onRemoved(std::move(removed))
     {
         if (ownedContext)
@@ -182,27 +195,47 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
                 std::move(peer),
                 acceptedAt
             );
-            auto handler = makeConnectionHandler(
+            auto runtime = makeConnectionRuntime(
+                connection,
+                contextInfo,
+                connectionScheduler(connection->executor()),
                 handlerFactory,
-                std::move(contextInfo)
+                featureFactory
             );
-            connection->setMessageCallback(std::move(handler));
-            connection->setHighWaterMarkCallback(
-                [](IConnection& c, auto) { c.pauseRead(); }
+            const std::weak_ptr<ConnectionRuntime>
+                runtimeWeak = runtime;
+            connection->setMessageCallback(
+                [runtimeWeak](IConnection&, auto bytes)
+                {
+                    if (auto r = runtimeWeak.lock())
+                        r->received(bytes);
+                }
             );
-            connection->setLowWaterMarkCallback(
-                [](IConnection& c, auto) { c.resumeRead(); }
+            connection->setOutputCallback(
+                [runtimeWeak](std::size_t bytes)
+                {
+                    if (auto r = runtimeWeak.lock())
+                        r->outputChanged(bytes);
+                }
             );
             connection->setCloseCallback(
-                [weak = weak_from_this(), ticket](AsioConnect*)
+                [weak = weak_from_this(),
+                 runtimeWeak,
+                 ticket](AsioConnect*)
                 {
+                    if (auto r = runtimeWeak.lock())
+                        r->transportClosed();
                     if (auto worker = weak.lock())
                     {
                         worker->deferRemove(ticket);
                     }
                 }
             );
-            connections.emplace(ticket, connection);
+            connections.emplace(
+                ticket,
+                Entry{runtime, connection.get()}
+            );
+            runtime->start();
             connection->start();
             if (draining)
             {
@@ -317,6 +350,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
     const std::chrono::milliseconds idleTimeout;
     const std::size_t configuredWorkers;
     const ConnectionHandlerFactory handlerFactory;
+    const ConnectionFeatureFactory featureFactory;
     std::vector<std::shared_ptr<AsioWorker>> workers;
     std::shared_ptr<Tcp::socket> pendingAccept;
     std::unordered_set<std::uint64_t> admissions;
@@ -331,7 +365,8 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
         std::size_t max,
         std::chrono::milliseconds idle,
         std::size_t count,
-        ConnectionHandlerFactory factory
+        ConnectionHandlerFactory factory,
+        ConnectionFeatureFactory features
     )
         : base(context)
         , acceptor(context)
@@ -342,6 +377,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
         , idleTimeout(idle)
         , configuredWorkers(count)
         , handlerFactory(std::move(factory))
+        , featureFactory(std::move(features))
     {
         if (max == 0 || idle <= std::chrono::milliseconds::zero())
         {
@@ -404,6 +440,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                 configuredWorkers != 0,
                 idleTimeout,
                 handlerFactory,
+                featureFactory,
                 [weak = weak_from_this()](std::uint64_t ticket)
                 {
                     auto impl = weak.lock();
@@ -438,10 +475,12 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
             return;
         }
         auto socket = std::make_shared<Tcp::socket>(base);
+        auto peerEndpoint = std::make_shared<Tcp::endpoint>();
         pendingAccept = socket;
         acceptor.async_accept(
             *socket,
-            [weak = weak_from_this(), socket](Error error)
+            *peerEndpoint,
+            [weak = weak_from_this(), socket, peerEndpoint](Error error)
             {
                 auto self = weak.lock();
                 if (!self)
@@ -469,14 +508,9 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                 }
                 else
                 {
-                    const auto endpoint = socket->remote_endpoint(
-                        error
-                    );
-                    if (error)
-                    {
-                        self->acceptError(error);
-                        return;
-                    }
+                    // accept(2) returned the address while the peer still
+                    // existed; getpeername after completion can lose it to RST.
+                    const auto& endpoint = *peerEndpoint;
                     const InetAddress peer(
                         endpoint.address().to_v4().to_string(),
                         endpoint.port()
@@ -731,10 +765,16 @@ AsioTcpServer::AsioTcpServer(
     std::size_t max,
     std::chrono::milliseconds idle,
     std::size_t workers,
-    ConnectionHandlerFactory handlerFactory
+    ConnectionHandlerFactory handlerFactory,
+    ConnectionFeatureFactory featureFactory
 )
     : m_impl(std::make_shared<Impl>(
-          context, max, idle, workers, std::move(handlerFactory)
+          context,
+          max,
+          idle,
+          workers,
+          std::move(handlerFactory),
+          std::move(featureFactory)
       ))
 {
     try

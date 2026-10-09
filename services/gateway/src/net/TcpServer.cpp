@@ -10,6 +10,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "net/ConnectionRuntime.h"
+#include "net/ConnectionSchedulers.h"
 #include "net/TcpConnection.h"
 
 namespace service::gateway
@@ -46,11 +48,13 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
         EventLoop* owner,
         std::chrono::milliseconds timeout,
         ConnectionHandlerFactory factory,
+        ConnectionFeatureFactory features,
         RemovedCallback removed
     )
         : loop(owner)
         , idleTimeout(timeout)
         , handlerFactory(std::move(factory))
+        , featureFactory(std::move(features))
         , onRemoved(std::move(removed))
     {
     }
@@ -65,20 +69,6 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
         std::shared_ptr<TcpConnection> connection;
         try
         {
-            if (slowTimerId == 0)
-            {
-                const auto weak = weak_from_this();
-                slowTimerId = loop->runEvery(
-                    std::chrono::seconds(1),
-                    [weak]()
-                    {
-                        if (auto worker = weak.lock())
-                        {
-                            worker->checkSlowConnections();
-                        }
-                    }
-                );
-            }
             connection = std::make_shared<TcpConnection>(
                 loop,
                 std::move(socket)
@@ -89,35 +79,43 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
                 std::move(peer),
                 acceptedAt
             );
-            auto handler = makeConnectionHandler(
+            auto runtime = makeConnectionRuntime(
+                connection,
+                context,
+                connectionScheduler(*loop),
                 handlerFactory,
-                std::move(context)
+                featureFactory
             );
+            const std::weak_ptr<ConnectionRuntime>
+                runtimeWeak = runtime;
             connection->setMessageCallback(
-                [handler = std::move(handler
-                 )](TcpConnection& conn, std::string_view bytes)
-                { handler(conn, std::as_bytes(std::span(bytes))); }
+                [runtimeWeak](TcpConnection&, std::string_view bytes)
+                {
+                    if (auto r = runtimeWeak.lock())
+                        r->received(std::as_bytes(std::span(bytes)));
+                }
             );
-
-            connection->setHighWaterMarkCallback(
-                [](TcpConnection& conn, std::size_t)
-                { conn.pauseReading(); }
-            );
-            connection->setLowWaterMarkCallback(
-                [](TcpConnection& conn, std::size_t)
-                { conn.resumeReading(); }
+            connection->setOutputCallback(
+                [runtimeWeak](std::size_t bytes)
+                {
+                    if (auto r = runtimeWeak.lock())
+                        r->outputChanged(bytes);
+                }
             );
             const auto weak = weak_from_this();
             connection->setCloseCallback(
-                [weak, id](TcpConnection*)
+                [weak, runtimeWeak, id](TcpConnection*)
                 {
+                    if (auto r = runtimeWeak.lock())
+                        r->transportClosed();
                     if (auto worker = weak.lock())
                     {
                         worker->deferRemoval(id);
                     }
                 }
             );
-            connections.emplace(id, connection);
+            connections.emplace(id, Entry{runtime, connection.get()});
+            runtime->start();
             auto [timer, inserted] = idleTimers.emplace(id, 0);
             (void)inserted;
             timer->second = loop->runAfter(
@@ -226,15 +224,6 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
         );
     }
 
-    void checkSlowConnections()
-    {
-        const auto now = std::chrono::steady_clock::now();
-        for (auto& [id, connection] : connections)
-        {
-            connection->closeIfSlow(now);
-        }
-    }
-
     void drain()
     {
         for (auto& [id, connection] : connections)
@@ -256,11 +245,6 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     // batch.
     void cleanup()
     {
-        if (slowTimerId != 0)
-        {
-            loop->cancelTimer(slowTimerId);
-            slowTimerId = 0;
-        }
         for (const auto& [id, timer] : idleTimers)
         {
             loop->cancelTimer(timer);
@@ -269,6 +253,7 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
         for (const auto& [id, connection] : connections)
         {
             connection->setCloseCallback({});
+            connection->close();
             loop->removeChannel(&connection->channel());
         }
         connections.clear();
@@ -279,10 +264,18 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     EventLoop* const loop;
     const std::chrono::milliseconds idleTimeout;
     ConnectionHandlerFactory handlerFactory;
+    ConnectionFeatureFactory featureFactory;
     const RemovedCallback onRemoved;
-    TimerId slowTimerId{0};
-    std::unordered_map<Id, std::shared_ptr<TcpConnection>>
-        connections;
+    struct Entry
+    {
+        std::shared_ptr<ConnectionRuntime> runtime;
+        TcpConnection* transport; // Owned by runtime.
+        TcpConnection* operator->() const noexcept
+        {
+            return transport;
+        }
+    };
+    std::unordered_map<Id, Entry> connections;
     std::unordered_map<Id, TimerId> idleTimers;
     std::unordered_set<Id> pendingRemove;
     bool removalQueued{false};
@@ -294,7 +287,8 @@ TcpServer::TcpServer(
     std::size_t maxConnections,
     std::chrono::milliseconds idleTimeout,
     std::size_t workerCount,
-    ConnectionHandlerFactory handlerFactory
+    ConnectionHandlerFactory handlerFactory,
+    ConnectionFeatureFactory featureFactory
 )
     : m_loop(requireLoop(loop))
     , m_threadPool(m_loop, workerCount)
@@ -314,6 +308,7 @@ TcpServer::TcpServer(
             owner,
             idleTimeout,
             handlerFactory,
+            featureFactory,
             [base = m_loop, this, guard](std::uint64_t id)
             {
                 // Never dereference TcpServer on a worker thread.

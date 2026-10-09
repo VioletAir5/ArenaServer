@@ -24,6 +24,8 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 
+#include "net/ConnectionRuntime.h"
+#include "net/ConnectionSchedulers.h"
 #include "net/IConnection.h"
 
 #include "ConnectionId.h"
@@ -63,7 +65,6 @@ public:
         Tcp::socket socket,
         std::uint64_t id,
         std::string origin,
-        ConnectionMessageCallback handler,
         std::function<void(std::uint64_t)> removed
     )
         : m_id(id)
@@ -74,7 +75,6 @@ public:
         , m_httpBuffer(8192)
         , m_input(kMaxMessageBytes)
         , m_allowedOrigin(std::move(origin))
-        , m_handler(std::move(handler))
         , m_removed(std::move(removed))
     {
         m_request.header_limit(8192);
@@ -101,7 +101,7 @@ public:
     {
         if (bytes.empty())
             return;
-        bool overflow = false;
+        bool post = false;
         {
             std::lock_guard lock(m_sendMutex);
             if (!m_acceptingSends)
@@ -109,7 +109,7 @@ public:
             if (bytes.size() > kMaxQueuedBytes - m_pendingBytes)
             {
                 m_acceptingSends = false;
-                overflow = true;
+                m_outputOverflow = true;
             }
             else
             {
@@ -120,12 +120,27 @@ public:
                 m_pendingBytes += copy->size();
                 m_output.push_back(std::move(copy));
             }
+            if (!m_sendDrainPosted)
+            {
+                m_sendDrainPosted = true;
+                post = true;
+            }
         }
+        if (!post)
+            return;
         auto self = shared_from_this();
         asio::post(
             m_strand,
-            [self, overflow]
+            [self]
             {
+                bool overflow;
+                {
+                    std::lock_guard lock(self->m_sendMutex);
+                    self->m_sendDrainPosted = false;
+                    overflow = self->m_outputOverflow;
+                }
+                if (self->m_state.load() != State::Open)
+                    return;
                 if (overflow)
                 {
                     std::cerr
@@ -139,12 +154,12 @@ public:
                 }
                 else
                 {
+                    self->notifyOutputChanged();
                     self->writeNext();
                 }
             }
         );
     }
-
     void shutdown() override
     {
         startClose(websocket::close_code::normal, "shutdown");
@@ -163,9 +178,27 @@ public:
     void resumeRead() override
     {
         m_readPaused = false;
+        if (m_readReady)
+            deliverRead();
         readNext();
     }
 
+    void setCallbacks(
+        ConnectionMessageCallback handler,
+        std::function<void()> opened,
+        std::function<void(std::size_t)> output,
+        std::function<void()> closed
+    )
+    {
+        m_handler = std::move(handler);
+        m_opened = std::move(opened);
+        m_outputChanged = std::move(output);
+        m_closed = std::move(closed);
+    }
+    auto executor() const
+    {
+        return m_strand;
+    }
     void start()
     {
         auto self = shared_from_this();
@@ -210,6 +243,8 @@ public:
         m_closeTimer.cancel(ignored);
         m_ws.next_layer().cancel(ignored);
         m_ws.next_layer().close(ignored);
+        if (m_closed)
+            m_closed();
         m_removed(m_id);
     }
 
@@ -270,6 +305,8 @@ private:
                     self->m_state = State::Open;
                     Error ignored;
                     self->m_handshakeTimer.cancel(ignored);
+                    if (self->m_opened)
+                        self->m_opened();
                     self->readNext();
                 }
             )
@@ -279,7 +316,7 @@ private:
     void readNext()
     {
         if (m_state.load() != State::Open || m_readPaused ||
-            m_reading)
+            m_reading || m_readReady || m_delivering)
             return;
         m_reading = true;
         auto self = shared_from_this();
@@ -327,6 +364,18 @@ private:
             );
             return;
         }
+        m_readReady = true;
+        if (!m_readPaused)
+            deliverRead();
+    }
+
+    void deliverRead()
+    {
+        if (m_state.load() != State::Open || !m_readReady ||
+            m_readPaused || m_delivering)
+            return;
+        m_readReady = false;
+        m_delivering = true;
         try
         {
             const auto* data = asio::buffer_cast<const std::byte*>(
@@ -351,6 +400,7 @@ private:
             );
         }
         m_input.consume(m_input.size());
+        m_delivering = false;
         readNext();
     }
 
@@ -403,6 +453,7 @@ private:
                 m_output.pop_front();
             }
         }
+        notifyOutputChanged();
         writeNext();
     }
 
@@ -467,6 +518,11 @@ private:
         );
     }
 
+    void notifyOutputChanged()
+    {
+        if (m_outputChanged)
+            m_outputChanged(pendingBytes());
+    }
     const std::uint64_t m_id;
     asio::strand<asio::io_context::executor_type> m_strand;
     websocket::stream<Tcp::socket> m_ws;
@@ -477,16 +533,20 @@ private:
     http::request_parser<http::empty_body> m_request;
     const std::string m_allowedOrigin;
     ConnectionMessageCallback m_handler;
+    std::function<void()> m_opened, m_closed;
+    std::function<void(std::size_t)> m_outputChanged;
     std::function<void(std::uint64_t)> m_removed;
     mutable std::mutex m_sendMutex;
     std::deque<std::shared_ptr<std::string>> m_output;
     std::size_t m_pendingBytes{0};
     bool m_acceptingSends{true};
+    bool m_sendDrainPosted{false}, m_outputOverflow{false};
     // The connection owner changes the lifecycle; connected() may
     // read it from another thread. Read/write activity is orthogonal
     // to this state.
     std::atomic<State> m_state{State::ReadingHttp};
     bool m_reading{false};
+    bool m_readReady{false}, m_delivering{false};
     bool m_readPaused{false};
     bool m_writing{false};
     websocket::close_code m_closeCode{websocket::close_code::normal};
@@ -500,23 +560,32 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
     Tcp::acceptor acceptor;
     const std::string allowedOrigin;
     const ConnectionHandlerFactory factory;
+    const ConnectionFeatureFactory features;
     const std::size_t capacity;
-    std::unordered_map<
-        std::uint64_t,
-        std::shared_ptr<WebSocketConnection>>
-        connections;
+    struct Entry
+    {
+        std::shared_ptr<ConnectionRuntime> runtime;
+        WebSocketConnection* transport;
+        WebSocketConnection* operator->() const noexcept
+        {
+            return transport;
+        }
+    };
+    std::unordered_map<std::uint64_t, Entry> connections;
     bool stopping{false};
 
     Impl(
         asio::io_context& io,
         std::string origin,
         ConnectionHandlerFactory handlerFactory,
-        std::size_t max
+        std::size_t max,
+        ConnectionFeatureFactory featureFactory
     )
         : context(io)
         , acceptor(io)
         , allowedOrigin(std::move(origin))
         , factory(std::move(handlerFactory))
+        , features(std::move(featureFactory))
         , capacity(max)
     {
         if (allowedOrigin.empty() || !factory || capacity == 0)
@@ -573,17 +642,12 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                                 ),
                                 acceptedAt
                             );
-                            auto handler = makeConnectionHandler(
-                                self->factory,
-                                std::move(contextInfo)
-                            );
                             auto session = std::make_shared<
                                 WebSocketConnection>(
                                 self->context,
                                 std::move(socket),
                                 id,
                                 self->allowedOrigin,
-                                std::move(handler),
                                 [weak = self->weak_from_this(
                                  )](std::uint64_t key)
                                 {
@@ -591,7 +655,45 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                                         owner->connections.erase(key);
                                 }
                             );
-                            self->connections.emplace(id, session);
+                            auto runtime = makeConnectionRuntime(
+                                session,
+                                contextInfo,
+                                connectionScheduler(session->executor(
+                                )),
+                                self->factory,
+                                self->features
+                            );
+                            const std::weak_ptr<ConnectionRuntime>
+                                weakRuntime = runtime;
+                            session->setCallbacks(
+                                [weakRuntime](
+                                    IConnection&,
+                                    auto bytes
+                                )
+                                {
+                                    if (auto r = weakRuntime.lock())
+                                        r->received(bytes);
+                                },
+                                [weakRuntime]
+                                {
+                                    if (auto r = weakRuntime.lock())
+                                        r->start();
+                                },
+                                [weakRuntime](auto bytes)
+                                {
+                                    if (auto r = weakRuntime.lock())
+                                        r->outputChanged(bytes);
+                                },
+                                [weakRuntime]
+                                {
+                                    if (auto r = weakRuntime.lock())
+                                        r->transportClosed();
+                                }
+                            );
+                            self->connections.emplace(
+                                id,
+                                Entry{runtime, session.get()}
+                            );
                             session->start();
                         }
                         catch (const std::exception& exception)
@@ -629,13 +731,15 @@ WebSocketServer::WebSocketServer(
     const InetAddress& address,
     std::string allowedOrigin,
     ConnectionHandlerFactory handlerFactory,
-    std::size_t maxConnections
+    std::size_t maxConnections,
+    ConnectionFeatureFactory featureFactory
 )
     : m_impl(std::make_shared<Impl>(
           context,
           std::move(allowedOrigin),
           std::move(handlerFactory),
-          maxConnections
+          maxConnections,
+          std::move(featureFactory)
       ))
 {
     m_impl->start(address);

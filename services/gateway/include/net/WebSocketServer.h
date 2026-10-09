@@ -6,6 +6,7 @@
 
 #include <boost/asio/io_context.hpp>
 
+#include "net/ConnectionFeature.h"
 #include "net/ConnectionHandler.h"
 #include "net/InetAddress.h"
 
@@ -23,7 +24,8 @@ public:
         const InetAddress& address,
         std::string allowedOrigin,
         ConnectionHandlerFactory handlerFactory,
-        std::size_t maxConnections = 1000
+        std::size_t maxConnections = 1000,
+        ConnectionFeatureFactory featureFactory = {}
     );
     ~WebSocketServer() noexcept;
 

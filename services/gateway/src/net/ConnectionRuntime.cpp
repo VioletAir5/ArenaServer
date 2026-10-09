@@ -2,6 +2,8 @@
 
 #include <stdexcept>
 #include <utility>
+
+#include "net/BackpressureFeature.h"
 namespace service::gateway
 {
 ConnectionTimer::ConnectionTimer(std::function<void()> cancel)
@@ -236,6 +238,7 @@ void ConnectionRuntime::requestClose()
     auto weak = weak_from_this();
     try
     {
+        m_transport->pauseRead();
         m_scheduler.defer(
             [weak]
             {
@@ -312,5 +315,26 @@ FeatureResult ConnectionRuntime::inspectPacket(PacketView packet)
         requestClose();
     finishEvent();
     return result;
+}
+std::shared_ptr<ConnectionRuntime> makeConnectionRuntime(
+    IConnection::Ptr transport,
+    ConnectionContext::Ptr context,
+    ConnectionScheduler scheduler,
+    const ConnectionHandlerFactory& handlers,
+    const ConnectionFeatureFactory& features
+)
+{
+    auto handler = makeConnectionHandler(handlers, context);
+    auto runtime = std::make_shared<ConnectionRuntime>(
+        std::move(transport),
+        std::move(context),
+        std::move(scheduler),
+        std::move(handler)
+    );
+    if (features)
+        features(runtime->features(), runtime->context());
+    else
+        runtime->features().add<BackpressureFeature>();
+    return runtime;
 }
 } // namespace service::gateway

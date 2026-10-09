@@ -86,7 +86,8 @@ void TcpConnection::send(std::span<const std::byte> data)
             "TcpConnection foreign send requires shared ownership"
         );
     }
-    // A watermark callback may close and release the caller on the owner.
+    // An output callback may close and release the caller on the
+    // owner.
     auto keepAlive = owner ? weak_from_this().lock()
                            : std::shared_ptr<TcpConnection>{};
     bool overflow = false;
@@ -132,13 +133,15 @@ void TcpConnection::send(std::span<const std::byte> data)
         }
         else
         {
-            m_loop->queueInLoop([weak = weak_from_this()]
-            {
-                if (auto self = weak.lock())
+            m_loop->queueInLoop(
+                [weak = weak_from_this()]
                 {
-                    self->handleClose();
+                    if (auto self = weak.lock())
+                    {
+                        self->handleClose();
+                    }
                 }
-            });
+            );
         }
         return;
     }
@@ -148,13 +151,15 @@ void TcpConnection::send(std::span<const std::byte> data)
     }
     else if (scheduleDrain)
     {
-        m_loop->queueInLoop([weak = weak_from_this()]
-        {
-            if (auto self = weak.lock())
+        m_loop->queueInLoop(
+            [weak = weak_from_this()]
             {
-                self->drainSendQueue();
+                if (auto self = weak.lock())
+                {
+                    self->drainSendQueue();
+                }
             }
-        });
+        );
     }
 }
 
@@ -162,7 +167,9 @@ void TcpConnection::drainSendQueue()
 {
     if (!m_loop->isInLoopThread())
     {
-        throw std::logic_error("TcpConnection send drain requires owner");
+        throw std::logic_error(
+            "TcpConnection send drain requires owner"
+        );
     }
     if (m_drainingSends)
     {
@@ -172,7 +179,10 @@ void TcpConnection::drainSendQueue()
     struct ResetFlag
     {
         bool& flag;
-        ~ResetFlag() { flag = false; }
+        ~ResetFlag()
+        {
+            flag = false;
+        }
     } reset{m_drainingSends};
     for (;;)
     {
@@ -182,7 +192,8 @@ void TcpConnection::drainSendQueue()
             incoming.swap(m_sendQueue);
             m_sendDrainPosted = false;
         }
-        if (incoming.empty() || m_state == TcpConnectionState::Disconnected)
+        if (incoming.empty() ||
+            m_state == TcpConnectionState::Disconnected)
         {
             break;
         }
@@ -200,8 +211,7 @@ void TcpConnection::drainSendQueue()
     {
         finishShutdownWrite();
     }
-    else if (m_state == TcpConnectionState::PeerHalfClosed &&
-             pendingBytes() == 0)
+    else if (m_state == TcpConnectionState::PeerHalfClosed && pendingBytes() == 0)
     {
         handleClose();
     }
@@ -216,7 +226,10 @@ void TcpConnection::sendInLoop(std::span<const std::byte> data)
         while (remaining != 0)
         {
             const ssize_t n = ::send(
-                m_socket.get(), ptr, remaining, MSG_NOSIGNAL
+                m_socket.get(),
+                ptr,
+                remaining,
+                MSG_NOSIGNAL
             );
             if (n > 0)
             {
@@ -250,7 +263,7 @@ void TcpConnection::sendInLoop(std::span<const std::byte> data)
             handleClose();
             return;
         }
-        notifyHighWaterIfNeeded();
+        notifyOutputChanged();
         if (m_state == TcpConnectionState::Disconnected)
         {
             return;
@@ -262,7 +275,7 @@ void TcpConnection::sendInLoop(std::span<const std::byte> data)
     }
     else
     {
-        notifyLowWaterIfNeeded();
+        notifyOutputChanged();
     }
 }
 void TcpConnection::shutdown()
@@ -298,18 +311,32 @@ std::size_t TcpConnection::pendingBytes() const noexcept
 
 void TcpConnection::send(const void* data, std::size_t length)
 {
-    send(std::as_bytes(std::span(static_cast<const char*>(data), length)));
+    send(std::as_bytes(
+        std::span(static_cast<const char*>(data), length)
+    ));
 }
 
 void TcpConnection::handleRead()
 {
     if (m_state == TcpConnectionState::PeerHalfClosed ||
         m_state == TcpConnectionState::WriteDrainingPeerClosed ||
-        m_state == TcpConnectionState::Disconnected || m_readPaused)
+        m_state == TcpConnectionState::Disconnected || m_readPaused ||
+        m_reading)
     {
         return;
     }
 
+    // resumeRead during a business callback must not invalidate its
+    // input view.
+    m_reading = true;
+    struct ResetRead
+    {
+        bool& flag;
+        ~ResetRead()
+        {
+            flag = false;
+        }
+    } reset{m_reading};
     char buffer[8192];
     while (!m_readPaused)
     {
@@ -437,7 +464,7 @@ void TcpConnection::handleWrite()
         return;
     }
 
-    notifyLowWaterIfNeeded();
+    notifyOutputChanged();
     if (m_state == TcpConnectionState::Disconnected ||
         m_outputBuffer.readableBytes() != 0)
     {
@@ -539,14 +566,9 @@ void TcpConnection::setMessageCallback(MessageCallback cb)
     m_messageCallback = std::move(cb);
 }
 
-void TcpConnection::setHighWaterMarkCallback(WatermarkCallback cb)
+void TcpConnection::setOutputCallback(OutputCallback cb)
 {
-    m_highWaterMarkCallback = std::move(cb);
-}
-
-void TcpConnection::setLowWaterMarkCallback(WatermarkCallback cb)
-{
-    m_lowWaterMarkCallback = std::move(cb);
+    m_outputCallback = std::move(cb);
 }
 
 void TcpConnection::shutdownWrite()
@@ -610,22 +632,6 @@ void TcpConnection::resumeReading()
     handleRead();
 }
 
-void TcpConnection::closeIfSlow(
-    std::chrono::steady_clock::time_point now
-)
-{
-    if (m_state == TcpConnectionState::Disconnected ||
-        !m_aboveHighWater ||
-        now - m_highWaterSince < kSlowClientTimeout)
-    {
-        return;
-    }
-
-    std::cerr << "TcpConnection slow client timeout fd=" << fd()
-              << '\n';
-    handleClose();
-}
-
 Channel& TcpConnection::channel() noexcept
 {
     return m_channel;
@@ -652,37 +658,19 @@ bool TcpConnection::closing() const noexcept
     return m_state == TcpConnectionState::Disconnected;
 }
 
-void TcpConnection::notifyHighWaterIfNeeded()
+void TcpConnection::notifyOutputChanged()
 {
-    if (m_aboveHighWater ||
-        pendingBytes() < kHighWaterMark)
+    if (m_outputCallback && connected())
     {
-        return;
-    }
-
-    m_aboveHighWater = true;
-    m_highWaterSince = std::chrono::steady_clock::now();
-    if (m_highWaterMarkCallback)
-    {
-        m_highWaterMarkCallback(
-            *this,
-            pendingBytes()
-        );
-    }
-}
-
-void TcpConnection::notifyLowWaterIfNeeded()
-{
-    if (!m_aboveHighWater ||
-        pendingBytes() > kLowWaterMark)
-    {
-        return;
-    }
-
-    m_aboveHighWater = false;
-    if (m_lowWaterMarkCallback)
-    {
-        m_lowWaterMarkCallback(*this, pendingBytes());
+        auto callback = m_outputCallback;
+        try
+        {
+            callback(pendingBytes());
+        }
+        catch (...)
+        {
+            handleClose();
+        }
     }
 }
 

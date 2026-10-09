@@ -63,4 +63,14 @@ private:
     std::uint32_t m_pauseReasons{0};
     std::size_t m_reportedOutput{0}, m_nextOutput{0};
 };
+// Empty feature factory selects BackpressureFeature. A supplied
+// factory builds the complete policy set; transport hard limits
+// always remain.
+std::shared_ptr<ConnectionRuntime> makeConnectionRuntime(
+    IConnection::Ptr,
+    ConnectionContext::Ptr,
+    ConnectionScheduler,
+    const ConnectionHandlerFactory&,
+    const ConnectionFeatureFactory& = {}
+);
 } // namespace service::gateway

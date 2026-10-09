@@ -28,18 +28,17 @@ enum struct TcpConnectionState
     Disconnected
 };
 
-class TcpConnection final : public IConnection,
-                            public std::enable_shared_from_this<TcpConnection>
+class TcpConnection final
+    : public IConnection,
+      public std::enable_shared_from_this<TcpConnection>
 {
 public:
     using CloseCallback = std::function<void(TcpConnection*)>;
-    using MessageCallback = std::function<void(TcpConnection&, std::string_view)>;
-    using WatermarkCallback = std::function<void(TcpConnection&, std::size_t)>;
+    using MessageCallback = std::function<
+        void(TcpConnection&, std::string_view)>;
+    using OutputCallback = std::function<void(std::size_t)>;
 
-    static constexpr std::size_t kLowWaterMark = 256 * 1024;
-    static constexpr std::size_t kHighWaterMark = 512 * 1024;
     static constexpr std::size_t kHardOutputLimit = kMaxBufferSize;
-    static constexpr std::chrono::seconds kSlowClientTimeout{5};
 
     // Construct/register on the owning loop. Transfer the Socket to
     // that thread before construction; connection state and teardown
@@ -53,10 +52,11 @@ public:
     TcpConnection& operator=(const TcpConnection&) = delete;
     TcpConnection& operator=(TcpConnection&&) = delete;
 
-    // send() copies bytes from any thread. Foreign callers must hold shared
-    // ownership while calling; final release and other operations stay on
-    // the owning EventLoop thread. id() is immutable and cross-thread safe.
-    // Process-wide identity, distinct from server-local admission tickets.
+    // send() copies bytes from any thread. Foreign callers must hold
+    // shared ownership while calling; final release and other
+    // operations stay on the owning EventLoop thread. id() is
+    // immutable and cross-thread safe. Process-wide identity,
+    // distinct from server-local admission tickets.
     std::uint64_t id() const noexcept override;
     void send(std::span<const std::byte> data) override;
     void shutdown() override;
@@ -79,31 +79,27 @@ public:
     // The message view is valid only for the duration of the
     // callback.
     void setMessageCallback(MessageCallback);
-    // Called synchronously on threshold crossing in the EventLoop
-    // thread. Register before sending; callbacks must not destroy
-    // this connection.
-    void setHighWaterMarkCallback(WatermarkCallback);
-    void setLowWaterMarkCallback(WatermarkCallback);
+    // Owner reports pending output after queue/write changes.
+    void setOutputCallback(OutputCallback);
 
     // Owner EventLoop thread only. Flush queued bytes, then send FIN;
     // keep reading until the peer also closes its write half.
     void shutdownWrite();
     void pauseReading();
     void resumeReading();
-    void closeIfSlow(std::chrono::steady_clock::time_point now);
 
     Channel& channel() noexcept;
     int fd() const noexcept;
     // Read only on the owning EventLoop thread.
     std::size_t pendingOutputBytes() const noexcept;
-    std::chrono::steady_clock::time_point lastActivity() const noexcept;
+    std::chrono::steady_clock::time_point
+    lastActivity() const noexcept;
     bool closing() const noexcept;
 
 private:
     void drainSendQueue();
     void sendInLoop(std::span<const std::byte> data);
-    void notifyHighWaterIfNeeded();
-    void notifyLowWaterIfNeeded();
+    void notifyOutputChanged();
     void finishShutdownWrite();
     void handleIoError(int error);
 
@@ -112,8 +108,7 @@ private:
 
     CloseCallback m_closeCallback;
     MessageCallback m_messageCallback;
-    WatermarkCallback m_highWaterMarkCallback;
-    WatermarkCallback m_lowWaterMarkCallback;
+    OutputCallback m_outputCallback;
 
     Socket m_socket;
     Channel m_channel;
@@ -121,8 +116,9 @@ private:
     PacketBuffer m_inputBuffer;
     PacketBuffer m_outputBuffer;
 
-    // Foreign callers only touch this ingress queue. The owner moves bytes
-    // into m_outputBuffer and is the sole socket and Channel mutator.
+    // Foreign callers only touch this ingress queue. The owner moves
+    // bytes into m_outputBuffer and is the sole socket and Channel
+    // mutator.
     mutable std::mutex m_sendMutex;
     std::deque<std::vector<std::byte>> m_sendQueue;
     std::size_t m_pendingBytes{0};
@@ -130,13 +126,11 @@ private:
     bool m_sendDrainPosted{false};
     bool m_drainingSends{false};
 
-    std::chrono::steady_clock::time_point m_highWaterSince{};
     std::chrono::steady_clock::time_point m_lastActivity{
         std::chrono::steady_clock::now()};
 
     TcpConnectionState m_state{TcpConnectionState::Connected};
-    bool m_aboveHighWater{false};
     bool m_readPaused{false};
-
+    bool m_reading{false};
 };
 } // namespace service::gateway

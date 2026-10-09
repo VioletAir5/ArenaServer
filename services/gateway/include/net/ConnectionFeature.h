@@ -91,6 +91,11 @@ public:
 class ConnectionPipeline
 {
 public:
+    ConnectionPipeline() = default;
+    ConnectionPipeline(const ConnectionPipeline&) = delete;
+    ConnectionPipeline& operator=(const ConnectionPipeline&) = delete;
+    ConnectionPipeline(ConnectionPipeline&&) = delete;
+    ConnectionPipeline& operator=(ConnectionPipeline&&) = delete;
     template <class T, class... Args> T& add(Args&&... args)
     {
         if (m_sealed)

@@ -3,6 +3,8 @@
 #include <deque>
 
 #include <gtest/gtest.h>
+
+#include "net/BackpressureFeature.h"
 using namespace service::gateway;
 namespace
 {
@@ -119,6 +121,7 @@ TEST_F(ConnectionRuntimeTest, PacketShortCircuitAndDeferredCloseOnce)
     EXPECT_EQ(runtime->inspectPacket({1, {}}), FeatureResult::Close);
     EXPECT_FALSE(runtime->connected());
     EXPECT_EQ(transport->closes, 0);
+    EXPECT_TRUE(transport->paused);
     runtime->close();
     drain();
     runtime->transportClosed();
@@ -211,5 +214,48 @@ TEST_F(
     runtime->start();
     runtime->inspectPacket({1, {}});
     EXPECT_FALSE(feature.notifiedInside);
+}
+TEST_F(ConnectionRuntimeTest, BackpressureHysteresisCancelsOldTimer)
+{
+    runtime->features().add<BackpressureFeature>(2, 4);
+    runtime->start();
+    runtime->outputChanged(6);
+    ASSERT_TRUE(transport->paused);
+    runtime->outputChanged(3);
+    EXPECT_TRUE(transport->paused);
+    runtime->pauseRead();
+    runtime->outputChanged(2);
+    EXPECT_TRUE(transport->paused);
+    timers[0]();
+    EXPECT_TRUE(runtime->connected());
+    runtime->resumeRead();
+    EXPECT_FALSE(transport->paused);
+    runtime->outputChanged(5);
+    timers[1]();
+    drain();
+    EXPECT_FALSE(runtime->connected());
+    EXPECT_EQ(transport->closes, 1);
+}
+TEST_F(ConnectionRuntimeTest, CloseCancelsBackpressureTimer)
+{
+    runtime->features().add<BackpressureFeature>(2, 4);
+    runtime->start();
+    runtime->outputChanged(6);
+    runtime->transportClosed();
+    timers[0]();
+    drain();
+    EXPECT_EQ(transport->closes, 0);
+}
+TEST(BackpressureFeatureTest, RejectsInvalidConfiguration)
+{
+    EXPECT_THROW(BackpressureFeature(4, 4), std::invalid_argument);
+    EXPECT_THROW(
+        BackpressureFeature(2, 1024 * 1024),
+        std::invalid_argument
+    );
+    EXPECT_THROW(
+        BackpressureFeature(2, 4, ConnectionClock::duration::zero()),
+        std::invalid_argument
+    );
 }
 } // namespace
