@@ -195,3 +195,26 @@ add_test(NAME ConnectionContextTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(ConnectionContextTransport_ws PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;context;websocket")
+
+# One profile drives all transport owners; packet fragments/coalescing are shared.
+foreach(backend epoll asio)
+    if(backend STREQUAL "epoll")
+        set(feature_host arena_tcp_server_test_host)
+    else()
+        set(feature_host arena_asio_tcp_server_test_host)
+    endif()
+    foreach(workers 0 4)
+        add_test(NAME ConnectionFeatureTransport_${backend}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ConnectionFeatureIntegrationTest.py"
+                "$<TARGET_FILE:${feature_host}>" tcp ${workers})
+        set_tests_properties(ConnectionFeatureTransport_${backend}_${workers}
+            PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;features")
+    endforeach()
+endforeach()
+add_test(NAME ConnectionFeatureTransport_ws
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ConnectionFeatureIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
+set_tests_properties(ConnectionFeatureTransport_ws PROPERTIES
+    TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;features;websocket")

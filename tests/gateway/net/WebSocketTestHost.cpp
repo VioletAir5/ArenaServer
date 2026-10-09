@@ -13,10 +13,12 @@
 #include "net/AsioTcpServer.h"
 #include "net/ConnectionHandler.h"
 #include "net/InetAddress.h"
+#include "net/PacketEcho.h"
 #include "net/PreLoginHandshake.h"
 #include "net/WebSocketServer.h"
 
 #include "ConnectionContextTestHandler.h"
+#include "ConnectionFeatureTestProfile.h"
 
 using namespace service::gateway;
 
@@ -33,6 +35,13 @@ int main(int argc, char** argv)
     boost::asio::io_context context;
     ConnectionHandlerFactory handshake = [](ConnectionContext::Ptr)
     { return makePreLoginHandshakeHandler(); };
+    ConnectionFeatureFactory features;
+    if (mode == "features")
+    {
+        features = makeFeatureTestProfile();
+        handshake = [](ConnectionContext::Ptr)
+        { return makePacketEchoHandler(); };
+    }
     if (mode == "context")
         handshake = makeContextTestFactory();
     AsioTcpServer tcp(
@@ -41,7 +50,8 @@ int main(int argc, char** argv)
         100,
         std::chrono::seconds(60),
         0,
-        handshake
+        handshake,
+        features
     );
     ConnectionHandlerFactory wsFactory = handshake;
     if (mode == "flood")
@@ -62,7 +72,8 @@ int main(int argc, char** argv)
         InetAddress("127.0.0.1", wsPort),
         origin,
         wsFactory,
-        100
+        100,
+        features
     );
     boost::asio::signal_set signals(context, SIGUSR1, SIGTERM);
     signals.async_wait(

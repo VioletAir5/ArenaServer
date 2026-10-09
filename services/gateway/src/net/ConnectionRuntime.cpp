@@ -245,7 +245,6 @@ void ConnectionRuntime::requestClose()
                 if (auto self = weak.lock())
                 {
                     self->m_transport->close();
-                    self->transportClosed();
                 }
             }
         );
@@ -253,7 +252,6 @@ void ConnectionRuntime::requestClose()
     catch (...)
     {
         m_transport->close();
-        transportClosed();
     }
 }
 const ConnectionContext& ConnectionRuntime::context() const noexcept

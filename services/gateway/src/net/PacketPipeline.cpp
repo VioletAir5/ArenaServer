@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "net/ConnectionFeature.h"
 #include "net/PacketBuffer.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
@@ -77,6 +78,22 @@ makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize)
                 [&](const protocol::PacketHeader& header,
                     std::string_view payload)
                 {
+                    if (auto* features = dynamic_cast<
+                            PacketFeatureHost*>(&connection))
+                    {
+                        const auto decision = features->inspectPacket(
+                            PacketView{
+                                header.m_type,
+                                std::as_bytes(std::span(payload))}
+                        );
+                        if (decision == FeatureResult::Close)
+                        {
+                            connection.close();
+                            return false;
+                        }
+                        if (decision == FeatureResult::Drop)
+                            return connection.connected();
+                    }
                     PacketContext context{
                         connection,
                         header,

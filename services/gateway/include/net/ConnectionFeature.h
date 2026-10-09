@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -111,6 +112,9 @@ private:
     bool m_sealed{false};
     std::vector<std::unique_ptr<IConnectionFeature>> m_features;
 };
+// Copied into workers; builds fresh per-connection nodes on owner.
+// Shared captures/configuration need their own synchronization.
+// Empty server factory selects default BackpressureFeature.
 using ConnectionFeatureFactory = std::function<
     void(ConnectionPipeline&, const ConnectionContext&)>;
 // PacketCodec calls this after framing, before protobuf/business

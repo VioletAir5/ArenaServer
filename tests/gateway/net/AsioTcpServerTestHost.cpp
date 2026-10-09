@@ -11,6 +11,7 @@
 #include "net/PacketEcho.h"
 
 #include "ConnectionContextTestHandler.h"
+#include "ConnectionFeatureTestProfile.h"
 
 int main(int argc, char** argv)
 {
@@ -19,11 +20,17 @@ int main(int argc, char** argv)
         return 2;
     }
     service::gateway::ConnectionHandlerFactory handlerFactory;
+    service::gateway::ConnectionFeatureFactory featureFactory;
     if (argc == 5)
     {
         if (std::string_view(argv[4]) == "context")
         {
             handlerFactory = makeContextTestFactory();
+        }
+        else if (std::string_view(argv[4]) == "features")
+        {
+            featureFactory = service::gateway::makeFeatureTestProfile(
+            );
         }
         else if (std::string_view(argv[4]) != "packet")
         {
@@ -54,7 +61,8 @@ int main(int argc, char** argv)
         1000,
         idle,
         workers,
-        handlerFactory
+        handlerFactory,
+        featureFactory
     );
     std::function<void()> waitStopped;
     waitStopped = [&]

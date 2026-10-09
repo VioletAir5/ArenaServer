@@ -18,6 +18,7 @@
 #include "os/FileDescriptor.h"
 
 #include "ConnectionContextTestHandler.h"
+#include "ConnectionFeatureTestProfile.h"
 
 // A separate process lets the integration test inspect /proc/<pid>/fd
 // and stop the event loop cleanly, including under LeakSanitizer.
@@ -28,11 +29,17 @@ int main(int argc, char** argv)
         return 2;
     }
     service::gateway::ConnectionHandlerFactory handlerFactory;
+    service::gateway::ConnectionFeatureFactory featureFactory;
     if (argc == 5)
     {
         if (std::string_view(argv[4]) == "context")
         {
             handlerFactory = makeContextTestFactory();
+        }
+        else if (std::string_view(argv[4]) == "features")
+        {
+            featureFactory = service::gateway::makeFeatureTestProfile(
+            );
         }
         else if (std::string_view(argv[4]) != "packet")
         {
@@ -129,7 +136,8 @@ int main(int argc, char** argv)
             1000,
             idleTimeout,
             workerCount,
-            handlerFactory
+            handlerFactory,
+            featureFactory
         );
         serverPtr = &server;
         std::cerr << "TEST_HOST_READY" << std::endl;
