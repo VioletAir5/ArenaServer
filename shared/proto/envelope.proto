@@ -5,11 +5,36 @@ package arena.protocol;
 // Stable payload schema inside the existing length-prefixed PacketCodec frame.
 // Never renumber a field or reuse a retired tag. Tag 2 was legacy_client_tag
 // in the frozen v1 compatibility fixture.
+enum MsgId {
+  MSG_UNSPECIFIED = 0;
+  MSG_LOGIN_REQUEST = 10;
+  MSG_LOGIN_RESPONSE = 11;
+  MSG_PING = 12;
+  MSG_PONG = 13;
+  MSG_ERROR = 14;
+}
+
+// Stable wire codes. Error.code stays uint32 for v1 descriptor compatibility.
+enum ErrorCode {
+  ERR_OK = 0;
+  ERR_UNKNOWN_MESSAGE = 1001;
+  ERR_INVALID_REQUEST = 1002;
+  ERR_UNAUTHENTICATED = 1003;
+  ERR_TIMEOUT = 1004;
+  ERR_TOO_MANY_REQUESTS = 1005;
+  ERR_DUPLICATE_REQUEST = 1006;
+  ERR_BUSINESS_FAILURE = 2001;
+  ERR_UNAVAILABLE = 2002;
+  ERR_INTERNAL = 9000;
+}
+
 message Envelope {
   uint64 request_id = 1;
   reserved 2;
   reserved "legacy_client_tag";
   uint64 sent_at_unix_ms = 3;
+  // Zero means a v1 peer: infer from the known payload. Never reuse this tag.
+  uint32 msg_id = 4;
 
   oneof payload {
     LoginRequest login_request = 10;

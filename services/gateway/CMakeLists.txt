@@ -1,5 +1,6 @@
 find_package(Boost 1.74 REQUIRED CONFIG)
 find_package(Threads REQUIRED)
+find_package(spdlog REQUIRED CONFIG)
 
 add_library(arena_gateway)
 
@@ -11,6 +12,7 @@ target_link_libraries(arena_gateway PUBLIC
     arena_shared
     Boost::boost
     Threads::Threads
+    spdlog::spdlog
 )
 
 target_compile_options(arena_gateway PRIVATE

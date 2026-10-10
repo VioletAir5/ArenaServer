@@ -30,6 +30,7 @@ TEST(EnvelopeCodecTest, OldClientReadsNewLoginAndPreservesUnknownFields) {
     New newer;
     newer.set_request_id(42);
     newer.set_sent_at_unix_ms(123456);
+    newer.set_msg_id(arena::protocol::MSG_LOGIN_REQUEST);
     auto* login = newer.mutable_login_request();
     login->set_account("alice");
     login->set_credential("secret");
@@ -50,6 +51,7 @@ TEST(EnvelopeCodecTest, OldClientReadsNewLoginAndPreservesUnknownFields) {
     New restored;
     ASSERT_TRUE(decode(forwarded, restored));
     EXPECT_EQ(restored.sent_at_unix_ms(), 123456);
+    EXPECT_EQ(restored.msg_id(), 10);
     EXPECT_EQ(restored.login_request().client_version(), "2.0");
 }
 
@@ -64,6 +66,7 @@ TEST(EnvelopeCodecTest, NewClientReadsOldPingAndPreservesRetiredTag) {
     ASSERT_TRUE(decode(wire, newer));
     EXPECT_EQ(newer.request_id(), 7);
     EXPECT_EQ(newer.sent_at_unix_ms(), 0);
+    EXPECT_EQ(newer.msg_id(), 0);
     ASSERT_TRUE(newer.has_ping());
     EXPECT_EQ(newer.ping().nonce(), 99);
     EXPECT_GT(newer.GetReflection()->GetUnknownFields(newer).field_count(), 0);
@@ -121,6 +124,7 @@ TEST(EnvelopeCodecTest, FieldNumbersAreStableAndRetiredTagIsReserved) {
     EXPECT_TRUE(descriptor->IsReservedName("legacy_client_tag"));
     EXPECT_EQ(descriptor->FindFieldByNumber(2), nullptr);
     EXPECT_EQ(descriptor->FindFieldByName("sent_at_unix_ms")->number(), 3);
+    EXPECT_EQ(descriptor->FindFieldByName("msg_id")->number(), 4);
     EXPECT_EQ(arena::protocol::LoginRequest::descriptor()
         ->FindFieldByName("client_version")->number(), 3);
     EXPECT_EQ(arena::protocol::Error::descriptor()

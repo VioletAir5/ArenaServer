@@ -38,7 +38,8 @@ bool validEnvelope(const arena::protocol::Envelope& envelope)
     case arena::protocol::Envelope::kError:
         return errorWithinDepth(envelope.error(), 2);
     case arena::protocol::Envelope::PAYLOAD_NOT_SET:
-        return false;
+        // An explicit unknown MsgId still needs a typed router error.
+        return envelope.msg_id() != 0;
     }
     return false;
 }
