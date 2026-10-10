@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "net/ConnectionFeature.h"
+#include "net/PacketBuffer.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
 
@@ -202,7 +203,9 @@ struct MessageRouter::State : std::enable_shared_from_this<State>
             entry.explicitMsgId ? payloadMsgId(reply) : 0
         );
         auto payload = protocol::EnvelopeCodec::encode(reply);
-        if (!payload)
+        if (!payload || payload->size() >
+                            kMaxPacketSize -
+                                protocol::PacketHeader::kMetadataSize)
         {
             code = arena::protocol::ERR_INTERNAL;
             setError();

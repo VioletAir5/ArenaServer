@@ -9,6 +9,7 @@
 
 #include "net/ConnectionRuntime.h"
 #include "net/MessageRouter.h"
+#include "net/PacketBuffer.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
 
@@ -118,7 +119,7 @@ struct MessageDispatchTest : testing::Test
     wire::Envelope response()
     {
         wire::Envelope result;
-        service::protocol::PacketCodec decoder(1024);
+        service::protocol::PacketCodec decoder(kMaxPacketSize);
         int responses = 0;
         decoder.feed(
             std::as_bytes(std::span(transport->output)),
@@ -234,6 +235,40 @@ TEST_F(
     EXPECT_TRUE(runtime->connected());
 }
 
+TEST_F(MessageDispatchTest, ResponseRespectsOuterPacketBudget)
+{
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [](auto, auto complete)
+        {
+            wire::Envelope reply;
+            reply.mutable_pong();
+            reply.GetReflection()
+                ->MutableUnknownFields(&reply)
+                ->AddLengthDelimited(
+                    100,
+                    std::string(
+                        service::protocol::EnvelopeCodec::kMaxBytes -
+                            16,
+                        'x'
+                    )
+                );
+            complete(std::move(reply));
+        },
+        MessageRouteOptions{false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(107);
+    request.mutable_ping();
+    receive(request);
+    const auto reply = response();
+    ASSERT_TRUE(reply.has_error());
+    EXPECT_EQ(reply.error().code(), wire::ERR_INTERNAL);
+    EXPECT_TRUE(runtime->connected());
+}
 TEST_F(
     MessageDispatchTest,
     LegacyRequestIdFallbackAndSpdlogTraceStayConsistent
