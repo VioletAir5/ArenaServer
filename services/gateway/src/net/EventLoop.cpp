@@ -1,3 +1,6 @@
+/** @file
+ * @brief Runs channel callbacks, timers, and queued work on one thread.
+ */
 #include "net/EventLoop.h"
 
 #include <sys/eventfd.h>

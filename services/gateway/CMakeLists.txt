@@ -1,3 +1,4 @@
+# Defines the implemented gateway service library and its dependencies.
 find_package(Boost 1.74 REQUIRED CONFIG)
 find_package(Threads REQUIRED)
 find_package(spdlog REQUIRED CONFIG)

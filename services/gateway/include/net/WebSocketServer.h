@@ -1,3 +1,6 @@
+/** @file
+ * @brief Serves WebSocket connections over the gateway transport.
+ */
 #pragma once
 
 #include <cstddef>
@@ -16,6 +19,7 @@ namespace service::gateway
 // TCP. Construct, run and stop on the io_context owner thread. Origin
 // is an exact allowlist entry; empty or different Origin is rejected
 // before upgrade.
+/** @brief Serves WebSocket connections over the gateway transport. */
 class WebSocketServer final
 {
 public:
@@ -27,16 +31,20 @@ public:
         std::size_t maxConnections = 1000,
         ConnectionFeatureFactory featureFactory = {}
     );
+    /** @brief Releases owned resources. */
     ~WebSocketServer() noexcept;
 
+    /** @brief Copy construction is disabled. */
     WebSocketServer(const WebSocketServer&) = delete;
     WebSocketServer& operator=(const WebSocketServer&) = delete;
 
     void stop() noexcept;
+    /** @brief Returns the number of active connections. */
     std::size_t connectionCount() const noexcept;
 
 private:
     struct Impl;
+    /// Stores the impl.
     std::shared_ptr<Impl> m_impl;
 };
 } // namespace service::gateway

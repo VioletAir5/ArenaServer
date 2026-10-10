@@ -1,3 +1,6 @@
+/** @file
+ * @brief Defines packet handling and connection callback interfaces.
+ */
 #pragma once
 
 #include <functional>

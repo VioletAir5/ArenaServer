@@ -1,3 +1,6 @@
+/** @file
+ * @brief Serves WebSocket connections over the gateway transport.
+ */
 #include "net/WebSocketServer.h"
 
 #include <atomic>

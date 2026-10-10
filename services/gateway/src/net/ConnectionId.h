@@ -1,3 +1,6 @@
+/** @file
+ * @brief Allocates process-wide connection identifiers.
+ */
 #pragma once
 #include <cstdint>
 

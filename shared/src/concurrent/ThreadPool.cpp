@@ -1,3 +1,6 @@
+/** @file
+ * @brief Executes queued work on worker threads.
+ */
 #include <concurrent/ThreadPool.h>
 
 namespace service

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Runs packet handlers in order until one stops processing.
+ */
 #include "net/PacketPipeline.h"
 
 #include <exception>

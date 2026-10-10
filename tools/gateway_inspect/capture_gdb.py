@@ -1,3 +1,4 @@
+# Module: Inspects gateway runtime state for diagnostics.
 """GDB-side read-only snapshot; loaded by inspect.py, not standalone."""
 import gdb
 import json

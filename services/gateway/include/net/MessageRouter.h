@@ -1,3 +1,6 @@
+/** @file
+ * @brief Routes decoded requests to registered business handlers.
+ */
 #pragma once
 
 #include <chrono>
@@ -15,12 +18,18 @@ namespace service::gateway
 {
 using MsgId = arena::protocol::MsgId;
 using ErrorCode = arena::protocol::ErrorCode;
+/** @brief Owns the data and context needed to handle one request. */
 struct RequestMessage
 {
+    /// Connection that sent this request.
     std::uint64_t connectionId;
+    /// Correlation identifier supplied by the client.
     std::uint64_t requestId;
+    /// Application message identifier used for route lookup.
     std::uint32_t msgId;
+    /// Decoded protobuf request.
     arena::protocol::Envelope envelope;
+    /// Immutable admission metadata for this connection.
     ConnectionContext::Ptr context;
 };
 using MessageReply = std::
@@ -31,11 +40,15 @@ using MessageReply = std::
 using RequestCompletion = std::function<void(MessageReply)>;
 using MessageHandler = std::function<
     void(std::shared_ptr<const RequestMessage>, RequestCompletion)>;
+/** @brief Sets admission and timeout policy for a registered route. */
 struct MessageRouteOptions
 {
+    /// Whether the connection must be authenticated first.
     bool requiresAuthentication{true};
+    /// Maximum time allowed for handler completion.
     std::chrono::milliseconds timeout{std::chrono::seconds(5)};
 };
+/** @brief Carries an application error code through handler failures. */
 class BusinessError final : public std::runtime_error
 {
 public:
@@ -46,8 +59,10 @@ public:
     }
 
 private:
+    /// Stores the code.
     ErrorCode m_code;
 };
+/** @brief Represents message registry. */
 class MessageRegistry final
 {
 public:
@@ -64,14 +79,18 @@ public:
 
 private:
     friend class MessageRouter;
+    /** @brief Represents route. */
     struct Route
     {
         MessageHandler handler;
         MessageRouteOptions options;
     };
+    /// Whether route registration has ended.
     bool m_sealed{false};
+    /// Stores the routes.
     std::unordered_map<std::uint32_t, Route> m_routes;
 };
+/** @brief Routes decoded requests to registered business handlers. */
 class MessageRouter final : public PacketHandler
 {
 public:
@@ -81,11 +100,13 @@ public:
         std::shared_ptr<const MessageRegistry>,
         std::shared_ptr<spdlog::logger> logger = {}
     );
+    /** @brief Releases owned resources. */
     ~MessageRouter() override;
     PacketHandleResult handle(PacketContext&) override;
 
 private:
     struct State;
+    /// Shared request and timer state retained by callbacks.
     std::shared_ptr<State> m_state;
 };
 } // namespace service::gateway

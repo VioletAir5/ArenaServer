@@ -1,3 +1,6 @@
+/** @file
+ * @brief Replies to supported packets with an echo response.
+ */
 #include "net/PacketEcho.h"
 
 #include <memory>

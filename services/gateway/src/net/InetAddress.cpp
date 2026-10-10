@@ -1,3 +1,6 @@
+/** @file
+ * @brief Wraps a socket address for binding and connection setup.
+ */
 #include <net/InetAddress.h>
 
 #include <stdexcept>

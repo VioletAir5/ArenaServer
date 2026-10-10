@@ -1,3 +1,6 @@
+/** @file
+ * @brief Selects the gateway backend and starts its TCP or WebSocket listeners.
+ */
 #include <chrono>
 #include <csignal>
 #include <cstdint>

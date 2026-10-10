@@ -1,3 +1,6 @@
+/** @file
+ * @brief Coordinates transport, context, features, and packet dispatch.
+ */
 #include "net/ConnectionRuntime.h"
 
 #include <stdexcept>

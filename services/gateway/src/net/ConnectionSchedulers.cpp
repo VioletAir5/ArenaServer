@@ -1,3 +1,6 @@
+/** @file
+ * @brief Adapts event-loop timers to connection feature scheduling.
+ */
 #include "net/ConnectionSchedulers.h"
 
 #include <algorithm>

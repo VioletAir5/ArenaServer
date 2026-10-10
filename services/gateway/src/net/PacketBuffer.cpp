@@ -1,3 +1,6 @@
+/** @file
+ * @brief Provides the bounded byte buffer used by gateway transports.
+ */
 #include "net/PacketBuffer.h"
 
 namespace service::gateway

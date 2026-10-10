@@ -1,3 +1,6 @@
+/** @file
+ * @brief Counts rejected connections by reason.
+ */
 #include "net/RejectionCounters.h"
 
 namespace service::gateway

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Associates a file descriptor with event callbacks and epoll interest.
+ */
 #include "net/Channel.h"
 
 #include <sys/epoll.h>

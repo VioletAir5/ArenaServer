@@ -1,3 +1,6 @@
+/** @file
+ * @brief Allocates process-wide connection identifiers.
+ */
 #include "ConnectionId.h"
 
 #include <atomic>

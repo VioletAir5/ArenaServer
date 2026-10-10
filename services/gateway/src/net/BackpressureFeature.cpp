@@ -1,3 +1,6 @@
+/** @file
+ * @brief Pauses reads while queued output exceeds configured limits.
+ */
 #include "net/BackpressureFeature.h"
 
 #include <iostream>

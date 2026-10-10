@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Module: Inspects gateway runtime state for diagnostics.
 """Bounded, isolated four-worker profiling. Requires Linux, debug symbols and tools."""
 import argparse
 import datetime as dt

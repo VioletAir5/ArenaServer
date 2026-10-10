@@ -1,3 +1,6 @@
+/** @file
+ * @brief Defines the transport operations exposed to gateway handlers.
+ */
 #pragma once
 
 #include <cstddef>
@@ -11,11 +14,13 @@ namespace service::gateway
 // except immutable id() and documented concrete-method exceptions.
 // AsioConnect::send and TcpConnection::send accept concurrent callers.
 // Ptr shares lifetime, not general cross-thread access.
+/** @brief Defines the transport operations exposed to gateway handlers. */
 class IConnection
 {
 public:
     using Ptr = std::shared_ptr<IConnection>;
 
+    /** @brief Constructs the i connection. */
     virtual ~IConnection() noexcept = default;
 
     // Stable, nonzero identity for this connection's lifetime.
@@ -38,6 +43,7 @@ public:
     // states. Does not imply that new sends are accepted.
     virtual bool connected() const noexcept = 0;
 
+    /** @brief Pauses inbound reads. */
     virtual void pauseRead() = 0;
     // Resume delivery of already available bytes as well as future data.
     virtual void resumeRead() = 0;

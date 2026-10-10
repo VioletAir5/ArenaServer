@@ -1,3 +1,6 @@
+/** @file
+ * @brief Owns a Linux file descriptor through RAII.
+ */
 #include <unistd.h>
 
 #include <os/FileDescriptor.h>

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Accepts and manages TCP connections with Boost.Asio.
+ */
 #include "net/AsioTcpServer.h"
 
 #include <fcntl.h>

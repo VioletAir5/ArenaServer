@@ -1,3 +1,6 @@
+/** @file
+ * @brief Accepts TCP clients and owns their event-loop connections.
+ */
 #include "net/TcpServer.h"
 
 #include <exception>

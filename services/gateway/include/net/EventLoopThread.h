@@ -1,3 +1,6 @@
+/** @file
+ * @brief Owns a thread running one event loop.
+ */
 #pragma once
 
 #include <condition_variable>
@@ -10,12 +13,16 @@
 
 namespace service::gateway
 {
+/** @brief Owns a thread running one event loop. */
 class EventLoopThread
 {
 public:
+    /** @brief Constructs the event loop thread. */
     EventLoopThread() = default;
+    /** @brief Releases owned resources. */
     ~EventLoopThread() noexcept;
 
+    /** @brief Copy construction is disabled. */
     EventLoopThread(const EventLoopThread&) = delete;
     EventLoopThread& operator=(const EventLoopThread&) = delete;
 
@@ -43,18 +50,25 @@ private:
     // Only the test peer may arrange a paused startup for race tests.
     friend class EventLoopThreadTestPeer;
 
+    /** @brief Reports whether in worker thread. */
     bool isInWorkerThread();
     void threadFunc();
+    /** @brief Stops thread. */
     void stopThread();
 
+    /// Event loop that owns this object and its callbacks.
     EventLoop* m_loop{nullptr};
+    /// Stores the start complete.
     bool m_startComplete{false};
+    /// Stores the exception.
     std::exception_ptr m_exception;
     // Cached identity avoids reading a jthread handle during join().
     std::thread::id m_workerId;
+    /// Guards state shared with callers on other threads.
     std::mutex m_mutex;
     // Only stopping callers use this lock; the worker never takes it.
     std::mutex m_stopMutex;
+    /// Stores the cv.
     std::condition_variable m_cv;
     // The thread must be joined before synchronization members die.
     std::unique_ptr<std::jthread> m_thread;

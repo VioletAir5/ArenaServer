@@ -1,3 +1,6 @@
+/** @file
+ * @brief Handles the pre-login ping exchange.
+ */
 #pragma once
 
 #include "net/MessageRouter.h"
@@ -6,6 +9,7 @@ namespace service::gateway
 {
 // Place after EnvelopeDecodeHandler. Handles Ping and forwards other
 // messages so later login or routing handlers can receive them.
+/** @brief Represents ping handler. */
 class PingHandler final : public PacketHandler
 {
 public:

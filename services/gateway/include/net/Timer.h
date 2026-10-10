@@ -1,3 +1,6 @@
+/** @file
+ * @brief Represents a scheduled callback and its deadline.
+ */
 #pragma once
 
 #include <chrono>
@@ -8,6 +11,7 @@
 namespace service::gateway
 {
 
+/** @brief Represents a scheduled callback and its deadline. */
 class Timer
 {
 public:
@@ -58,9 +62,13 @@ public:
     }
 
 private:
+    /// Identifier assigned by the owning timer queue.
     std::uint64_t m_id;
+    /// Stores the expiration.
     TimePoint m_expiration;
+    /// Stores the interval.
     Duration m_interval;
+    /// Stores the callback.
     Callback m_callback;
 };
 

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Stores readable bytes and grows within its configured limit.
+ */
 #include "protocol/Buffer.hpp"
 
 #include <algorithm>

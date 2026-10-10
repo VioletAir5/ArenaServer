@@ -1,3 +1,6 @@
+/** @file
+ * @brief Registers channels and collects ready Linux epoll events.
+ */
 #include "net/EpollPoller.h"
 
 #include <sys/epoll.h>

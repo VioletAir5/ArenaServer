@@ -1,3 +1,6 @@
+/** @file
+ * @brief Validates and serializes packet headers and frames.
+ */
 #pragma once
 
 #include <cstddef>
@@ -9,12 +12,14 @@
 
 namespace service::protocol
 {
+/** @brief Classifies a fixed header as incomplete, invalid, or complete. */
 enum class HeaderDecodeStatus
 {
     Incomplete,
     Invalid,
     Complete
 };
+/** @brief Describes incremental frame progress or a terminal result. */
 enum class FrameDecodeStatus
 {
     NeedMore,
@@ -22,6 +27,7 @@ enum class FrameDecodeStatus
     Stopped
 };
 
+/** @brief Validates and serializes packet headers and frames. */
 class PacketHeaderCodec
 {
 public:

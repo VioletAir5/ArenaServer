@@ -1,3 +1,6 @@
+/** @file
+ * @brief Owns a nonblocking TCP socket and its buffered I/O.
+ */
 #include "net/TcpConnection.h"
 
 #include <sys/socket.h>
@@ -514,9 +517,8 @@ void TcpConnection::handleClose()
         m_pendingBytes = 0;
     }
 
-    // 不在这里 close(fd)
-    // 不在这里 removeChannel()
-    // 不在这里 delete this
+    // The close callback arranges owner-side Channel removal and final
+    // release after the active event dispatch. Do not close the fd here.
 
     if (m_closeCallback)
     {

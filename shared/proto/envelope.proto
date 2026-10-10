@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+// Application messages carried inside the length-prefixed packet frame.
+
 package arena.protocol;
 
 // Stable payload schema inside the existing length-prefixed PacketCodec frame.

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Encodes and decodes protocol envelope messages.
+ */
 #include "protocol/EnvelopeCodec.hpp"
 
 #include <cstdint>

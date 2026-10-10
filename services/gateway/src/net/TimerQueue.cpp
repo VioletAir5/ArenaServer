@@ -1,3 +1,6 @@
+/** @file
+ * @brief Schedules timers using a Linux timer descriptor.
+ */
 #include "net/TimerQueue.h"
 
 #include <sys/timerfd.h>

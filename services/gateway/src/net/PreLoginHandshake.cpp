@@ -1,3 +1,6 @@
+/** @file
+ * @brief Handles the pre-login ping exchange.
+ */
 #include "net/PreLoginHandshake.h"
 
 #include <memory>

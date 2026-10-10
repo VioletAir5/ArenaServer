@@ -1,3 +1,6 @@
+/** @file
+ * @brief Defines the fixed wire header and protocol limits.
+ */
 #pragma once
 
 #include <cstddef>
@@ -9,6 +12,7 @@ namespace service::protocol
 // version (u8), then payload. All multibyte integers are unsigned and
 // big-endian. The length counts the seven metadata bytes after the
 // length field plus payload; magic is outside the length count.
+/** @brief Defines the fixed wire header and protocol limits. */
 struct PacketHeader
 {
     static constexpr std::size_t kLengthSize = sizeof(std::uint32_t);
@@ -31,10 +35,15 @@ struct PacketHeader
 
     static constexpr std::uint32_t kMagic = 0x4152454E;
 
+    /// Wire-format magic identifying Arena packets.
     std::uint32_t m_magic{kMagic};
+    /// Metadata and payload length in network byte order on the wire.
     std::uint32_t m_length{0};
+    /// Identifier used to correlate requests and responses.
     std::uint32_t m_requestId{0};
+    /// Packet message type.
     std::uint16_t m_type{0};
+    /// Protocol version carried by the frame.
     std::uint8_t m_version{kCurrentVersion};
 };
 } // namespace service::protocol

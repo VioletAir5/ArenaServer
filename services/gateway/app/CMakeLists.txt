@@ -1,3 +1,4 @@
+# Builds the gateway application executable.
 add_executable(ArenaServer
     main.cpp
 )

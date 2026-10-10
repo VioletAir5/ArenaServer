@@ -1,3 +1,6 @@
+/** @file
+ * @brief Distributes work across event-loop threads.
+ */
 #include "net/EventLoopThreadPool.h"
 
 #include <exception>

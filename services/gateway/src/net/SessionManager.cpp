@@ -1,3 +1,6 @@
+/** @file
+ * @brief Finds and manages active sessions.
+ */
 #include "net/SessionManager.h"
 
 namespace service::gateway

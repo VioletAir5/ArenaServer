@@ -1,3 +1,6 @@
+/** @file
+ * @brief Defines the lifecycle interface for TCP server implementations.
+ */
 #pragma once
 
 #include <chrono>
@@ -9,12 +12,14 @@ namespace service::gateway
 // execution context. The caller keeps that context alive until after
 // destruction. No automatic cross-thread dispatch is promised.
 // Backend-specific construction/startup is outside this interface.
+/** @brief Defines the lifecycle interface for TCP server implementations. */
 class ITcpServer
 {
 public:
     static constexpr std::chrono::milliseconds kDefaultStopGrace{
         std::chrono::seconds(5)};
 
+    /** @brief Constructs the i tcp server. */
     virtual ~ITcpServer() noexcept = default;
 
     // Stop accepting, reject new application sends, drain queued output

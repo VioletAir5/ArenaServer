@@ -1,3 +1,6 @@
+/** @file
+ * @brief Transfers queued values between producer and consumer threads.
+ */
 #pragma once
 
 #include <condition_variable>
@@ -8,23 +11,35 @@
 
 namespace service
 {
+/** @brief Bounded queue shared by producers and consumers.
+ * @tparam T Value stored in the queue.
+ */
 template <typename T> class BlockingQueue
 {
 private:
+    /// Maximum queued item count.
     size_t _capacity;
+    /// Whether producers may still add items.
     bool _closed;
+    /// Items shared by producers and consumers.
     std::deque<T> _queue;
+    /// Guards the queue and closed flag.
     mutable std::mutex _mtx;
+    /// Wakes producers when capacity becomes available.
     std::condition_variable _not_full;
+    /// Wakes consumers when an item arrives or the queue closes.
     std::condition_variable _not_empty;
 
 public:
+    /** @brief Constructs the blocking queue. */
     explicit BlockingQueue(size_t);
+    /** @brief Releases owned resources. */
     ~BlockingQueue() = default;
 
     // life time
     BlockingQueue(const BlockingQueue&) = delete;
     BlockingQueue& operator=(const BlockingQueue&) = delete;
+    /** @brief Move construction is disabled. */
     BlockingQueue(BlockingQueue&&) = delete;
     BlockingQueue& operator=(BlockingQueue&&) = delete;
 
@@ -35,6 +50,7 @@ public:
 
     // state
     void close();
+    /** @brief Reports whether the queue has been closed. */
     bool closed() const;
 
     // observer

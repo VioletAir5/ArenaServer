@@ -1,3 +1,6 @@
+/** @file
+ * @brief Executes queued work on worker threads.
+ */
 #pragma once
 
 #include <atomic>
@@ -19,9 +22,11 @@ namespace service
 
 using Task = std::function<void()>;
 
+/** @brief Executes queued work on worker threads. */
 class ThreadPool
 {
 private:
+    /** @brief Tracks worker startup and shutdown. */
     enum class State
     {
         Created,
@@ -30,10 +35,13 @@ private:
     };
 
 public:
+    /** @brief Constructs the thread pool. */
     explicit ThreadPool(size_t, size_t);
 
+    /** @brief Joins workers and releases the pool. */
     virtual ~ThreadPool();
 
+    /** @brief Copy construction is disabled. */
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
@@ -60,12 +68,17 @@ private:
     void workerLoop();
 
 private:
+    /// Configured number of worker threads.
     size_t _threadCount;
 
+    /// Bounded task queue shared with workers.
     BlockingQueue<Task> _tasks;
+    /// Worker threads owned by this pool.
     std::vector<std::thread> _workers;
 
+    /// Guards lifecycle transitions.
     std::mutex _stateMutex;
+    /// Current lifecycle state observed across threads.
     std::atomic<State> _state{State::Created};
 
     // =======================

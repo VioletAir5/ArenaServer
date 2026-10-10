@@ -1,3 +1,6 @@
+/** @file
+ * @brief Provides the authentication gate handler implementation.
+ */
 #include <iostream>
 #include <stdexcept>
 #include <utility>

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Distributes work across event-loop threads.
+ */
 #pragma once
 
 #include <cstddef>
@@ -9,12 +12,16 @@
 
 namespace service::gateway
 {
+/** @brief Distributes work across event-loop threads. */
 class EventLoopThreadPool
 {
 public:
+    /** @brief Constructs the event loop thread pool. */
     EventLoopThreadPool(EventLoop* baseLoop, std::size_t threadCount);
+    /** @brief Releases owned resources. */
     ~EventLoopThreadPool() noexcept;
 
+    /** @brief Copy construction is disabled. */
     EventLoopThreadPool(const EventLoopThreadPool&) = delete;
     EventLoopThreadPool&
     operator=(const EventLoopThreadPool&) = delete;
@@ -40,6 +47,7 @@ public:
     // start/after stop and report exited workers. With zero workers,
     // both getters fall back to baseLoop.
     EventLoop* getNextLoop();
+    /** @brief Returns all loops. */
     std::vector<EventLoop*> getAllLoops() const;
 
     // Indicates a started session, not worker health.
@@ -48,10 +56,15 @@ public:
 private:
     void requireBaseThread() const;
 
+    /// Stores the base loop.
     EventLoop* m_baseLoop;
+    /// Stores the thread count.
     std::size_t m_threadCount;
+    /// Stores the next.
     std::size_t m_next{0};
+    /// Stores the started.
     bool m_started{false};
+    /// Stores the threads.
     std::vector<std::unique_ptr<EventLoopThread>> m_threads;
 };
 } // namespace service::gateway

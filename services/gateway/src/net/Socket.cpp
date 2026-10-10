@@ -1,3 +1,6 @@
+/** @file
+ * @brief Owns a TCP socket and its system-call operations.
+ */
 #include "net/Socket.h"
 
 #include <netinet/in.h>

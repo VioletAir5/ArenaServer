@@ -1,3 +1,6 @@
+/** @file
+ * @brief Owns a thread running one event loop.
+ */
 #include "net/EventLoopThread.h"
 
 #include <exception>

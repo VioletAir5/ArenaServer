@@ -1,3 +1,6 @@
+/** @file
+ * @brief Carries immutable connection identity and session context.
+ */
 #include "net/ConnectionContext.h"
 
 #include <stdexcept>

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Rejects packet types outside the configured allowlist.
+ */
 #include "net/PacketWhitelistFeature.h"
 
 #include <algorithm>

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Routes decoded requests to registered business handlers.
+ */
 #include "net/MessageRouter.h"
 
 #include <span>

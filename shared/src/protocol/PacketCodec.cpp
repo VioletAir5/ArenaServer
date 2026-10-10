@@ -1,3 +1,6 @@
+/** @file
+ * @brief Incrementally decodes and encodes framed packets.
+ */
 #include "protocol/PacketCodec.hpp"
 
 #include <arpa/inet.h>

@@ -1,3 +1,6 @@
+/** @file
+ * @brief Limits packet admission with a token bucket.
+ */
 #include "net/TokenBucketFeature.h"
 
 #include <algorithm>

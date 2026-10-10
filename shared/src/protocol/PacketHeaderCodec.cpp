@@ -1,3 +1,6 @@
+/** @file
+ * @brief Validates and serializes packet headers and frames.
+ */
 #include "protocol/PacketHeaderCodec.hpp"
 
 #include <arpa/inet.h>

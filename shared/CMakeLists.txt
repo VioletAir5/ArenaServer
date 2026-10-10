@@ -1,3 +1,4 @@
+# Defines infrastructure shared by implemented services.
 add_library(arena_shared)
 
 target_include_directories(arena_shared PUBLIC

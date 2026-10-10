@@ -1,3 +1,6 @@
+/** @file
+ * @brief Owns one Boost.Asio TCP connection and its asynchronous I/O.
+ */
 #include "net/AsioConnect.h"
 
 #include <fcntl.h>

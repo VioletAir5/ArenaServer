@@ -1,3 +1,6 @@
+/** @file
+ * @brief Accepts and manages TCP connections with Boost.Asio.
+ */
 #pragma once
 
 #include <memory>
@@ -16,6 +19,7 @@ namespace service::gateway
 // until after destruction. Each optional worker owns a separate
 // io_context. Construction starts listening; the default application
 // callback is echo.
+/** @brief Accepts and manages TCP connections with Boost.Asio. */
 class AsioTcpServer final : public ITcpServer
 {
 public:
@@ -29,20 +33,25 @@ public:
         ConnectionHandlerFactory handlerFactory = {},
         ConnectionFeatureFactory featureFactory = {}
     );
+    /** @brief Releases owned resources. */
     ~AsioTcpServer() noexcept override;
 
+    /** @brief Copy construction is disabled. */
     AsioTcpServer(const AsioTcpServer&) = delete;
     AsioTcpServer& operator=(const AsioTcpServer&) = delete;
 
     void stop(std::chrono::milliseconds grace = kDefaultStopGrace)
         override;
+    /** @brief Reports whether shutdown has completed. */
     bool stopped() const noexcept override;
+    /** @brief Returns the number of active connections. */
     std::size_t connectionCount() const noexcept override;
     std::size_t maxConnections() const noexcept override;
     std::size_t workerCount() const noexcept override;
 
 private:
     struct Impl;
+    /// Stores the impl.
     std::shared_ptr<Impl> m_impl;
 };
 } // namespace service::gateway

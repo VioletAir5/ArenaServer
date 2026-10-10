@@ -1,3 +1,6 @@
+/** @file
+ * @brief Counts rejected connections by reason.
+ */
 #pragma once
 
 #include <array>
@@ -12,6 +15,7 @@ namespace service::gateway
 // Fixed labels bound metric cardinality. These count rejected
 // packets/policy events, not every transport disconnect (EOF, reset,
 // stop, etc.).
+/** @brief Represents rejection reason. */
 enum class RejectionReason : std::size_t
 {
     PacketRateExceeded,
@@ -25,6 +29,7 @@ enum class RejectionReason : std::size_t
     Count
 };
 
+/** @brief Counts rejected connections by reason. */
 class RejectionCounters final
 {
 public:
@@ -41,6 +46,7 @@ public:
     static std::string_view name(RejectionReason reason) noexcept;
 
 private:
+    /// Stores the counts.
     std::array<std::atomic<std::uint64_t>, kReasons> m_counts{};
 };
 

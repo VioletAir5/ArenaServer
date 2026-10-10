@@ -1,3 +1,4 @@
+# Configures the ArenaServer build and its implemented service targets.
 cmake_minimum_required(VERSION 3.23)
 
 project(ArenaServer)

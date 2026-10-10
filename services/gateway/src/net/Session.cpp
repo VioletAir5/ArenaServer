@@ -1,3 +1,6 @@
+/** @file
+ * @brief Stores authenticated session identity.
+ */
 #include <net/Session.h>
 
 #include <utility>

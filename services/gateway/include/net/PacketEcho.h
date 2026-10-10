@@ -1,3 +1,6 @@
+/** @file
+ * @brief Replies to supported packets with an echo response.
+ */
 #pragma once
 
 #include "net/PacketBuffer.h"
@@ -6,6 +9,7 @@
 namespace service::gateway
 {
 // Handles binary echo requests; forwards other packet types.
+/** @brief Represents echo handler. */
 class EchoHandler final : public PacketHandler
 {
 public:
