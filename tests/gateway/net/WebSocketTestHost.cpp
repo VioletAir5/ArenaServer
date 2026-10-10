@@ -98,8 +98,6 @@ int main(int argc, char** argv)
     );
     std::cout << "WS_TEST_READY" << std::endl;
     context.run();
-    if (mode == "rpc")
-        handshake = makeRpcTestFactory();
     if (mode == "security")
         printSecurityTestCounters();
     return 0;
