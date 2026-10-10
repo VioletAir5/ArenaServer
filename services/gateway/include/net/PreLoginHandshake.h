@@ -1,6 +1,6 @@
 #pragma once
 
-#include "net/PacketPipeline.h"
+#include "net/MessageRouter.h"
 
 namespace service::gateway
 {
@@ -12,7 +12,15 @@ public:
     PacketHandleResult handle(PacketContext& context) override;
 };
 
-// A fresh decoder -> authentication gate -> Ping chain per connection.
-// Login authentication and business routing are still planned.
-ConnectionMessageCallback makePreLoginHandshakeHandler(ConnectionContext::Ptr);
+// Shared immutable defaults: public Ping and an explicit unavailable
+// Login.
+std::shared_ptr<const MessageRegistry> defaultMessageRegistry();
+
+// A fresh decoder -> MsgId router per connection. Authentication
+// policy lives in each registered route. Custom registries must be
+// sealed before use.
+ConnectionMessageCallback makePreLoginHandshakeHandler(
+    ConnectionContext::Ptr,
+    std::shared_ptr<const MessageRegistry> registry = {}
+);
 } // namespace service::gateway

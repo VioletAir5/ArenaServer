@@ -241,3 +241,32 @@ add_test(NAME SecurityPolicyTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(SecurityPolicyTransport_ws PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;security;websocket")
+
+add_test(NAME MessageDispatchTransport_Default
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/MessageDispatchIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>")
+set_tests_properties(MessageDispatchTransport_Default PROPERTIES
+    TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc;websocket")
+
+foreach(backend epoll asio)
+    if(backend STREQUAL "epoll")
+        set(rpc_host arena_tcp_server_test_host)
+    else()
+        set(rpc_host arena_asio_tcp_server_test_host)
+    endif()
+    foreach(workers 0 4)
+        add_test(NAME MessageDispatchTransport_${backend}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/MessageDispatchIntegrationTest.py"
+                "$<TARGET_FILE:${rpc_host}>" tcp ${workers})
+        set_tests_properties(MessageDispatchTransport_${backend}_${workers}
+            PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc")
+    endforeach()
+endforeach()
+add_test(NAME MessageDispatchTransport_ws
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/MessageDispatchIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
+set_tests_properties(MessageDispatchTransport_ws PROPERTIES
+    TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc;websocket")

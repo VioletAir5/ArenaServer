@@ -19,6 +19,7 @@
 
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
+#include "MessageDispatchTestProfile.h"
 #include "SecurityPolicyTestProfile.h"
 
 using namespace service::gateway;
@@ -44,6 +45,8 @@ int main(int argc, char** argv)
         handshake = [](ConnectionContext::Ptr)
         { return makePacketEchoHandler(); };
     }
+    if (mode == "rpc")
+        handshake = makeRpcTestFactory();
     if (mode == "security")
     {
         handshake = makeSecurityTestFactory();
@@ -95,6 +98,8 @@ int main(int argc, char** argv)
     );
     std::cout << "WS_TEST_READY" << std::endl;
     context.run();
+    if (mode == "rpc")
+        handshake = makeRpcTestFactory();
     if (mode == "security")
         printSecurityTestCounters();
     return 0;

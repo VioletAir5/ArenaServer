@@ -19,6 +19,7 @@
 
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
+#include "MessageDispatchTestProfile.h"
 #include "SecurityPolicyTestProfile.h"
 
 // A separate process lets the integration test inspect /proc/<pid>/fd
@@ -36,6 +37,10 @@ int main(int argc, char** argv)
         if (std::string_view(argv[4]) == "context")
         {
             handlerFactory = makeContextTestFactory();
+        }
+        else if (std::string_view(argv[4]) == "rpc")
+        {
+            handlerFactory = service::gateway::makeRpcTestFactory();
         }
         else if (std::string_view(argv[4]) == "security")
         {
