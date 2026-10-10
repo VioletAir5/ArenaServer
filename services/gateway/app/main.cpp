@@ -41,8 +41,8 @@ int main(int argc, char** argv)
     }
     if (protocol == "handshake")
     {
-        handlerFactory = [](ConnectionContext::Ptr)
-        { return makePreLoginHandshakeHandler(); };
+        handlerFactory = [](ConnectionContext::Ptr connection)
+        { return makePreLoginHandshakeHandler(std::move(connection)); };
     }
     const InetAddress address("127.0.0.1", 8888);
     if (backend == "epoll")

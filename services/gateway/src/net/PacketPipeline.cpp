@@ -48,6 +48,7 @@ EnvelopeDecodeHandler::handle(PacketContext& context)
             decoded
         ))
     {
+        context.rejectionReason = RejectionReason::InvalidEnvelope;
         return PacketHandleResult::Reject;
     }
     context.envelope.emplace(std::move(decoded));
@@ -55,8 +56,14 @@ EnvelopeDecodeHandler::handle(PacketContext& context)
 }
 
 ConnectionMessageCallback
-makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize)
+makePacketHandler(
+    PacketPipeline pipeline,
+    std::size_t maxBodySize,
+    RejectionCounters::Ptr counters
+)
 {
+    if (!counters)
+        throw std::invalid_argument("packet handler requires rejection counters");
     if (maxBodySize > kMaxPacketSize)
     {
         throw std::invalid_argument(
@@ -66,11 +73,13 @@ makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize)
     auto codec = std::make_shared<protocol::PacketCodec>(maxBodySize);
     auto chain = std::make_shared<PacketPipeline>(std::move(pipeline)
     );
-    return [codec, chain = std::move(chain)](
+    return [codec, chain = std::move(chain), counters = std::move(counters)](
                IConnection& connection,
                std::span<const std::byte> bytes
            )
     {
+        if (!connection.connected())
+            return;
         try
         {
             const auto status = codec->feed(
@@ -101,6 +110,7 @@ makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize)
                     if (chain->process(context) ==
                         PacketHandleResult::Reject)
                     {
+                        counters->record(context.rejectionReason);
                         connection.close();
                         return false;
                     }
@@ -109,6 +119,7 @@ makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize)
             );
             if (status == protocol::FrameDecodeStatus::Invalid)
             {
+                counters->record(RejectionReason::InvalidFrame);
                 std::cerr << "PacketCodec invalid frame id="
                           << connection.id() << '\n';
                 connection.close();
@@ -116,12 +127,14 @@ makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize)
         }
         catch (const std::exception& error)
         {
+            counters->record(RejectionReason::CallbackFailure);
             std::cerr << "PacketPipeline callback failed: "
                       << error.what() << '\n';
             connection.close();
         }
         catch (...)
         {
+            counters->record(RejectionReason::CallbackFailure);
             connection.close();
         }
     };

@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <utility>
 
 #include "net/PacketBuffer.h"
@@ -44,13 +45,18 @@ PacketHandleResult PingHandler::handle(PacketContext& context)
                : PacketHandleResult::Reject;
 }
 
-ConnectionMessageCallback makePreLoginHandshakeHandler()
+ConnectionMessageCallback makePreLoginHandshakeHandler(ConnectionContext::Ptr context)
 {
+    if (!context)
+        throw std::invalid_argument("handshake requires connection context");
     auto decoder = std::make_unique<EnvelopeDecodeHandler>();
-    decoder->setNext(std::make_unique<PingHandler>());
+    auto gate = std::make_unique<AuthenticationGateHandler>(context->session);
+    gate->setNext(std::make_unique<PingHandler>());
+    decoder->setNext(std::move(gate));
     return makePacketHandler(
         PacketPipeline(std::move(decoder)),
-        kMaxPacketSize
+        kMaxPacketSize,
+        context->rejections
     );
 }
 } // namespace service::gateway

@@ -33,8 +33,8 @@ int main(int argc, char** argv)
     const std::string origin = argv[3];
     const std::string mode = argv[4];
     boost::asio::io_context context;
-    ConnectionHandlerFactory handshake = [](ConnectionContext::Ptr)
-    { return makePreLoginHandshakeHandler(); };
+    ConnectionHandlerFactory handshake = [](ConnectionContext::Ptr connection)
+    { return makePreLoginHandshakeHandler(std::move(connection)); };
     ConnectionFeatureFactory features;
     if (mode == "features")
     {

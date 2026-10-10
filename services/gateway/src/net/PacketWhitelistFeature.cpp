@@ -25,6 +25,7 @@ FeatureResult PacketWhitelistFeature::onPacket(
             packet.type
         ))
         return FeatureResult::Continue;
+    control.context().rejections->record(RejectionReason::PacketTypeNotAllowed);
     std::cerr << "connection packet type rejected id="
               << control.context().connectionId
               << " type=" << packet.type << '\n';

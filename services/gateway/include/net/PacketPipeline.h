@@ -21,6 +21,7 @@ struct PacketContext
     const protocol::PacketHeader& header;
     std::string_view payload;
     std::optional<arena::protocol::Envelope> envelope{};
+    RejectionReason rejectionReason{RejectionReason::HandlerRejected};
 };
 
 enum class PacketHandleResult
@@ -56,6 +57,19 @@ public:
     PacketHandleResult handle(PacketContext& context) override;
 };
 
+// Place after EnvelopeDecodeHandler and before login/business routing.
+// Pending sessions permit only request-type LoginRequest and Ping. Only the
+// actual authentication handler may mark the session authenticated.
+class AuthenticationGateHandler final : public PacketHandler
+{
+public:
+    explicit AuthenticationGateHandler(std::shared_ptr<ConnectionSession>);
+    PacketHandleResult handle(PacketContext&) override;
+
+private:
+    std::shared_ptr<ConnectionSession> m_session;
+};
+
 // Owns the chain head. Framing stays in PacketCodec; nodes see
 // complete frames.
 class PacketPipeline
@@ -72,5 +86,9 @@ private:
 // frames. Reject (including an unhandled frame) and callback
 // exceptions close it.
 ConnectionMessageCallback
-makePacketHandler(PacketPipeline pipeline, std::size_t maxBodySize);
+makePacketHandler(
+    PacketPipeline pipeline,
+    std::size_t maxBodySize,
+    RejectionCounters::Ptr counters = defaultRejectionCounters()
+);
 } // namespace service::gateway

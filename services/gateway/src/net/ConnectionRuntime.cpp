@@ -100,6 +100,7 @@ void ConnectionRuntime::start()
     }
     catch (...)
     {
+        m_context->rejections->record(RejectionReason::CallbackFailure);
         requestClose();
     }
     finishEvent();
@@ -118,6 +119,7 @@ void ConnectionRuntime::received(std::span<const std::byte> data)
     }
     catch (...)
     {
+        m_context->rejections->record(RejectionReason::CallbackFailure);
         requestClose();
     }
     finishEvent();
@@ -148,6 +150,7 @@ void ConnectionRuntime::outputChanged(std::size_t bytes)
     }
     catch (...)
     {
+        m_context->rejections->record(RejectionReason::CallbackFailure);
         requestClose();
     }
     m_notifyingOutput = false;
@@ -279,6 +282,7 @@ ConnectionTimer ConnectionRuntime::scheduleAt(
                 }
                 catch (...)
                 {
+                    self->m_context->rejections->record(RejectionReason::CallbackFailure);
                     self->requestClose();
                 }
                 self->finishEvent();
@@ -307,6 +311,7 @@ FeatureResult ConnectionRuntime::inspectPacket(PacketView packet)
     }
     catch (...)
     {
+        m_context->rejections->record(RejectionReason::CallbackFailure);
         result = FeatureResult::Close;
     }
     if (result == FeatureResult::Close)

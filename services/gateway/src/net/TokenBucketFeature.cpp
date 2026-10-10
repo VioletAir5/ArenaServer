@@ -43,6 +43,7 @@ TokenBucketFeature::onPacket(IConnectionControl& control, PacketView)
         m_tokens -= 1;
         return FeatureResult::Continue;
     }
+    control.context().rejections->record(RejectionReason::PacketRateExceeded);
     if (m_exhausted == FeatureResult::Close)
         std::cerr << "connection packet rate exceeded id="
                   << control.context().connectionId << '\n';

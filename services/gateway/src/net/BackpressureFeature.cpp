@@ -30,6 +30,7 @@ void BackpressureFeature::onOutputBufferChanged(
             ConnectionClock::now() + m_timeout,
             [](IConnectionControl& c)
             {
+                c.context().rejections->record(RejectionReason::SlowClient);
                 std::cerr << "connection slow client timeout id="
                           << c.context().connectionId << '\n';
                 c.requestClose();

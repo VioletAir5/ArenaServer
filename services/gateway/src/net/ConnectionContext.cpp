@@ -51,17 +51,19 @@ bool ConnectionSession::expireLogin()
 ConnectionContext::ConnectionContext(
     std::uint64_t id,
     InetAddress peerAddress,
-    Clock::time_point accepted
+    Clock::time_point accepted,
+    RejectionCounters::Ptr counters
 )
     : connectionId(id)
     , peer(std::move(peerAddress))
     , acceptedAt(accepted)
     , session(std::make_shared<ConnectionSession>())
+    , rejections(std::move(counters))
 {
-    if (id == 0)
+    if (id == 0 || !rejections)
     {
         throw std::invalid_argument(
-            "connection context requires nonzero id"
+            "connection context requires nonzero id and rejection counters"
         );
     }
 }

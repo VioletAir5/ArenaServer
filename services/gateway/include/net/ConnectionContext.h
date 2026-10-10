@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "net/InetAddress.h"
+#include "net/RejectionCounters.h"
 
 namespace service::gateway
 {
@@ -53,12 +54,15 @@ struct ConnectionContext final
     ConnectionContext(
         std::uint64_t id,
         InetAddress peerAddress,
-        Clock::time_point accepted
+        Clock::time_point accepted,
+        RejectionCounters::Ptr counters = defaultRejectionCounters()
     );
 
     const std::uint64_t connectionId;
     const InetAddress peer;
     const Clock::time_point acceptedAt;
     const std::shared_ptr<ConnectionSession> session;
+    // Shared atomic counters may be read from monitoring/other workers.
+    const RejectionCounters::Ptr rejections;
 };
 } // namespace service::gateway

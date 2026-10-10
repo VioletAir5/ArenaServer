@@ -249,7 +249,9 @@ TEST_F(
     WhitelistRejectsValidEnvelopeBeforeBusinessHandler
 )
 {
-    auto runtime = make(makePreLoginHandshakeHandler());
+    auto runtime = make(makePreLoginHandshakeHandler(
+        std::make_shared<ConnectionContext>(1, InetAddress("127.0.0.1", 1), now)
+    ));
     runtime->features().add<PacketWhitelistFeature>(
         std::vector<std::uint16_t>{2}
     );
