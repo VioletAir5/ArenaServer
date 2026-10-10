@@ -1,20 +1,26 @@
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/AsioTcpServer.h"
+#include "net/BackpressureFeature.h"
 #include "net/EventLoop.h"
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
 #include "net/PacketEcho.h"
+#include "net/PacketWhitelistFeature.h"
 #include "net/PreLoginHandshake.h"
 #include "net/TcpServer.h"
+#include "net/TokenBucketFeature.h"
 #include "net/WebSocketServer.h"
 
 using namespace service::gateway;
@@ -41,8 +47,23 @@ int main(int argc, char** argv)
     }
     if (protocol == "handshake")
     {
-        handlerFactory = [](ConnectionContext::Ptr connection)
-        { return makePreLoginHandshakeHandler(std::move(connection)); };
+        handlerFactory = [](ConnectionContext::Ptr connection) {
+            return makePreLoginHandshakeHandler(std::move(connection)
+            );
+        };
+    }
+    ConnectionFeatureFactory featureFactory;
+    if (protocol == "handshake")
+    {
+        featureFactory =
+            [](ConnectionPipeline& pipeline, const ConnectionContext&)
+        {
+            pipeline.add<BackpressureFeature>();
+            pipeline.add<TokenBucketFeature>(200.0, 100.0);
+            pipeline.add<PacketWhitelistFeature>(
+                std::vector<std::uint16_t>{1}
+            );
+        };
     }
     const InetAddress address("127.0.0.1", 8888);
     if (backend == "epoll")
@@ -55,7 +76,8 @@ int main(int argc, char** argv)
                 1000,
                 std::chrono::seconds(60),
                 4,
-                handlerFactory
+                handlerFactory,
+                featureFactory
             );
         loop.loop();
         return 0;
@@ -71,7 +93,8 @@ int main(int argc, char** argv)
             1000,
             std::chrono::seconds(60),
             4,
-            handlerFactory
+            handlerFactory,
+            featureFactory
         );
     std::unique_ptr<WebSocketServer> wsServer;
     if (protocol == "handshake")
@@ -83,7 +106,9 @@ int main(int argc, char** argv)
             context,
             InetAddress("127.0.0.1", 8889),
             origin,
-            handlerFactory
+            handlerFactory,
+            1000,
+            featureFactory
         );
     }
     std::function<void()> waitStopped;
@@ -119,4 +144,14 @@ int main(int argc, char** argv)
         }
     );
     context.run();
+    if (protocol == "handshake")
+    {
+        const auto counts = defaultRejectionCounters()->snapshot();
+        for (std::size_t i = 0; i < counts.size(); ++i)
+            std::cerr << "connection_rejections reason="
+                      << RejectionCounters::name(
+                             static_cast<RejectionReason>(i)
+                         )
+                      << " count=" << counts[i] << '\n';
+    }
 }

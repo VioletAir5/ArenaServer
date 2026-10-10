@@ -218,3 +218,26 @@ add_test(NAME ConnectionFeatureTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(ConnectionFeatureTransport_ws PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;features;websocket")
+
+# Authentication and exact reason counts cross all actual transport owners.
+foreach(backend epoll asio)
+    if(backend STREQUAL "epoll")
+        set(security_host arena_tcp_server_test_host)
+    else()
+        set(security_host arena_asio_tcp_server_test_host)
+    endif()
+    foreach(workers 0 4)
+        add_test(NAME SecurityPolicyTransport_${backend}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/SecurityPolicyIntegrationTest.py"
+                "$<TARGET_FILE:${security_host}>" tcp ${workers})
+        set_tests_properties(SecurityPolicyTransport_${backend}_${workers}
+            PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;security")
+    endforeach()
+endforeach()
+add_test(NAME SecurityPolicyTransport_ws
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/SecurityPolicyIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
+set_tests_properties(SecurityPolicyTransport_ws PROPERTIES
+    TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;security;websocket")

@@ -12,6 +12,7 @@
 
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
+#include "SecurityPolicyTestProfile.h"
 
 int main(int argc, char** argv)
 {
@@ -26,6 +27,13 @@ int main(int argc, char** argv)
         if (std::string_view(argv[4]) == "context")
         {
             handlerFactory = makeContextTestFactory();
+        }
+        else if (std::string_view(argv[4]) == "security")
+        {
+            handlerFactory = service::gateway::
+                makeSecurityTestFactory();
+            featureFactory = service::gateway::
+                makeSecurityTestFeatures();
         }
         else if (std::string_view(argv[4]) == "features")
         {
@@ -100,4 +108,6 @@ int main(int argc, char** argv)
     );
     std::cerr << "TEST_HOST_READY" << std::endl;
     context.run();
+    if (argc == 5 && std::string_view(argv[4]) == "security")
+        printSecurityTestCounters();
 }

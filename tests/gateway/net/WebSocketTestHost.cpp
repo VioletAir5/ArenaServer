@@ -19,6 +19,7 @@
 
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
+#include "SecurityPolicyTestProfile.h"
 
 using namespace service::gateway;
 
@@ -33,7 +34,8 @@ int main(int argc, char** argv)
     const std::string origin = argv[3];
     const std::string mode = argv[4];
     boost::asio::io_context context;
-    ConnectionHandlerFactory handshake = [](ConnectionContext::Ptr connection)
+    ConnectionHandlerFactory handshake =
+        [](ConnectionContext::Ptr connection)
     { return makePreLoginHandshakeHandler(std::move(connection)); };
     ConnectionFeatureFactory features;
     if (mode == "features")
@@ -41,6 +43,11 @@ int main(int argc, char** argv)
         features = makeFeatureTestProfile();
         handshake = [](ConnectionContext::Ptr)
         { return makePacketEchoHandler(); };
+    }
+    if (mode == "security")
+    {
+        handshake = makeSecurityTestFactory();
+        features = makeSecurityTestFeatures();
     }
     if (mode == "context")
         handshake = makeContextTestFactory();
@@ -88,5 +95,7 @@ int main(int argc, char** argv)
     );
     std::cout << "WS_TEST_READY" << std::endl;
     context.run();
+    if (mode == "security")
+        printSecurityTestCounters();
     return 0;
 }

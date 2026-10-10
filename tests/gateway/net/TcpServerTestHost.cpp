@@ -19,6 +19,7 @@
 
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
+#include "SecurityPolicyTestProfile.h"
 
 // A separate process lets the integration test inspect /proc/<pid>/fd
 // and stop the event loop cleanly, including under LeakSanitizer.
@@ -35,6 +36,13 @@ int main(int argc, char** argv)
         if (std::string_view(argv[4]) == "context")
         {
             handlerFactory = makeContextTestFactory();
+        }
+        else if (std::string_view(argv[4]) == "security")
+        {
+            handlerFactory = service::gateway::
+                makeSecurityTestFactory();
+            featureFactory = service::gateway::
+                makeSecurityTestFeatures();
         }
         else if (std::string_view(argv[4]) == "features")
         {
@@ -145,5 +153,7 @@ int main(int argc, char** argv)
     }
 
     loop.removeChannel(&stopChannel);
+    if (argc == 5 && std::string_view(argv[4]) == "security")
+        service::gateway::printSecurityTestCounters();
     return 0;
 }
