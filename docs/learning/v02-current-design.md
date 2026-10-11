@@ -141,7 +141,7 @@ ConnectionFeatureFactory policies =
     };
 ~~~
 
-**规划例子：LoginTimeoutFeature目前不存在。** 合理扩展是在onConnected按context.acceptedAt+期限调用scheduleAt，Pending到期在owner expireLogin/requestClose，onClosed取消token；Ping不等于认证。WS hook在Upgrade后，acceptedAt仍是accept时，因此应有意识决定期限包含Upgrade时间，不能无意重新给满期限。
+**规划例子：LoginTimeoutFeature目前不存在。** 合理扩展是在onConnected计算context.acceptedAt+期限，先在owner判断是否已经过期：过期且Pending直接expireLogin/requestClose，未过期再scheduleAt；onClosed取消token，Ping不等于认证。当前原生Scheduler把过期deadline变为零delay，但TimerQueue::addAfter要求正delay，可能抛异常；不能假定它与Asio一样自动即刻执行。详见[代码分析](code-analysis/05-runtime-routing.md)。WS hook在Upgrade后，acceptedAt仍是accept时，因此应有意识决定期限包含Upgrade时间，不能无意重新给满期限。
 
 ### D. 新增IP并发上限
 

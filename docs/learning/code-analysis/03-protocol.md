@@ -252,7 +252,7 @@ message Envelope {
   }
 ~~~
 
-request_id是uint64，outer header是uint32；Router有一致性/范围规则，不能假定两个字段任意各写一个值。msg_id=0是旧客户端，Router从已知oneof推导MsgId；非零代表显式消息标识，需与payload匹配。sent_at_unix_ms是客户端提供的时间，不参与服务端steady_clock超时计算。
+request_id是uint64，outer header是uint32；Router以内层非零值优先、零则回退外层；当前允许两者不同，也允许内层超出uint32，回复分别保留各自值。msg_id=0是旧客户端，Router从已知oneof推导MsgId；非零代表显式消息标识，需与payload匹配。sent_at_unix_ms是客户端提供的时间，不参与服务端steady_clock超时计算。
 
 Envelope字段1、3、4及oneof10–14固定；退休字段2及名称legacy_client_tag均reserved。Error.code保留uint32，enum列出1001未知、1002非法、1003未认证、1004超时、1005过载、1006重复、2001业务失败、2002不可用、9000内部错误。可读新字段/保留未知字段与理解新业务语义是两个要求。
 
@@ -282,6 +282,6 @@ transport借用bytes → Runtime.received
 - `PacketCodecTest.cpp`：分片/粘包、早拒、自定义limit、终态/回调异常/重入。
 - `EnvelopeCodecTest.cpp`、`compat/legacy_envelope.proto`：双向字段兼容、unknown、reserved、字节/深度。
 - `tests/gateway/net/PacketBufferTest.cpp`及`PacketCodecIntegrationTest.py`：gateway政策及真实网络帧。
-- `MessageDispatchTest.cpp`：两层request id、payload/msg_id匹配及回复预算。
+- `MessageDispatchTest.cpp`：两层request id选择、payload/msg_id匹配及回复预算。
 
 这里只引用各测试的职责；v0.2实测执行范围以[chaos报告](../../reports/v0.2-chaos-20261011.md)为准。后续阅读：[连接实现](04-transports.md)、[Runtime和Router](05-runtime-routing.md)。
