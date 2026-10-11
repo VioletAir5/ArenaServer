@@ -34,7 +34,7 @@
 
 **原因。** 过滤/鉴权需要可靠peer、accept时间、连接身份与session；不能让业务解析HTTP字段猜IP，也不能每次再从已RST socket查询peer。
 
-**机制。** 新ConnectionContext包含不可变connectionId/peer/acceptedAt和共享ConnectionSession；handler工厂接收Context::Ptr，在worker owner创建状态。accept时捕获地址/steady时间，WS时间在Upgrade之前。兼容旧回调的适配入口集中在ConnectionHandler模块。
+**机制。** 新ConnectionContext包含不可变connectionId/peer/acceptedAt和共享ConnectionSession；handler工厂接收Context::Ptr，在worker owner创建状态。accept时捕获地址/steady时间，WS时间在Upgrade之前。工厂签名和调用方一起更新；ConnectionHandler集中做Context寿命封装、空结果检查和raw echo fallback，并没有自动兼容旧factory签名。
 
 **线程与寿命。** Session在owner构造/变更，初始Pending，可markAuthenticated或expireLogin；Context共享只延长数据寿命，不拥有socket/timer/connection，也不授权跨线程访问Session。后台任务能保存Context但不能据此假定连接活着。
 
