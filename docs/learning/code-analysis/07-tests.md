@@ -73,6 +73,7 @@ TEST(EnvelopeCodecTest, RejectsDeeplyNestedError) {
 
 | 文件 | 验证对象与限制 |
 | --- | --- |
+| `PacketBufferTest.cpp` | gateway Buffer adapter：初始/append/skip、空指针零/非零长度、失败保持原数据、增长/先压缩、消费后重新写及多次append顺序；继承shared Buffer的同一storage，readPtr/skip别名，默认1MiB容量界。14个case是顺序buffer契约，没有并发写证明 |
 | `SocketTest.cpp` | 创建/bind/listen/accept、fcntl nonblocking/CLOEXEC、析构FD关闭；真实loopback，直接验证Socket而非Runtime |
 | `ChannelTest.cpp` | interest/revents、仅匹配callback、HUP、缺callback、mask helper更新与失败回滚；tie保活所有同次callback及expired抑制；Channel借用FD |
 | `EpollPollerTest.cpp` | eventfd加入/修改/删除，poll清旧结果，多于初始batch扩展、invalid FD、信号中断清结果；不执行应用handler |
