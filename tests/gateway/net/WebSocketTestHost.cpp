@@ -17,6 +17,7 @@
 #include "net/PreLoginHandshake.h"
 #include "net/WebSocketServer.h"
 
+#include "ChaosTestProfile.h"
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
 #include "MessageDispatchTestProfile.h"
@@ -44,6 +45,13 @@ int main(int argc, char** argv)
         features = makeFeatureTestProfile();
         handshake = [](ConnectionContext::Ptr)
         { return makePacketEchoHandler(); };
+    }
+    if (mode == "chaos" || mode == "chaos_packet")
+    {
+        features = makeChaosTestFeatures();
+        if (mode == "chaos_packet")
+            handshake = [](ConnectionContext::Ptr)
+            { return makePacketEchoHandler(); };
     }
     if (mode == "rpc")
         handshake = makeRpcTestFactory();
@@ -98,6 +106,8 @@ int main(int argc, char** argv)
     );
     std::cout << "WS_TEST_READY" << std::endl;
     context.run();
+    if (mode == "chaos" || mode == "chaos_packet")
+        printChaosTestCounters();
     if (mode == "security")
         printSecurityTestCounters();
     return 0;

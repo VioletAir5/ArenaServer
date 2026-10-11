@@ -17,6 +17,7 @@
 #include "net/TcpServer.h"
 #include "os/FileDescriptor.h"
 
+#include "ChaosTestProfile.h"
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
 #include "MessageDispatchTestProfile.h"
@@ -37,6 +38,18 @@ int main(int argc, char** argv)
         if (std::string_view(argv[4]) == "context")
         {
             handlerFactory = makeContextTestFactory();
+        }
+        else if (std::string_view(argv[4]) == "chaos" || std::string_view(argv[4]) == "chaos_packet")
+        {
+            featureFactory = service::gateway::makeChaosTestFeatures(
+            );
+            if (std::string_view(argv[4]) == "chaos")
+                handlerFactory =
+                    [](service::gateway::ConnectionContext::Ptr ctx)
+                {
+                    return service::gateway::
+                        makePreLoginHandshakeHandler(std::move(ctx));
+                };
         }
         else if (std::string_view(argv[4]) == "rpc")
         {
@@ -158,6 +171,9 @@ int main(int argc, char** argv)
     }
 
     loop.removeChannel(&stopChannel);
+    if (argc == 5 && (std::string_view(argv[4]) == "chaos" ||
+                      std::string_view(argv[4]) == "chaos_packet"))
+        service::gateway::printChaosTestCounters();
     if (argc == 5 && std::string_view(argv[4]) == "security")
         service::gateway::printSecurityTestCounters();
     return 0;
