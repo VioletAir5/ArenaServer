@@ -270,3 +270,11 @@ add_test(NAME MessageDispatchTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(MessageDispatchTransport_ws PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc;websocket")
+
+# A short framing regression; the 30-minute chaos run stays opt-in.
+add_test(NAME ChaosRun_WebSocketFraming
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ChaosRunFramingTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>")
+set_tests_properties(ChaosRun_WebSocketFraming PROPERTIES
+    TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;chaos;websocket")

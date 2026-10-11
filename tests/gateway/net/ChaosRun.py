@@ -25,7 +25,7 @@ from TcpServerIntegrationTest import reserve_port
 from TcpServerChurnMonitor import proc_metrics
 from WebSocketIntegrationTest import (
     ORIGIN, MAGIC, upgrade, packet, packet_pong, envelope_ping,
-    read_tcp_packet, send_frame, read_frame, close_code, varint,
+    read_tcp_packet, send_frame, close_code, varint, exact,
 )
 from MessageDispatchIntegrationTest import fields
 
@@ -37,6 +37,35 @@ POLICIES = {"packet_rate_exceeded", "packet_type_not_allowed", "invalid_frame",
             "invalid_envelope", "handler_rejected", "slow_client",
             "unauthenticated", "callback_failure"}
 
+
+
+def read_ws_message(peer):
+    """Reassemble Beast continuation frames without assuming frame=message."""
+    result = bytearray()
+    started = False
+    while True:
+        first, second = exact(peer, 2)
+        assert not (first & 0x70), "unexpected RSV bits"
+        assert not (second & 0x80), "masked server frame"
+        size = second & 127
+        if size == 126:
+            size = struct.unpack("!H", exact(peer, 2))[0]
+        elif size == 127:
+            size = struct.unpack("!Q", exact(peer, 8))[0]
+        assert size <= 1024 * 1024
+        opcode = first & 15
+        payload = exact(peer, size)
+        if opcode in (9, 10):
+            assert first & 0x80 and size <= 125
+            if opcode == 9:
+                send_frame(peer, 10, payload)
+            continue
+        assert opcode == (0 if started else 2), ("unexpected WS opcode", opcode)
+        started = True
+        result.extend(payload)
+        assert len(result) <= 1024 * 1024, "unbounded WS response"
+        if first & 0x80:
+            return bytes(result)
 
 def timestamp():
     return datetime.datetime.now(datetime.timezone(
@@ -150,9 +179,7 @@ class Host:
 
     def receive(self, peer):
         if self.ws:
-            opcode, data = read_frame(peer)
-            assert opcode == 2, (self.name, opcode)
-            return data
+            return read_ws_message(peer)
         return read_tcp_packet(peer)
 
     def expect_closed(self, peer):
