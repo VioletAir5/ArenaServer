@@ -6,6 +6,8 @@
 
 ## 01 · 698ca5c · 2026-10-05 · IConnection：先稳定使用契约
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-01).
+
 原题：Fix IConnection abstraction and organize TcpConnection implementation。
 
 **原来与原因。** v0.1已有epoll、worker、半关闭、水位及有界输出，但业务直接依赖TcpConnection。新增IConnection让替换I/O实现时，上层仍使用同一send/shutdown/close契约；同时整理原生实现，属于真实行为和接口修复。
@@ -19,6 +21,8 @@
 **证据。** services/gateway/include/net/IConnection.h、TcpConnection.h；src/net/TcpConnection.cpp；tests/gateway/net/IConnectionTest.cpp验证多态、暂停、半关闭、字节所有权、ID及owner析构。原笔记: ArenaServer/changes/2026-10-05-iconnection-review-fixes.md (Obsidian)。
 
 ## 02 · babcc33 · 2026-10-05 · ITcpServer：统一管理面
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-02).
 
 原题：Extract ITcpServer lifecycle interface。
 
@@ -34,6 +38,8 @@
 
 ## 03 · f6749f3 · 2026-10-05 · Asio：第二个实际实现
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-03).
+
 原题：Implement Boost.Asio connection and TCP server backend。
 
 **原因。** 用真实第二种I/O实现检验接口：上层契约复用，epoll内部不改成Asio。新增AsioConnect、AsioTcpServer与公共ConnectionId分配器。
@@ -47,6 +53,8 @@
 **证据。** AsioConnect.h/.cpp、AsioTcpServer.h/.cpp、ConnectionId.cpp、main.cpp；AsioConnectTest.cpp、AsioTcpServerTest.cpp与0/4-worker真实TCP测试。原笔记: ArenaServer/changes/2026-10-05-boost-asio-backend.md (Obsidian)，含历史验证与满FD/UBSan限制。
 
 ## 04 · 146518c · 2026-10-06 · PacketCodec：字节流成为应用包
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-04).
 
 原题：Add packet codec and gateway echo integration。
 
@@ -62,6 +70,8 @@
 
 ## 05 · a9eb1da · 2026-10-07 · 状态机：互斥与正交分开
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-05).
+
 原题：Clarify AsioConnect lifecycle and read phases。
 
 **原因。** closed/shutdownRequested/writeHalfClosed/peerHalfClosed易出现矛盾；reading/readReady/delivering也互斥。enum约束合法组合并明确事件转移。
@@ -75,6 +85,8 @@
 **证据。** AsioConnect.h/.cpp、AsioConnectTest.cpp的暂停/恢复、EOF交付场景。原笔记: ArenaServer/changes/2026-10-06-asio-connect-state-machine.md (Obsidian)。
 
 ## 06 · c01f0aa · 2026-10-07 · Asio并发send：入口排队，I/O串行
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-06).
 
 原题：Serialize concurrent AsioConnect sends and cancellation。
 
@@ -90,6 +102,8 @@
 
 ## 07 · c91409a · 2026-10-07 · 原生TCP使用同一并发思路
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-07).
+
 原题：Support concurrent TcpConnection sends with bounded queue。
 
 **原因。** 原生PacketBuffer会扩容、移动内容并改变多个索引；原子写位置只预留地址，不能保证内存不移动或reader不读未完成写入。
@@ -103,6 +117,8 @@
 **证据。** TcpConnection.h/.cpp::send/drainSendQueue/sendInLoop、IConnection.h；ConnectionLifecycleTest.cpp验证并发、上限、close/shutdown与Buffer隔离。原笔记: ArenaServer/changes/2026-10-07-tcp-concurrent-send.md (Obsidian)。
 
 ## 08 · 84e2ef8 · 2026-10-07 · Envelope：稳定字段与有界解析
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-08).
 
 原题：Add versioned Envelope protobuf schema and bounded codec。
 
@@ -118,6 +134,8 @@
 
 ## 09 · fd13a53 · 2026-10-08 · Magic：提前识别协议
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-09).
+
 原题：Add packet header magic and update framing。
 
 **原因。** 长度开头难判断Arena协议；magic让前4字节就能拒绝错误协议，同时统一prefix/body计算。
@@ -132,6 +150,8 @@
 
 ## 10 · 992a42b · 2026-10-08 · 完整包处理点从echo拆出
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-10).
+
 原题：Add complete-packet processing pipeline。
 
 **原因。** PacketEcho混合framing/类型/响应；继续加鉴权/路由会堆分支。先建立完整包后的可组合处理位置。
@@ -145,6 +165,8 @@
 **证据。** PacketPipeline.h/.cpp、PacketEcho.cpp；PacketPipelineTest.cpp覆盖顺序、短路、protobuf、Reject/异常。原笔记: ArenaServer/changes/2026-10-08-packet-pipeline.md (Obsidian)。
 
 ## 11 · 3942122 · 2026-10-08 · Beast WS：复用应用协议
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-11).
 
 原题：Add Beast WebSocket transport and pre-login handshake。
 

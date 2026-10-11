@@ -15,6 +15,10 @@
 
 正文存入Obsidian Vault/ArenaServer/architecture；仓库docs/learning保留可Git审查的同步副本。副本中Change/Knowledge/Tool Note用vault路径引用，避免伪造仓库中不存在的相对链接。Obsidian正文使用实际相对链接。commit-manifest.json保留全SHA、日期、subject和所有改动文件，供查漏与定位。
 
+## 代码分析入口
+
+[v0.2 全代码分析](code-analysis/README.md)按模块解释源码；[28次提交代码对照](code-analysis/09-commit-code.md)在每个历史提交的实际diff旁讲解机制，并保留完整diff。
+
 ## 完整提交索引：28/28
 
 | 序号 | SHA | 改变了什么 | 阅读 |

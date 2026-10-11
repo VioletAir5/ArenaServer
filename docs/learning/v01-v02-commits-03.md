@@ -4,6 +4,8 @@
 
 ## 24 · d5cf131 · 2026-10-10 · 英文源码注释：给已有机制命名
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-24).
+
 原题：docs: add English source comments。
 
 **原因与差异。** 给CMake、gateway/shared头文件及实现、工具脚本加file/brief/member注释，便于顺着owner、socket、queue、runtime和handler导航。核心机制来自之前提交；该提交没有新增send queue、认证或业务route。
@@ -15,6 +17,8 @@
 **扩展与证据。** 用git show d5cf131检查添加内容；从ConnectionRuntime.h/AsioConnect.h/MessageRouter.h跳到对应.cpp核对具体机制。没有新增测试面，本次不为纯注释编造性能或安全结论。
 
 ## 25 · 8217f36 · 2026-10-11 · Chaos工具：验收也要有明确契约
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-25).
 
 原题：Add seeded TCP and WebSocket chaos runner with sanitizer telemetry。
 
@@ -30,6 +34,8 @@
 
 ## 26 · 51aaeff · 2026-10-11 · 修复WS测试客户端的边界误解
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-26).
+
 原题：Reassemble WebSocket continuation frames in the chaos client。
 
 **原因与定位。** 初次正式运行约56秒出现WS echo mismatch，不能直接认定server坏。最小真实探针发现4096-byte payload对应4111-byte Packet，Beast合法切成binary 4096＋continuation 15；拼接完全正确。旧helper只读一个frame，却当成完整message。
@@ -44,6 +50,8 @@
 
 ## 27 · 5705fcb · 2026-10-11 · 威胁清单：写清信任边界和开放项
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-27).
+
 原题：Document gateway v0.2 threats and chaos acceptance boundaries。
 
 **原因。** “长时间没crash”不能代替完整安全设计。将可信peer、客户端Origin/request id/时间、Packet/protobuf/route等边界逐层说明，把已有机制、当次测试和未完成项分开。
@@ -57,6 +65,8 @@
 **证据与扩展。** 仅新建上述威胁文档，下一提交补最终报告；新业务加入时回看T07/T10/T11，资源策略回看T03/T08/T09。笔记: ArenaServer/changes/2026-10-11-v02-chaos-acceptance.md (Obsidian)。
 
 ## 28 · b6dd283 · 2026-10-11 · 归档结果，v0.2成为可定位版本
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-28).
 
 原题：Record v0.2 thirty-minute chaos acceptance and raw metrics。
 

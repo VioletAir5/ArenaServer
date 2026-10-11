@@ -14,9 +14,14 @@
 - [构建与入口](06-build-and-entry.md)
 - [全部测试与宿主](07-tests.md)
 - [观测脚本与 dashboard](08-observability-tools.md)
+- [28次commit代码对照与完整diff](09-commit-code.md)
 - [测试入口/断言索引](test-case-index.md)
 - [全文件索引](source-index.md)
 
-待完成：28次commit代码对照、覆盖/链接/源码节选校验。正文未完成前不称全部代码分析完成。
+待完成：覆盖/链接/源码节选校验。正文未完成前不称全部代码分析完成。
 
 范围：v0.2所有作者维护的C++/头、Python、proto、HTML、CMake/构建/编辑设置及目标设计DSL。第三方/构建生成代码、渲染图片/PUML/SVG、报告CSV/JSON和纯说明文档不算待分析代码；报告/README在上下文引用。各独立模块是否接入gateway另行说明。
+
+## 文档生成器与人工解释
+
+三个生成器只管理证据附件：generate-code-snapshot.py从固定tag保存原文/清单，并把人工章节中的code占位符替换为精确源码；generate-test-index.py按宏或Python AST索引测试入口及静态断言，计数不代表执行结果；generate-history-analysis.py读取人工history-excerpts.json中的选段和解释，核对Git顺序后生成历史节选/28份完整diff。正文的机制、限制与评价来自人工源码阅读，不由文件行数或生成器推断。学习工具位于docs/learning，属于tag之后的文档维护，未计入v0.2的152文件。

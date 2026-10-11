@@ -4,6 +4,8 @@
 
 ## 12 · fc55741 · 2026-10-09 · class Handler责任链
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-12).
+
 原题：Refactor packet pipeline into handler chain。
 
 **原因。** stage列表已有扩展位置，用户希望通过继承Handler、setNext和base forwarding增加有状态过滤/匹配逻辑。改表达方式后，新增处理器可作为独立类维护。
@@ -18,6 +20,8 @@
 
 ## 13 · b40ed33 · 2026-10-09 · WS生命周期不再靠多个布尔猜测
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-13).
+
 原题：Unify WebSocket connection lifecycle state。
 
 **原因。** open/upgraded/closing/closeStarted/finished重复表达阶段，且原connected可能在HTTP尚未Upgrade时被视为可用。
@@ -29,6 +33,8 @@
 **扩展与验证面。** 新HTTP/WS阶段应加明确迁移守卫，不恢复布尔组合。本提交只改WebSocketServer.cpp；既有WebSocketTransport_HandshakeLimits检查网络生命周期，未新增专门观察握手中connected的测试。原笔记: ArenaServer/changes/2026-10-09-websocket-lifecycle-state.md (Obsidian)。
 
 ## 14 · 9fa7fda · 2026-10-10 · ConnectContext不是IP连接数量表
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-14).
 
 原题：Add connection context to transport handler factories。
 
@@ -44,6 +50,8 @@
 
 ## 15 · 3022736 · 2026-10-10 · Runtime/Feature先建立统一策略宿主
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-15).
+
 原题：Add connection runtime and owner-confined feature pipeline。
 
 **原因。** 每新增水位、令牌、登录超时都改三种Connection会使策略重复。把机制与策略分开：transport管I/O，Runtime接事件，Feature实现可复用连接规则。
@@ -57,6 +65,8 @@
 **证据。** ConnectionFeature.h、ConnectionRuntime.h/.cpp、ConnectionSchedulers.h/.cpp；ConnectionRuntimeTest.cpp的hook顺序/冻结/暂停叠加/取消/异常/close验收。三阶段笔记: ArenaServer/changes/2026-10-10-connection-runtime-features.md (Obsidian)。
 
 ## 16 · 8bf665c · 2026-10-10 · 三种transport真正接Runtime，统一背压
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-16).
 
 原题：Share runtime backpressure across epoll Asio and WebSocket transports。
 
@@ -72,6 +82,8 @@
 
 ## 17 · 841acb0 · 2026-10-10 · 完整包后、protobuf前早拒
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-17).
+
 原题：Apply reusable token bucket and whitelist features after packet framing。
 
 **原因。** 令牌不能按read块扣：半包/粘包会让相同业务请求因网络分片得到不同额度。过滤要在codec确认完整有界帧后，昂贵protobuf和业务前运行。
@@ -85,6 +97,8 @@
 **证据。** TokenBucketFeature.h/.cpp、PacketWhitelistFeature.h/.cpp、PacketPipeline.cpp；ConnectionFeatureTest.cpp/ConnectionFeatureIntegrationTest.py测桶、白名单、Drop/Close、半粘包、连接隔离及五传输配置。笔记: ArenaServer/changes/2026-10-10-connection-runtime-features.md (Obsidian)。
 
 ## 18 · d1bdc4a · 2026-10-10 · 鉴权门与固定拒绝原因
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-18).
 
 原题：Guard unauthenticated packet routing and count policy rejections。
 
@@ -100,6 +114,8 @@
 
 ## 19 · 0cfc94c · 2026-10-10 · 装配策略并以真实传输验证
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-19).
+
 原题：Enable handshake admission policies and verify rejection counts across transports。
 
 **原因。** 有Feature类不代表应用开启防护。main显式装配完整策略集，网络测试核对行为和原因，完成“模块→产品配置”的接线。
@@ -113,6 +129,8 @@
 **证据。** main.cpp、SecurityPolicyTestProfile.h、SecurityPolicyIntegrationTest.py、三个TestHost、CMakeLists.txt；历史普通/ASan各118项结果见 笔记: ArenaServer/changes/2026-10-10-authenticated-routing-rejections.md (Obsidian)。
 
 ## 20 · 6a1362b · 2026-10-10 · Router管理一次请求的全部生命周期
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-20).
 
 原题：Add typed MsgId dispatch with request correlation and owner deadlines。
 
@@ -130,6 +148,8 @@ owner handle→validate/lookup/auth/budget→pending{id,generation,owned request
 
 ## 21 · be7d216 · 2026-10-10 · 默认链切到Router并输出协议表
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-21).
+
 原题：Route default handshake requests and verify typed replies across transports。
 
 **原因。** 核心router须成为实际默认路径；登录前未知消息/业务错误不应混成关连接。协议表让客户端知道ID、方向和错误契约。
@@ -144,6 +164,8 @@ owner handle→validate/lookup/auth/budget→pending{id,generation,owned request
 
 ## 22 · 68906b1 · 2026-10-10 · 机械整理有独立理由
 
+[该提交代码对照](code-analysis/09-commit-code.md#commit-22).
+
 原题：Clean up dispatch sources and remove redundant host setup。
 
 **实际差异。** 为protocol文档、Router及测试文件补末尾newline；移除WebSocketTestHost在context.run返回后重新makeRpcTestFactory的两行。此时server已构造、业务已结束，重新赋局部factory没有运行用途。
@@ -153,6 +175,8 @@ owner handle→validate/lookup/auth/budget→pending{id,generation,owned request
 **线程与验证面。** 没有新的跨线程操作/所有权变化；应看git show此提交，不能因标题含dispatch就重复算前两提交的实现。沿用RPC网络测试，没有新增用例。同任务笔记: ArenaServer/changes/2026-10-10-msgid-request-dispatch.md (Obsidian)。
 
 ## 23 · 7ff856d · 2026-10-10 · 多层协议预算要相减
+
+[该提交代码对照](code-analysis/09-commit-code.md#commit-23).
 
 原题：Bound routed responses by the gateway packet budget。
 
