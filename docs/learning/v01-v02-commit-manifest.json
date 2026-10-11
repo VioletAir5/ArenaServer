@@ -1,0 +1,531 @@
+{
+  "range": "v0.1..v0.2",
+  "v01": "7fbd9433a019ca130c8c32916cbf82a829104a88",
+  "v02": "b6dd2835a050f3b118e2739ff65f992ed44bca5e",
+  "count": 28,
+  "commits": [
+    {
+      "ordinal": 1,
+      "sha": "698ca5c22272e87bf0eadd7b5f3164afa322206c",
+      "date": "2026-10-05T17:44:50+08:00",
+      "subject": "Fix IConnection abstraction and organize TcpConnection implementation",
+      "changed_files": [
+        "services/gateway/include/net/IConnection.h",
+        "services/gateway/include/net/TcpConnection.h",
+        "services/gateway/src/net/TcpConnection.cpp",
+        "tests/gateway/net/IConnectionTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 2,
+      "sha": "babcc33813baeaf3a2135bbac6c53c723b12ccad",
+      "date": "2026-10-05T17:56:45+08:00",
+      "subject": "Extract ITcpServer lifecycle interface",
+      "changed_files": [
+        "services/gateway/app/main.cpp",
+        "services/gateway/include/net/ITcpServer.h",
+        "services/gateway/include/net/TcpServer.h",
+        "tests/gateway/net/ConnectionOwnershipTest.cpp",
+        "tests/gateway/net/TcpServerTestHost.cpp",
+        "tests/gateway/net/TcpServerWorkerTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 3,
+      "sha": "f6749f37ee2b685bee6358e4b356a40fde88dbb2",
+      "date": "2026-10-05T19:01:55+08:00",
+      "subject": "Implement Boost.Asio connection and TCP server backend",
+      "changed_files": [
+        "services/gateway/CMakeLists.txt",
+        "services/gateway/app/main.cpp",
+        "services/gateway/include/net/AsioConnect.h",
+        "services/gateway/include/net/AsioTcpServer.h",
+        "services/gateway/include/net/IConnection.h",
+        "services/gateway/include/net/TcpConnection.h",
+        "services/gateway/src/net/AsioConnect.cpp",
+        "services/gateway/src/net/AsioTcpServer.cpp",
+        "services/gateway/src/net/ConnectionId.cpp",
+        "services/gateway/src/net/ConnectionId.h",
+        "services/gateway/src/net/TcpConnection.cpp",
+        "tests/gateway/net/AsioConnectTest.cpp",
+        "tests/gateway/net/AsioTcpServerTest.cpp",
+        "tests/gateway/net/AsioTcpServerTestHost.cpp",
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/TcpServerIntegrationTest.py"
+      ]
+    },
+    {
+      "ordinal": 4,
+      "sha": "146518c4e70f5788472e67d7f3020b07487b4222",
+      "date": "2026-10-06T17:13:31+08:00",
+      "subject": "Add packet codec and gateway echo integration",
+      "changed_files": [
+        "services/gateway/app/main.cpp",
+        "services/gateway/include/net/AsioTcpServer.h",
+        "services/gateway/include/net/ConnectionHandler.h",
+        "services/gateway/include/net/PacketEcho.h",
+        "services/gateway/include/net/TcpServer.h",
+        "services/gateway/src/net/AsioTcpServer.cpp",
+        "services/gateway/src/net/PacketEcho.cpp",
+        "services/gateway/src/net/TcpServer.cpp",
+        "shared/include/protocol/PacketCodec.hpp",
+        "shared/src/protocol/PacketCodec.cpp",
+        "tests/gateway/net/AsioTcpServerTestHost.cpp",
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/PacketCodecIntegrationTest.py",
+        "tests/gateway/net/TcpServerTestHost.cpp",
+        "tests/shared/protocol/PacketCodecTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 5,
+      "sha": "a9eb1da2bfab08e5219016e71cd8ea14dbea87a3",
+      "date": "2026-10-07T02:02:01+08:00",
+      "subject": "Clarify AsioConnect lifecycle and read phases",
+      "changed_files": [
+        "services/gateway/include/net/AsioConnect.h",
+        "services/gateway/src/net/AsioConnect.cpp",
+        "tests/gateway/net/AsioConnectTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 6,
+      "sha": "c01f0aa3abe2ac290e4c0ce554979b1d10d784e5",
+      "date": "2026-10-07T02:23:09+08:00",
+      "subject": "Serialize concurrent AsioConnect sends and cancellation",
+      "changed_files": [
+        "services/gateway/include/net/AsioConnect.h",
+        "services/gateway/include/net/IConnection.h",
+        "services/gateway/src/net/AsioConnect.cpp",
+        "tests/gateway/net/AsioConnectTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 7,
+      "sha": "c91409a8ca2088d0fcd04c62d5977562fbd19303",
+      "date": "2026-10-07T20:01:49+08:00",
+      "subject": "Support concurrent TcpConnection sends with bounded queue",
+      "changed_files": [
+        "services/gateway/include/net/IConnection.h",
+        "services/gateway/include/net/TcpConnection.h",
+        "services/gateway/src/net/TcpConnection.cpp",
+        "tests/gateway/net/ConnectionLifecycleTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 8,
+      "sha": "84e2ef8d0e153c8574a2885b24b61c0be9ec0323",
+      "date": "2026-10-07T23:52:17+08:00",
+      "subject": "Add versioned Envelope protobuf schema and bounded codec",
+      "changed_files": [
+        "shared/CMakeLists.txt",
+        "shared/include/protocol/EnvelopeCodec.hpp",
+        "shared/proto/envelope.proto",
+        "shared/src/protocol/EnvelopeCodec.cpp",
+        "tests/shared/protocol/CMakeLists.txt",
+        "tests/shared/protocol/EnvelopeCodecTest.cpp",
+        "tests/shared/protocol/compat/legacy_envelope.proto"
+      ]
+    },
+    {
+      "ordinal": 9,
+      "sha": "fd13a53d36be044bc0bb1556afbcfcf2638c9ef9",
+      "date": "2026-10-08T00:02:44+08:00",
+      "subject": "Add packet header magic and update framing",
+      "changed_files": [
+        "shared/include/protocol/PacketHeader.hpp",
+        "shared/include/protocol/PacketHeaderCodec.hpp",
+        "shared/src/protocol/PacketCodec.cpp",
+        "shared/src/protocol/PacketHeaderCodec.cpp",
+        "tests/gateway/net/PacketCodecIntegrationTest.py",
+        "tests/shared/protocol/PacketCodecTest.cpp",
+        "tests/shared/protocol/PacketHeaderCodecTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 10,
+      "sha": "992a42bb1881400f22de8b0c64fc4cfbb515a654",
+      "date": "2026-10-08T00:28:17+08:00",
+      "subject": "Add complete-packet processing pipeline",
+      "changed_files": [
+        "services/gateway/include/net/PacketPipeline.h",
+        "services/gateway/src/net/PacketEcho.cpp",
+        "services/gateway/src/net/PacketPipeline.cpp",
+        "tests/gateway/net/PacketPipelineTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 11,
+      "sha": "39421226657bb0dd4607b094c1ffca186beb55df",
+      "date": "2026-10-08T20:16:54+08:00",
+      "subject": "Add Beast WebSocket transport and pre-login handshake",
+      "changed_files": [
+        "services/gateway/README.md",
+        "services/gateway/app/main.cpp",
+        "services/gateway/include/net/PreLoginHandshake.h",
+        "services/gateway/include/net/WebSocketServer.h",
+        "services/gateway/src/net/PreLoginHandshake.cpp",
+        "services/gateway/src/net/WebSocketServer.cpp",
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/WebSocketIntegrationTest.py",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 12,
+      "sha": "fc55741776984cf4eb0eafc00d461430e16d1375",
+      "date": "2026-10-09T23:11:40+08:00",
+      "subject": "Refactor packet pipeline into handler chain",
+      "changed_files": [
+        "services/gateway/README.md",
+        "services/gateway/include/net/PacketEcho.h",
+        "services/gateway/include/net/PacketPipeline.h",
+        "services/gateway/include/net/PreLoginHandshake.h",
+        "services/gateway/src/net/PacketEcho.cpp",
+        "services/gateway/src/net/PacketPipeline.cpp",
+        "services/gateway/src/net/PreLoginHandshake.cpp",
+        "tests/gateway/net/PacketPipelineTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 13,
+      "sha": "b40ed339ee9711c970026aebb3d36a500c3c48e3",
+      "date": "2026-10-09T23:47:30+08:00",
+      "subject": "Unify WebSocket connection lifecycle state",
+      "changed_files": [
+        "services/gateway/src/net/WebSocketServer.cpp"
+      ]
+    },
+    {
+      "ordinal": 14,
+      "sha": "9fa7fdaed716b9dfa72895f1b60b020f6dce123f",
+      "date": "2026-10-10T00:30:17+08:00",
+      "subject": "Add connection context to transport handler factories",
+      "changed_files": [
+        "services/gateway/README.md",
+        "services/gateway/app/main.cpp",
+        "services/gateway/include/net/ConnectionContext.h",
+        "services/gateway/include/net/ConnectionHandler.h",
+        "services/gateway/src/net/AsioTcpServer.cpp",
+        "services/gateway/src/net/ConnectionContext.cpp",
+        "services/gateway/src/net/ConnectionHandler.cpp",
+        "services/gateway/src/net/TcpServer.cpp",
+        "services/gateway/src/net/WebSocketServer.cpp",
+        "tests/gateway/net/AsioTcpServerTestHost.cpp",
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/ConnectionContextIntegrationTest.py",
+        "tests/gateway/net/ConnectionContextTest.cpp",
+        "tests/gateway/net/ConnectionContextTestHandler.h",
+        "tests/gateway/net/TcpServerTestHost.cpp",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 15,
+      "sha": "3022736c57ee75bd0d02c3103194f868d888578d",
+      "date": "2026-10-10T01:03:34+08:00",
+      "subject": "Add connection runtime and owner-confined feature pipeline",
+      "changed_files": [
+        "services/gateway/include/net/ConnectionFeature.h",
+        "services/gateway/include/net/ConnectionRuntime.h",
+        "services/gateway/include/net/ConnectionSchedulers.h",
+        "services/gateway/src/net/ConnectionRuntime.cpp",
+        "services/gateway/src/net/ConnectionSchedulers.cpp",
+        "tests/gateway/net/ConnectionRuntimeTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 16,
+      "sha": "8bf665ce712576dc3185d4c0b191808088153f82",
+      "date": "2026-10-10T01:19:25+08:00",
+      "subject": "Share runtime backpressure across epoll Asio and WebSocket transports",
+      "changed_files": [
+        "services/gateway/include/net/AsioConnect.h",
+        "services/gateway/include/net/AsioTcpServer.h",
+        "services/gateway/include/net/BackpressureFeature.h",
+        "services/gateway/include/net/ConnectionFeature.h",
+        "services/gateway/include/net/ConnectionRuntime.h",
+        "services/gateway/include/net/ConnectionSchedulers.h",
+        "services/gateway/include/net/TcpConnection.h",
+        "services/gateway/include/net/TcpServer.h",
+        "services/gateway/include/net/WebSocketServer.h",
+        "services/gateway/src/net/AsioConnect.cpp",
+        "services/gateway/src/net/AsioTcpServer.cpp",
+        "services/gateway/src/net/BackpressureFeature.cpp",
+        "services/gateway/src/net/ConnectionRuntime.cpp",
+        "services/gateway/src/net/ConnectionSchedulers.cpp",
+        "services/gateway/src/net/TcpConnection.cpp",
+        "services/gateway/src/net/TcpServer.cpp",
+        "services/gateway/src/net/WebSocketServer.cpp",
+        "tests/gateway/net/AsioConnectTest.cpp",
+        "tests/gateway/net/ConnectionLifecycleTest.cpp",
+        "tests/gateway/net/ConnectionRuntimeTest.cpp",
+        "tests/gateway/net/ConnectionRuntimeTestSupport.h"
+      ]
+    },
+    {
+      "ordinal": 17,
+      "sha": "841acb0fb18f40409c90970103f7ea25c7b137d8",
+      "date": "2026-10-10T01:37:37+08:00",
+      "subject": "Apply reusable token bucket and whitelist features after packet framing",
+      "changed_files": [
+        "services/gateway/include/net/ConnectionFeature.h",
+        "services/gateway/include/net/PacketWhitelistFeature.h",
+        "services/gateway/include/net/TokenBucketFeature.h",
+        "services/gateway/src/net/ConnectionRuntime.cpp",
+        "services/gateway/src/net/PacketPipeline.cpp",
+        "services/gateway/src/net/PacketWhitelistFeature.cpp",
+        "services/gateway/src/net/TokenBucketFeature.cpp",
+        "tests/gateway/net/AsioTcpServerTestHost.cpp",
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/ConnectionFeatureIntegrationTest.py",
+        "tests/gateway/net/ConnectionFeatureTest.cpp",
+        "tests/gateway/net/ConnectionFeatureTestProfile.h",
+        "tests/gateway/net/TcpServerTestHost.cpp",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 18,
+      "sha": "d1bdc4aa31b08fb1ca580822344d9a5d9b35418a",
+      "date": "2026-10-10T12:17:23+08:00",
+      "subject": "Guard unauthenticated packet routing and count policy rejections",
+      "changed_files": [
+        "services/gateway/app/main.cpp",
+        "services/gateway/include/net/ConnectionContext.h",
+        "services/gateway/include/net/PacketPipeline.h",
+        "services/gateway/include/net/PreLoginHandshake.h",
+        "services/gateway/include/net/RejectionCounters.h",
+        "services/gateway/src/net/AuthenticationGateHandler.cpp",
+        "services/gateway/src/net/BackpressureFeature.cpp",
+        "services/gateway/src/net/ConnectionContext.cpp",
+        "services/gateway/src/net/ConnectionRuntime.cpp",
+        "services/gateway/src/net/PacketPipeline.cpp",
+        "services/gateway/src/net/PacketWhitelistFeature.cpp",
+        "services/gateway/src/net/PreLoginHandshake.cpp",
+        "services/gateway/src/net/RejectionCounters.cpp",
+        "services/gateway/src/net/TokenBucketFeature.cpp",
+        "tests/gateway/net/ConnectionFeatureTest.cpp",
+        "tests/gateway/net/SecurityPolicyTest.cpp",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 19,
+      "sha": "0cfc94cacf82b0bc572dcb15c86786adcc7b36c8",
+      "date": "2026-10-10T12:24:09+08:00",
+      "subject": "Enable handshake admission policies and verify rejection counts across transports",
+      "changed_files": [
+        "services/gateway/app/main.cpp",
+        "tests/gateway/net/AsioTcpServerTestHost.cpp",
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/SecurityPolicyIntegrationTest.py",
+        "tests/gateway/net/SecurityPolicyTestProfile.h",
+        "tests/gateway/net/TcpServerTestHost.cpp",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 20,
+      "sha": "6a1362b9c177c34f0d15446c400acd56f7797572",
+      "date": "2026-10-10T13:16:49+08:00",
+      "subject": "Add typed MsgId dispatch with request correlation and owner deadlines",
+      "changed_files": [
+        "services/gateway/CMakeLists.txt",
+        "services/gateway/include/net/MessageRouter.h",
+        "services/gateway/src/net/MessageRouter.cpp",
+        "shared/proto/envelope.proto",
+        "shared/src/protocol/EnvelopeCodec.cpp",
+        "tests/gateway/net/MessageDispatchTest.cpp",
+        "tests/shared/protocol/EnvelopeCodecTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 21,
+      "sha": "be7d2161f6bde799643cfde846724a95f453e4bd",
+      "date": "2026-10-10T13:27:30+08:00",
+      "subject": "Route default handshake requests and verify typed replies across transports",
+      "changed_files": [
+        "docs/protocol.md",
+        "services/gateway/include/net/PreLoginHandshake.h",
+        "services/gateway/src/net/PreLoginHandshake.cpp",
+        "tests/gateway/net/AsioTcpServerTestHost.cpp",
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/MessageDispatchIntegrationTest.py",
+        "tests/gateway/net/MessageDispatchTestProfile.h",
+        "tests/gateway/net/TcpServerTestHost.cpp",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 22,
+      "sha": "68906b12cef486bf3d46b9eaaf22762dd315b1b3",
+      "date": "2026-10-10T13:28:55+08:00",
+      "subject": "Clean up dispatch sources and remove redundant host setup",
+      "changed_files": [
+        "docs/protocol.md",
+        "services/gateway/include/net/MessageRouter.h",
+        "services/gateway/src/net/MessageRouter.cpp",
+        "tests/gateway/net/MessageDispatchIntegrationTest.py",
+        "tests/gateway/net/MessageDispatchTest.cpp",
+        "tests/gateway/net/MessageDispatchTestProfile.h",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 23,
+      "sha": "7ff856d67cf9ba959d53698de88a32a6f13bc812",
+      "date": "2026-10-10T13:32:42+08:00",
+      "subject": "Bound routed responses by the gateway packet budget",
+      "changed_files": [
+        "services/gateway/src/net/MessageRouter.cpp",
+        "tests/gateway/net/MessageDispatchTest.cpp"
+      ]
+    },
+    {
+      "ordinal": 24,
+      "sha": "d5cf13141d48b2ab1dd9a2373ae0760ab98eaf8c",
+      "date": "2026-10-10T15:11:40+08:00",
+      "subject": "docs: add English source comments",
+      "changed_files": [
+        "CMakeLists.txt",
+        "services/gateway/CMakeLists.txt",
+        "services/gateway/app/CMakeLists.txt",
+        "services/gateway/app/main.cpp",
+        "services/gateway/include/net/Acceptor.h",
+        "services/gateway/include/net/AsioConnect.h",
+        "services/gateway/include/net/AsioTcpServer.h",
+        "services/gateway/include/net/BackpressureFeature.h",
+        "services/gateway/include/net/Channel.h",
+        "services/gateway/include/net/ConnectionContext.h",
+        "services/gateway/include/net/ConnectionFeature.h",
+        "services/gateway/include/net/ConnectionHandler.h",
+        "services/gateway/include/net/ConnectionRuntime.h",
+        "services/gateway/include/net/ConnectionSchedulers.h",
+        "services/gateway/include/net/EpollPoller.h",
+        "services/gateway/include/net/EventLoop.h",
+        "services/gateway/include/net/EventLoopThread.h",
+        "services/gateway/include/net/EventLoopThreadPool.h",
+        "services/gateway/include/net/IConnection.h",
+        "services/gateway/include/net/ITcpServer.h",
+        "services/gateway/include/net/InetAddress.h",
+        "services/gateway/include/net/MessageRouter.h",
+        "services/gateway/include/net/PacketBuffer.h",
+        "services/gateway/include/net/PacketEcho.h",
+        "services/gateway/include/net/PacketPipeline.h",
+        "services/gateway/include/net/PacketWhitelistFeature.h",
+        "services/gateway/include/net/PreLoginHandshake.h",
+        "services/gateway/include/net/RejectionCounters.h",
+        "services/gateway/include/net/Session.h",
+        "services/gateway/include/net/SessionManager.h",
+        "services/gateway/include/net/Socket.h",
+        "services/gateway/include/net/TcpConnection.h",
+        "services/gateway/include/net/TcpServer.h",
+        "services/gateway/include/net/Timer.h",
+        "services/gateway/include/net/TimerQueue.h",
+        "services/gateway/include/net/TokenBucketFeature.h",
+        "services/gateway/include/net/WebSocketServer.h",
+        "services/gateway/src/net/Accptor.cpp",
+        "services/gateway/src/net/AsioConnect.cpp",
+        "services/gateway/src/net/AsioTcpServer.cpp",
+        "services/gateway/src/net/AuthenticationGateHandler.cpp",
+        "services/gateway/src/net/BackpressureFeature.cpp",
+        "services/gateway/src/net/CMakeLists.txt",
+        "services/gateway/src/net/Channel.cpp",
+        "services/gateway/src/net/ConnectionContext.cpp",
+        "services/gateway/src/net/ConnectionHandler.cpp",
+        "services/gateway/src/net/ConnectionId.cpp",
+        "services/gateway/src/net/ConnectionId.h",
+        "services/gateway/src/net/ConnectionRuntime.cpp",
+        "services/gateway/src/net/ConnectionSchedulers.cpp",
+        "services/gateway/src/net/EpollPoller.cpp",
+        "services/gateway/src/net/EventLoop.cpp",
+        "services/gateway/src/net/EventLoopThread.cpp",
+        "services/gateway/src/net/EventLoopThreadPool.cpp",
+        "services/gateway/src/net/InetAddress.cpp",
+        "services/gateway/src/net/MessageRouter.cpp",
+        "services/gateway/src/net/PacketBuffer.cpp",
+        "services/gateway/src/net/PacketEcho.cpp",
+        "services/gateway/src/net/PacketPipeline.cpp",
+        "services/gateway/src/net/PacketWhitelistFeature.cpp",
+        "services/gateway/src/net/PreLoginHandshake.cpp",
+        "services/gateway/src/net/RejectionCounters.cpp",
+        "services/gateway/src/net/Session.cpp",
+        "services/gateway/src/net/SessionManager.cpp",
+        "services/gateway/src/net/Socket.cpp",
+        "services/gateway/src/net/TcpConnection.cpp",
+        "services/gateway/src/net/TcpServer.cpp",
+        "services/gateway/src/net/TimerQueue.cpp",
+        "services/gateway/src/net/TokenBucketFeature.cpp",
+        "services/gateway/src/net/WebSocketServer.cpp",
+        "shared/CMakeLists.txt",
+        "shared/include/concurrent/BlockingQueue.h",
+        "shared/include/concurrent/ThreadPool.h",
+        "shared/include/os/FileDescriptor.h",
+        "shared/include/protocol/Buffer.hpp",
+        "shared/include/protocol/EnvelopeCodec.hpp",
+        "shared/include/protocol/PacketCodec.hpp",
+        "shared/include/protocol/PacketHeader.hpp",
+        "shared/include/protocol/PacketHeaderCodec.hpp",
+        "shared/proto/envelope.proto",
+        "shared/src/concurrent/CMakeLists.txt",
+        "shared/src/concurrent/ThreadPool.cpp",
+        "shared/src/os/CMakeLists.txt",
+        "shared/src/os/FileDescriptor.cpp",
+        "shared/src/protocol/Buffer.cpp",
+        "shared/src/protocol/CMakeLists.txt",
+        "shared/src/protocol/EnvelopeCodec.cpp",
+        "shared/src/protocol/PacketCodec.cpp",
+        "shared/src/protocol/PacketHeaderCodec.cpp",
+        "tools/gateway_inspect/capture.py",
+        "tools/gateway_inspect/capture_gdb.py",
+        "tools/gateway_inspect/dashboard.html"
+      ]
+    },
+    {
+      "ordinal": 25,
+      "sha": "8217f36543cac488c95957e138f0d0ff17e34207",
+      "date": "2026-10-11T16:40:50+08:00",
+      "subject": "Add seeded TCP and WebSocket chaos runner with sanitizer telemetry",
+      "changed_files": [
+        "tests/gateway/net/AsioTcpServerTestHost.cpp",
+        "tests/gateway/net/ChaosRun.py",
+        "tests/gateway/net/ChaosTestProfile.h",
+        "tests/gateway/net/TcpServerTestHost.cpp",
+        "tests/gateway/net/WebSocketTestHost.cpp"
+      ]
+    },
+    {
+      "ordinal": 26,
+      "sha": "51aaeff811f0924192cc44cf88eade0e4b0e6fc4",
+      "date": "2026-10-11T16:44:27+08:00",
+      "subject": "Reassemble WebSocket continuation frames in the chaos client",
+      "changed_files": [
+        "tests/gateway/net/CMakeLists.txt",
+        "tests/gateway/net/ChaosRun.py",
+        "tests/gateway/net/ChaosRunFramingTest.py"
+      ]
+    },
+    {
+      "ordinal": 27,
+      "sha": "5705fcb25d6207a82f7466c82d1547703a263e82",
+      "date": "2026-10-11T16:46:58+08:00",
+      "subject": "Document gateway v0.2 threats and chaos acceptance boundaries",
+      "changed_files": [
+        "docs/security/threats-v0.2.md"
+      ]
+    },
+    {
+      "ordinal": 28,
+      "sha": "b6dd2835a050f3b118e2739ff65f992ed44bca5e",
+      "date": "2026-10-11T17:16:54+08:00",
+      "subject": "Record v0.2 thirty-minute chaos acceptance and raw metrics",
+      "changed_files": [
+        "docs/reports/v0.2-chaos-20261011-manifest.json",
+        "docs/reports/v0.2-chaos-20261011-metrics.csv",
+        "docs/reports/v0.2-chaos-20261011.json",
+        "docs/reports/v0.2-chaos-20261011.md"
+      ]
+    }
+  ]
+}
