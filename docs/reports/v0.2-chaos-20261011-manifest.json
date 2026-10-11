@@ -1,0 +1,16 @@
+{
+  "tested_source_commit": "51aaeff811f0924192cc44cf88eade0e4b0e6fc4",
+  "previous_user_commit": "d5cf131",
+  "kernel": "6.18.40.1-microsoft-standard-WSL2",
+  "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "compiler": "g++-15 (Ubuntu 15.2.0-15ubuntu1~22~ppa2) 15.2.0",
+  "python": "3.10.12",
+  "asan_options": "detect_leaks=1:halt_on_error=1:abort_on_error=1",
+  "ubsan_options": "halt_on_error=1:print_stacktrace=1",
+  "binary_sha256": {
+    "/home/wzt/ArenaServer/build-asan/tests/gateway/net/arena_tcp_server_test_host": "44dd8dd4eabf7a9a7eb2e223504ef164b57b9575f06d59cc36d8423a864c0201",
+    "/home/wzt/ArenaServer/build-asan/tests/gateway/net/arena_asio_tcp_server_test_host": "ef99db2b27dff83d194f25a7621e5259de678ab11f760e68095fe954b48a6040",
+    "/home/wzt/ArenaServer/build-asan/tests/gateway/net/arena_websocket_test_host": "7295a8714299d8885ce38bcf046856a1bf0d20589147876f425c3f3895378de2"
+  },
+  "command": "python3 -B tests/gateway/net/ChaosRun.py --binary-dir build-asan/tests/gateway/net --duration 1800 --peak-connections 64 --seed 20261011 --output build/chaos-20261011-v02-final"
+}
