@@ -1,0 +1,227 @@
+# services/gateway/src/net/Socket.cpp
+
+固定源码：b6dd2835a050f3b118e2739ff65f992ed44bca5e；217行。
+
+[对应分析](../../../../../02-reactor.md)。这是完整原始源码附件，机制解释见对应分析章；不把原文附件当分析本身。
+
+## 完整源码（保留原始内容）
+
+~~~cpp
+/** @file
+ * @brief Owns a TCP socket and its system-call operations.
+ */
+#include "net/Socket.h"
+
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+#include <cerrno>
+#include <optional>
+#include <system_error>
+
+#include "net/InetAddress.h"
+#include "os/FileDescriptor.h"
+namespace service::gateway
+{
+
+Socket::Socket(FileDescriptor fd) noexcept
+    : fd_(std::move(fd))
+{
+}
+
+Socket Socket::createTcp()
+{
+
+    int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+    if (fd < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "socket"
+        );
+    }
+
+    return Socket(FileDescriptor(fd));
+}
+
+Socket Socket::createTcpNonBlocking()
+{
+    int fd = ::socket(
+        AF_INET,
+        SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+        0
+    );
+
+    if (fd < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "socket"
+        );
+    }
+
+    return Socket(FileDescriptor(fd));
+}
+
+int Socket::get() const noexcept
+{
+    return fd_.get();
+}
+
+bool Socket::valid() const noexcept
+{
+    return fd_.valid();
+}
+
+void Socket::bind(const InetAddress& addr)
+{
+    if (::bind(fd_.get(), addr.sockaddrPtr(), addr.length()) < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "bind"
+        );
+    }
+}
+
+void Socket::listen(int backlog)
+{
+    if (::listen(fd_.get(), backlog) < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "listen"
+        );
+    }
+}
+
+std::optional<Socket> Socket::accept(InetAddress* peer)
+{
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+
+    while (true)
+    {
+        int conn = ::accept4(
+            this->get(),
+            reinterpret_cast<sockaddr*>(&addr),
+            &len,
+            SOCK_NONBLOCK | SOCK_CLOEXEC
+        );
+
+        if (conn >= 0)
+        {
+            if (peer)
+            {
+                *peer = InetAddress(addr);
+            }
+            return Socket(FileDescriptor(conn));
+        }
+
+        if (errno == EINTR)
+        {
+            continue;
+        }
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            return std::nullopt;
+        }
+
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "accept4"
+        );
+    }
+}
+
+void Socket::close() noexcept
+{
+    fd_ = FileDescriptor();
+}
+
+void Socket::shutdownWrite()
+{
+    while (::shutdown(fd_.get(), SHUT_WR) < 0)
+    {
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "shutdown SHUT_WR"
+        );
+    }
+}
+
+void Socket::setReuseAddr(bool on)
+{
+    int opt = on ? 1 : 0;
+
+    if (::setsockopt(
+            fd_.get(),
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &opt,
+            sizeof(opt)
+        ) < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "setsockopt SO_REUSEADDR"
+        );
+    }
+}
+
+void Socket::setReusePort(bool on)
+{
+    int opt = on ? 1 : 0;
+
+    if (::setsockopt(
+            fd_.get(),
+            SOL_SOCKET,
+            SO_REUSEPORT,
+            &opt,
+            sizeof(opt)
+        ) < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "setsockopt SO_REUSEPORT"
+        );
+    }
+}
+
+void Socket::setTcpNoDelay(bool on)
+{
+    int opt = on ? 1 : 0;
+
+    if (::setsockopt(
+            fd_.get(),
+            IPPROTO_TCP,
+            TCP_NODELAY,
+            &opt,
+            sizeof(opt)
+        ) < 0)
+    {
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "setsockopt TCP_NODELAY"
+        );
+    }
+}
+
+} // namespace service::gateway
+~~~

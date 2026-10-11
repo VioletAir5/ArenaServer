@@ -1,0 +1,1376 @@
+{
+  "source_commit": "b6dd2835a050f3b118e2739ff65f992ed44bca5e",
+  "selection": "All authored C++/headers/Python/proto/HTML/DSL/CMake and root build/editor settings at v0.2; generated render assets, prose and measured data excluded.",
+  "count": 152,
+  "source_lines": 26296,
+  "files": [
+    {
+      "path": ".gitignore",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/.gitignore.md",
+      "source_lines": 76,
+      "source_sha256": "763e74ab6a415e01f7537cfef920c5b072d107fd4afb0d066d7a670525f5dad7",
+      "git_blob": "1bcde4b5cf369248d325bc4199786d6b1f963ac3"
+    },
+    {
+      "path": ".vscode/c_cpp_properties.json",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/.vscode/c_cpp_properties.json.md",
+      "source_lines": 17,
+      "source_sha256": "6d0742294e95c86dc32e3867c97ec60860ae1e4e35db5801341a575d23788481",
+      "git_blob": "c14a7d5aec58b53e6453ca684958e1ea062973dd"
+    },
+    {
+      "path": "CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/CMakeLists.txt.md",
+      "source_lines": 30,
+      "source_sha256": "56bfc37cfa43e9250cd35381c8eee729302adb214ba093fbc7e4d3afb5c7d04d",
+      "git_blob": "db5dba76d81c62a0643637de8b7da17d8b125430"
+    },
+    {
+      "path": "CMakePresets.json",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/CMakePresets.json.md",
+      "source_lines": 123,
+      "source_sha256": "97f8f62c343c10267fe1af0756e1a8c0ed0793b4f2536ab1b6e4ca60736d2591",
+      "git_blob": "4044fa97bea349c8bb973a3f18cd5dbaa8d976ec"
+    },
+    {
+      "path": "docs/architecture/workspace.dsl",
+      "category": "planned-design",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/docs/architecture/workspace.dsl.md",
+      "source_lines": 255,
+      "source_sha256": "d6e1bc6718ef62644fb082f3adaacd332626954984dddfa8a1e66a6b5b676eb4",
+      "git_blob": "b2637f13537997843d1e8a9b57dc666d3f53c78e"
+    },
+    {
+      "path": "services/gateway/CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/services/gateway/CMakeLists.txt.md",
+      "source_lines": 30,
+      "source_sha256": "7523ae9cf4fc12a75ff3420492e9af79342c639c886ed1a70c9d24d99b22d90d",
+      "git_blob": "3ff1866a951d49fc75aa7aecca689089649ff7b5"
+    },
+    {
+      "path": "services/gateway/app/CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/services/gateway/app/CMakeLists.txt.md",
+      "source_lines": 19,
+      "source_sha256": "a8993ef6f44e198143942dc0a09492f4e6b8434fb1c29f1af8c73d22192feea9",
+      "git_blob": "680d87aa4c756ef3d4f25b164533451d31d1da17"
+    },
+    {
+      "path": "services/gateway/app/main.cpp",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/services/gateway/app/main.cpp.md",
+      "source_lines": 160,
+      "source_sha256": "a944bbaa197f9cbacf122896d752a474786c4f22d1023b157e3c02f44da7fb24",
+      "git_blob": "a36009509363043b007aeca8294386bf5e37a921"
+    },
+    {
+      "path": "services/gateway/include/net/Acceptor.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/Acceptor.h.md",
+      "source_lines": 61,
+      "source_sha256": "76904fd28953e3041d73221a10d4bd537be94a20b67dff16b9938dde0aff049e",
+      "git_blob": "dbdf0f74ea1efde69e2a7b0cd6defafbb3192bc2"
+    },
+    {
+      "path": "services/gateway/include/net/AsioConnect.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/include/net/AsioConnect.h.md",
+      "source_lines": 184,
+      "source_sha256": "507225d1f98bc2ba85845a2d920aed4890a606bacef2876059154d73e205502e",
+      "git_blob": "6aefe3022e0c46ad09f3407a14b19b329a7c1861"
+    },
+    {
+      "path": "services/gateway/include/net/AsioTcpServer.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/include/net/AsioTcpServer.h.md",
+      "source_lines": 57,
+      "source_sha256": "9994dc9b4f261b41816bcd07093e0e1c096e7d5a386fcd053390a3d9419d9e4b",
+      "git_blob": "3ce1afaa7c0e765e142eb0cd0c33998e9a88f539"
+    },
+    {
+      "path": "services/gateway/include/net/BackpressureFeature.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/BackpressureFeature.h.md",
+      "source_lines": 38,
+      "source_sha256": "7163a1ce72e4031063b3754189dcd3dfa3a881458d1fe3ce4193d9ffecef4383",
+      "git_blob": "b3e2710f007ac1378075d40246e7120d42190145"
+    },
+    {
+      "path": "services/gateway/include/net/Channel.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/Channel.h.md",
+      "source_lines": 93,
+      "source_sha256": "977a6036f804e15cddec4240bc6da68eba269e44fa53535660d7b4d2cbf18896",
+      "git_blob": "0562cfe7e73a67665ecf9e5ee3e4b028fe014820"
+    },
+    {
+      "path": "services/gateway/include/net/ConnectionContext.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/ConnectionContext.h.md",
+      "source_lines": 80,
+      "source_sha256": "4ced513ccd8bd224f2b31d1211313f12e4a0ce47e451eb8d5b598aadd66c2c58",
+      "git_blob": "a80e1d80c33c6f4d02d5b89018e2882461819a4a"
+    },
+    {
+      "path": "services/gateway/include/net/ConnectionFeature.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/ConnectionFeature.h.md",
+      "source_lines": 153,
+      "source_sha256": "95f6455a936f43d4b34846ba71d40605acddcfc8378c73be0dc5f29ee8d00d23",
+      "git_blob": "2903cdfd0295a6a027c2635046e38277c2fada67"
+    },
+    {
+      "path": "services/gateway/include/net/ConnectionHandler.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/ConnectionHandler.h.md",
+      "source_lines": 31,
+      "source_sha256": "5bd0325b655123852b0563c937c446d400397c0266305b70a0447c1f00ad6a34",
+      "git_blob": "6fc43b61787d10018d2e7accf83ff5ae9e9ae1f5"
+    },
+    {
+      "path": "services/gateway/include/net/ConnectionRuntime.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/ConnectionRuntime.h.md",
+      "source_lines": 105,
+      "source_sha256": "2fb95718b832be480be2f02e1af064a5a15c8112ff608c1d6087318e93855480",
+      "git_blob": "4a2d4e380d88485c2ddc96e99c1189eda7dbbc83"
+    },
+    {
+      "path": "services/gateway/include/net/ConnectionSchedulers.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/ConnectionSchedulers.h.md",
+      "source_lines": 16,
+      "source_sha256": "8e54dce9f19805d371e6268e0938c6c8aff18c53becef62fcaa1cf11faa5d6fd",
+      "git_blob": "252f02b05f4ca7e145332efd9948bfd91a334d2a"
+    },
+    {
+      "path": "services/gateway/include/net/EpollPoller.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/EpollPoller.h.md",
+      "source_lines": 40,
+      "source_sha256": "0cc5c2c37f87a0d11bd9ac2522e4b503ea1d2043910dac047a387207ca24415a",
+      "git_blob": "cf162412500925f025dbf284e058f57401dfa8fc"
+    },
+    {
+      "path": "services/gateway/include/net/EventLoop.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/EventLoop.h.md",
+      "source_lines": 100,
+      "source_sha256": "06f8084172306ed8d0f57edceee84e0e88456138b4b32bc8cf7277260f98587e",
+      "git_blob": "904958940b72eeafc8c4b1d674f5a4330bbb1c8d"
+    },
+    {
+      "path": "services/gateway/include/net/EventLoopThread.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/EventLoopThread.h.md",
+      "source_lines": 76,
+      "source_sha256": "10f057a2ab28b0165b235ec2c26d536a3ab3cc3ff443041b64ff7dd578d3222c",
+      "git_blob": "c696dae6ceb174536c068dcd4b40d88a092b74fb"
+    },
+    {
+      "path": "services/gateway/include/net/EventLoopThreadPool.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/EventLoopThreadPool.h.md",
+      "source_lines": 70,
+      "source_sha256": "d4bf69aabbb58eeb5a4b9f65c64e624790bb74cf663302e8d08006ea351b332f",
+      "git_blob": "1a2c5479dbe15fed56b176a3e2703a6feeb3c656"
+    },
+    {
+      "path": "services/gateway/include/net/IConnection.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/include/net/IConnection.h.md",
+      "source_lines": 56,
+      "source_sha256": "7e1521fa085175db6191422d3103002d5abee20e721be18e69fe3bdb20a2ae49",
+      "git_blob": "f44076e44ad16f4b1329f0eb09603e30ec0c4e8b"
+    },
+    {
+      "path": "services/gateway/include/net/ITcpServer.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/include/net/ITcpServer.h.md",
+      "source_lines": 44,
+      "source_sha256": "c6597750b67e8668b8cfa319721d713fd0eee5b4382815b8ca951c8f1b5533dd",
+      "git_blob": "69d314f5d34dd4ec9d3f08776d19ebaa2f3c1d61"
+    },
+    {
+      "path": "services/gateway/include/net/InetAddress.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/InetAddress.h.md",
+      "source_lines": 42,
+      "source_sha256": "7da029ba45109ae49c609e7388864577eb0018b2fba07deb591f85666ccc8de3",
+      "git_blob": "3c1a422534ab1a62df8ebb5c4e15eed1c528cfdb"
+    },
+    {
+      "path": "services/gateway/include/net/MessageRouter.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/MessageRouter.h.md",
+      "source_lines": 112,
+      "source_sha256": "0c92e296c8d9799af99e48f831daf9660f4f1b4f2cb957a9805ea99038e5f6d9",
+      "git_blob": "f68e40a3ff03e152a86a82fe3e24db28769ebcaa"
+    },
+    {
+      "path": "services/gateway/include/net/PacketBuffer.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/PacketBuffer.h.md",
+      "source_lines": 38,
+      "source_sha256": "0447a6ede928d937e991371113b64a130ae5f7c2c5f4245aa110080b93ee0c19",
+      "git_blob": "44ab0b1f953fda85b15ce0cdc47189d41d7d5237"
+    },
+    {
+      "path": "services/gateway/include/net/PacketEcho.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/PacketEcho.h.md",
+      "source_lines": 24,
+      "source_sha256": "109b9aa05067341edbef1ba44c90283abae4f80dded28d86594dc8b0135b88f3",
+      "git_blob": "7a1f4e0147c46deb23c9ffadd69573d4fec87ef5"
+    },
+    {
+      "path": "services/gateway/include/net/PacketPipeline.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/PacketPipeline.h.md",
+      "source_lines": 108,
+      "source_sha256": "1bf4129116250ddd0da6ee05e0d33d0257433e15073bd03c666f59399beca8e1",
+      "git_blob": "a6efb12a4f169611e9f9317a0329b62ab81ecf7a"
+    },
+    {
+      "path": "services/gateway/include/net/PacketWhitelistFeature.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/PacketWhitelistFeature.h.md",
+      "source_lines": 23,
+      "source_sha256": "7501898cbdef7cb7529c3eb700716e6e484e24c5c5bbb1b7a8ee3082fe852f21",
+      "git_blob": "1bc3708b7499df7eb05a07998e64d4be3995a9e0"
+    },
+    {
+      "path": "services/gateway/include/net/PreLoginHandshake.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/PreLoginHandshake.h.md",
+      "source_lines": 30,
+      "source_sha256": "f4c25b49e03bc8c3e3b6f5efad156b977a4dc9baf545b938c4534cde6d6102fb",
+      "git_blob": "d349c8722f1b4024bc683c8042e5c13e4b7521a8"
+    },
+    {
+      "path": "services/gateway/include/net/RejectionCounters.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/RejectionCounters.h.md",
+      "source_lines": 57,
+      "source_sha256": "0d902a51389211ce2892ca3da39b9ebb0dd59e9060e6c05e3d9b2b443800b036",
+      "git_blob": "387ee2ecf729bff397f847e1c6991d7558248a03"
+    },
+    {
+      "path": "services/gateway/include/net/Session.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/Session.h.md",
+      "source_lines": 51,
+      "source_sha256": "d36ea44f7edd7fbac420485436cfb3bc1d6aa5045c9fbfae0a2c311ebd69c8ae",
+      "git_blob": "44076d3ff62392586779739e772351efc0113639"
+    },
+    {
+      "path": "services/gateway/include/net/SessionManager.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/SessionManager.h.md",
+      "source_lines": 45,
+      "source_sha256": "b53f4283cd49722553ec5025fa1df970ce970722a513c08f03af8b41b7766c31",
+      "git_blob": "8252e0910626466bf9674f5697a98dc9bf25c155"
+    },
+    {
+      "path": "services/gateway/include/net/Socket.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/Socket.h.md",
+      "source_lines": 49,
+      "source_sha256": "ae0f1750ba4fc01771918ed88662ff881684e08411a521fb5e4f732dcdf7a407",
+      "git_blob": "615d34556c994a81a1cdd02fe9a9b7c22bbec4d9"
+    },
+    {
+      "path": "services/gateway/include/net/TcpConnection.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/include/net/TcpConnection.h.md",
+      "source_lines": 179,
+      "source_sha256": "4158e4238009a1c59c8c88f972eb5e181a2d1d5db2df3b34ca7a6818bdc4310c",
+      "git_blob": "0b96831331e36a594c781e71b22436654e08c981"
+    },
+    {
+      "path": "services/gateway/include/net/TcpServer.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/include/net/TcpServer.h.md",
+      "source_lines": 116,
+      "source_sha256": "e26f57b589f43cb3dfb8d7b528a55d035122b98ac01bc4040071a55a049fd6c9",
+      "git_blob": "72132e0b18f00906727688a101880def8e87f632"
+    },
+    {
+      "path": "services/gateway/include/net/Timer.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/Timer.h.md",
+      "source_lines": 75,
+      "source_sha256": "8658254afc41110b83e7d139dfd967c07d574ad21b86290333ffbea5c26ceeff",
+      "git_blob": "c4bbc89e73bc8f28dd655bf33ece3188d97c4beb"
+    },
+    {
+      "path": "services/gateway/include/net/TimerQueue.h",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/include/net/TimerQueue.h.md",
+      "source_lines": 67,
+      "source_sha256": "08e152a75a3fccce3d2ef406fb0af85ed1342f36d027af82929631fa5bf6923b",
+      "git_blob": "f1453cd0d0e7977bed3ae5052367d66d08e7a33f"
+    },
+    {
+      "path": "services/gateway/include/net/TokenBucketFeature.h",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/include/net/TokenBucketFeature.h.md",
+      "source_lines": 36,
+      "source_sha256": "c6f6b899de4dd66cffcd5a489d1145011623de1996e4a25c2a67d51ab46391cd",
+      "git_blob": "0c7bb44edf238d69c05317d7a6b67f6b3059a0a6"
+    },
+    {
+      "path": "services/gateway/include/net/WebSocketServer.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/include/net/WebSocketServer.h.md",
+      "source_lines": 50,
+      "source_sha256": "8a6a85bb30895d9a8495cfd7407a822ff94070ad2bd041f9c2edf557e77d8a72",
+      "git_blob": "bc28a0e81c937b3374b1a80b6d9e005109b4a250"
+    },
+    {
+      "path": "services/gateway/src/net/Accptor.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/Accptor.cpp.md",
+      "source_lines": 190,
+      "source_sha256": "60dd8fe88da63897d0dc1d1518b377dc9c02df3b7003a55674169ecfd9fc80cc",
+      "git_blob": "6413c044b87399a283296c63ec42eb156b9ed252"
+    },
+    {
+      "path": "services/gateway/src/net/AsioConnect.cpp",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/src/net/AsioConnect.cpp.md",
+      "source_lines": 618,
+      "source_sha256": "8a57dfa8ad5f0d61a00a297ac4e358bec818875df4196ceaf9e627154a55af94",
+      "git_blob": "230acdf7f1c8235f28f0a6daa58df1a31edac7a6"
+    },
+    {
+      "path": "services/gateway/src/net/AsioTcpServer.cpp",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/src/net/AsioTcpServer.cpp.md",
+      "source_lines": 818,
+      "source_sha256": "df4cd62a99b3b38200bea1cda9a59b59a4e83bb716d10abaded159a2d7052233",
+      "git_blob": "c8487bea22d676f0ac65a61c72cde608f8f6b787"
+    },
+    {
+      "path": "services/gateway/src/net/AuthenticationGateHandler.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/AuthenticationGateHandler.cpp.md",
+      "source_lines": 49,
+      "source_sha256": "267657ee2f7b212c93f9e441838cca2ca0bff47be6529f6593220aacccbff657",
+      "git_blob": "3684d1b625bdbf392708077351620b56e59a38d0"
+    },
+    {
+      "path": "services/gateway/src/net/BackpressureFeature.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/BackpressureFeature.cpp.md",
+      "source_lines": 55,
+      "source_sha256": "d6efa7365f52c102f8248fc782c80735a381e38a12e7a286ae7e1c779c703d2a",
+      "git_blob": "490ca8ee05aeed5d548292ba450d6b49a6a196c3"
+    },
+    {
+      "path": "services/gateway/src/net/CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/services/gateway/src/net/CMakeLists.txt.md",
+      "source_lines": 3,
+      "source_sha256": "5c31360686045fedfbd1884b88e74ffab07237ca0a4684b45812248e6e4c8ab1",
+      "git_blob": "260e0b0454673fdc8679d266c7bc365f5abf0df7"
+    },
+    {
+      "path": "services/gateway/src/net/Channel.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/Channel.cpp.md",
+      "source_lines": 161,
+      "source_sha256": "af6fc83b0f1407de4fc54c46e94cae3323f06c56de90dd89eda8171e3edbebed",
+      "git_blob": "4644d7dd3575b81daae3bbde6a19035c5a9eae73"
+    },
+    {
+      "path": "services/gateway/src/net/ConnectionContext.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/ConnectionContext.cpp.md",
+      "source_lines": 73,
+      "source_sha256": "939359eed82b1cf15ec9f4679e6ac44121367623d57ba8bac043597a08f7a12e",
+      "git_blob": "5c55f7f0fa16347d9b252b539581be95111d2243"
+    },
+    {
+      "path": "services/gateway/src/net/ConnectionHandler.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/ConnectionHandler.cpp.md",
+      "source_lines": 36,
+      "source_sha256": "d04f1c4633d0f5dc78674e25dbd0983a2f76d65ef46401e60ff59c267f913b60",
+      "git_blob": "041a257ed22ad76833c34524c58a03c256a27933"
+    },
+    {
+      "path": "services/gateway/src/net/ConnectionId.cpp",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/src/net/ConnectionId.cpp.md",
+      "source_lines": 37,
+      "source_sha256": "10ec79ac3baf874e03684a1d45161cc0dd4d93d62eb2a9b0c7a0e47adb9fc016",
+      "git_blob": "65f21053dfdd5602c6295fb372ed26a5e1eb019d"
+    },
+    {
+      "path": "services/gateway/src/net/ConnectionId.h",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/src/net/ConnectionId.h.md",
+      "source_lines": 11,
+      "source_sha256": "13c5b33bae02749aaf914641e1526473c454d75babe481b6964e9b43f26547b9",
+      "git_blob": "082cf62cbd095dee5ef719d649ec9b510b4a6ffc"
+    },
+    {
+      "path": "services/gateway/src/net/ConnectionRuntime.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/ConnectionRuntime.cpp.md",
+      "source_lines": 346,
+      "source_sha256": "bfb02b6aca05139f64835c3d2416bfc34c75200b76bf7ea23f8460127abc1b56",
+      "git_blob": "89c7a7df3a62c73b48165224ca1ce00749cea114"
+    },
+    {
+      "path": "services/gateway/src/net/ConnectionSchedulers.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/ConnectionSchedulers.cpp.md",
+      "source_lines": 72,
+      "source_sha256": "eb7335e5db7f2384989e6ef48b00d9f7f0edaf434948bac8d21a50b402f516c8",
+      "git_blob": "716de6e4a4537ec8617b34018409672e6a5e6704"
+    },
+    {
+      "path": "services/gateway/src/net/EpollPoller.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/EpollPoller.cpp.md",
+      "source_lines": 132,
+      "source_sha256": "cd550e307f397362c21299e5cd4666cd769158e37866342a3869ce8cec3a1335",
+      "git_blob": "ef1418ce9e56e4b62ae3f08ac65d79c42aae7589"
+    },
+    {
+      "path": "services/gateway/src/net/EventLoop.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/EventLoop.cpp.md",
+      "source_lines": 279,
+      "source_sha256": "93811d788186ec89733c3cae7bfb7a232f0072354b022385e1f5439790c92c0c",
+      "git_blob": "7bf70cf5c3113321b3b17d55f88744945538c468"
+    },
+    {
+      "path": "services/gateway/src/net/EventLoopThread.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/EventLoopThread.cpp.md",
+      "source_lines": 163,
+      "source_sha256": "b776a26484ac7191f31785659750c0d223bb123c82a995e59046ba53de8d4a93",
+      "git_blob": "073d66390fd0be27a134f5b2927cb46d6b5766a4"
+    },
+    {
+      "path": "services/gateway/src/net/EventLoopThreadPool.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/EventLoopThreadPool.cpp.md",
+      "source_lines": 182,
+      "source_sha256": "28058863220078d7382c49b33c8c36c6d884cc34173e9089f43150a8418c95ef",
+      "git_blob": "43b4e2eb35345d05e21e7ab6c3de02a6dd2c3f9b"
+    },
+    {
+      "path": "services/gateway/src/net/InetAddress.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/InetAddress.cpp.md",
+      "source_lines": 78,
+      "source_sha256": "571e1a01a055d34244e10510b21a310515d3b0b956cc2e3f8caa12b7a30167fb",
+      "git_blob": "c9d042e0cb2e7dd9c31695d58c09060e391594e1"
+    },
+    {
+      "path": "services/gateway/src/net/MessageRouter.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/MessageRouter.cpp.md",
+      "source_lines": 407,
+      "source_sha256": "6e562af9d12e43990ceabff1a6219090a42c7b2a1c1d965562e43884780d9333",
+      "git_blob": "e0b774fc7dc59516813712e87ae80f72cc1726f9"
+    },
+    {
+      "path": "services/gateway/src/net/PacketBuffer.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/PacketBuffer.cpp.md",
+      "source_lines": 29,
+      "source_sha256": "dc8f6111e8e81a4a25d021a7484b79de20c8c1577ca8743825f9dbf780b840ac",
+      "git_blob": "8f0eaf8feb058255314dedcb942bc243255ca358"
+    },
+    {
+      "path": "services/gateway/src/net/PacketEcho.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/PacketEcho.cpp.md",
+      "source_lines": 45,
+      "source_sha256": "a2552e12b4882e42c44a6817f678407406007ae641576a430180413c5f30a52e",
+      "git_blob": "c9d7a8d50f41aa2ea6df4099c0ed1d1554ceb933"
+    },
+    {
+      "path": "services/gateway/src/net/PacketPipeline.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/PacketPipeline.cpp.md",
+      "source_lines": 145,
+      "source_sha256": "e94ffcc4f908b55a969e0cef5efa5af4d886f2de8793cce8c0106e0d92103900",
+      "git_blob": "8123f6000d46243e604a8264cb752d7557cde54e"
+    },
+    {
+      "path": "services/gateway/src/net/PacketWhitelistFeature.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/PacketWhitelistFeature.cpp.md",
+      "source_lines": 37,
+      "source_sha256": "4613ec6dd7600723495355fcc61cb837d1ab5e23f38544eab3f77b69c8f17dbc",
+      "git_blob": "217f6c199b4c6ec19ecccbb19fa9a913193fb120"
+    },
+    {
+      "path": "services/gateway/src/net/PreLoginHandshake.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/PreLoginHandshake.cpp.md",
+      "source_lines": 104,
+      "source_sha256": "8b5bef17e1309d7d461f98513b6374cb0225867fbe4acd9952d955329f69534c",
+      "git_blob": "25bfc0795e7a1c1ceef5c25f4a8fa253bc5a3569"
+    },
+    {
+      "path": "services/gateway/src/net/RejectionCounters.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/RejectionCounters.cpp.md",
+      "source_lines": 50,
+      "source_sha256": "654883de18462a97a4a598538dcf99dc92a7ed0ef2a2341282496736977200c0",
+      "git_blob": "c532ce7af36ad79f3c4c3b5708b58fb18c4606bd"
+    },
+    {
+      "path": "services/gateway/src/net/Session.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/Session.cpp.md",
+      "source_lines": 15,
+      "source_sha256": "cdf73eea542fd526c0a6de2eaf9663143bd179af72170f72d4de97a4dc1d911d",
+      "git_blob": "ce43466fb4ccc026e8d7a82fa9f15813a5262141"
+    },
+    {
+      "path": "services/gateway/src/net/SessionManager.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/SessionManager.cpp.md",
+      "source_lines": 40,
+      "source_sha256": "1528573a403b249167d3f445776996525336693a541498876cebcba81f0e2720",
+      "git_blob": "388eba1359bcaf9b8b8c739c9d0527e7f11d5c9e"
+    },
+    {
+      "path": "services/gateway/src/net/Socket.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/Socket.cpp.md",
+      "source_lines": 217,
+      "source_sha256": "11b434e9daaabcbfb41445f746dae63b3bcef1873b2a75113ac6b31e429925bf",
+      "git_blob": "5066c8cbef3e6a6175f147bce5bf144aab1d1ad5"
+    },
+    {
+      "path": "services/gateway/src/net/TcpConnection.cpp",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/src/net/TcpConnection.cpp.md",
+      "source_lines": 732,
+      "source_sha256": "c141967615af8f019ef737817e6a3d7596283b92c1f4c9e9dd2db1c9664b3d2d",
+      "git_blob": "382f61cfc6ca05e09cb03c56f54b9ff5e60f300d"
+    },
+    {
+      "path": "services/gateway/src/net/TcpServer.cpp",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/src/net/TcpServer.cpp.md",
+      "source_lines": 592,
+      "source_sha256": "0931a55485286ff6c637741ff36f5b2931ac63a2e286a5a16e44a0b68dd06a0a",
+      "git_blob": "c3fb716aeaae2a2281446e81627094cfd3e45008"
+    },
+    {
+      "path": "services/gateway/src/net/TimerQueue.cpp",
+      "category": "reactor",
+      "analysis": "02-reactor.md",
+      "source_note": "source/services/gateway/src/net/TimerQueue.cpp.md",
+      "source_lines": 307,
+      "source_sha256": "d41569274480e3ee9bc41be1d50818c343c9fdfa120639c7d740755bd6edd9a3",
+      "git_blob": "6b049bda4204a68b045374dbc247b0bfdf0e19ea"
+    },
+    {
+      "path": "services/gateway/src/net/TokenBucketFeature.cpp",
+      "category": "runtime-routing",
+      "analysis": "05-runtime-routing.md",
+      "source_note": "source/services/gateway/src/net/TokenBucketFeature.cpp.md",
+      "source_lines": 55,
+      "source_sha256": "95f82abe9eaa333a42c29cb163a52f50eb9b9111db6eba0f08ce2c9c2b89cf28",
+      "git_blob": "1571808c1926cf38e7da411124d617d8471e35f3"
+    },
+    {
+      "path": "services/gateway/src/net/WebSocketServer.cpp",
+      "category": "transports",
+      "analysis": "04-transports.md",
+      "source_note": "source/services/gateway/src/net/WebSocketServer.cpp.md",
+      "source_lines": 762,
+      "source_sha256": "73093de6b48f9a66eeb749ede1868bc10638da8343f5a2b02658bc153ccc9ef3",
+      "git_blob": "9788e7fbf4120f962c1efba684d2540209a05458"
+    },
+    {
+      "path": "shared/CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/shared/CMakeLists.txt.md",
+      "source_lines": 44,
+      "source_sha256": "f7b15af9bad675f3d65e847696c9eeab0e1e6974d377afe39eb19352b3903d83",
+      "git_blob": "d1bcf53d416e9e736a06f39d913744fa671342c4"
+    },
+    {
+      "path": "shared/include/concurrent/BlockingQueue.h",
+      "category": "shared",
+      "analysis": "01-shared.md",
+      "source_note": "source/shared/include/concurrent/BlockingQueue.h.md",
+      "source_lines": 147,
+      "source_sha256": "d52bc8fa90c474249f68e13ad46637673bb513ea373e4c1f87519961003f8f1f",
+      "git_blob": "073ae98b624b1418c5060e0beb5f907d6f271bbb"
+    },
+    {
+      "path": "shared/include/concurrent/ThreadPool.h",
+      "category": "shared",
+      "analysis": "01-shared.md",
+      "source_note": "source/shared/include/concurrent/ThreadPool.h.md",
+      "source_lines": 119,
+      "source_sha256": "39fc9db5d6645d10d1ef9fe4255bc4c37633660644f1aa892a38b1ed8d2966c6",
+      "git_blob": "27956e87700809bb9797f2e100a82341f99ca8b7"
+    },
+    {
+      "path": "shared/include/os/FileDescriptor.h",
+      "category": "shared",
+      "analysis": "01-shared.md",
+      "source_note": "source/shared/include/os/FileDescriptor.h.md",
+      "source_lines": 44,
+      "source_sha256": "ed597cbf61f6bd11232d07ebc67d321b40d9032bc1c7eb9c9be6a4d6d5279c03",
+      "git_blob": "82b34f937ab1b3ca4c15935779353f7da7e6fb98"
+    },
+    {
+      "path": "shared/include/protocol/Buffer.hpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/include/protocol/Buffer.hpp.md",
+      "source_lines": 54,
+      "source_sha256": "8411cea9010d30e5ff7e19e6ddfc88453f8a124cb9ff19a0bebb5fc7d6475ae1",
+      "git_blob": "6a28083f61b1a302b7b87ff6d91000a2b95dd14e"
+    },
+    {
+      "path": "shared/include/protocol/EnvelopeCodec.hpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/include/protocol/EnvelopeCodec.hpp.md",
+      "source_lines": 32,
+      "source_sha256": "099205503ab840fee101cc4f9a9cd15d860baa30b6015e022b250b62c3178f35",
+      "git_blob": "ff13071d08f02cd083f971ea6cc5e54a7d6c101a"
+    },
+    {
+      "path": "shared/include/protocol/PacketCodec.hpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/include/protocol/PacketCodec.hpp.md",
+      "source_lines": 63,
+      "source_sha256": "cf09ff479897bce48b5f650aa7c3eb644205a1be84722502b1bcf092ad44c194",
+      "git_blob": "9e81568f8a468a99a8023be0e805567ef5059628"
+    },
+    {
+      "path": "shared/include/protocol/PacketHeader.hpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/include/protocol/PacketHeader.hpp.md",
+      "source_lines": 49,
+      "source_sha256": "bbbd94ed3508838291bcf10794f51574143d014647d87e06d10009f3d519f0ef",
+      "git_blob": "a3c9cb5fd477e526f20887daf3b3b0ec9712d160"
+    },
+    {
+      "path": "shared/include/protocol/PacketHeaderCodec.hpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/include/protocol/PacketHeaderCodec.hpp.md",
+      "source_lines": 55,
+      "source_sha256": "94d3be5e24a2da8acae78f5771ba0bee7043696cc32bf0be5aee430cd4bce2e8",
+      "git_blob": "9d69b6f1cc7fb27dc28898ee2fe472a94feb1b5f"
+    },
+    {
+      "path": "shared/proto/envelope.proto",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/proto/envelope.proto.md",
+      "source_lines": 74,
+      "source_sha256": "56af7ae73fd750f31e73d1d2fcf1ff77739760ddf5e352b78fec18683121ebdf",
+      "git_blob": "9676ba5b2a08365ac026765745c588c730fae099"
+    },
+    {
+      "path": "shared/src/concurrent/CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/shared/src/concurrent/CMakeLists.txt.md",
+      "source_lines": 3,
+      "source_sha256": "dea99e7fc8dfb73a1d62a8998ba6d84537ab07fd1a44c2e260291c5adb53c014",
+      "git_blob": "589cafcc5a43ebfac80448427142576ead36b2d8"
+    },
+    {
+      "path": "shared/src/concurrent/ThreadPool.cpp",
+      "category": "shared",
+      "analysis": "01-shared.md",
+      "source_note": "source/shared/src/concurrent/ThreadPool.cpp.md",
+      "source_lines": 107,
+      "source_sha256": "5b2e8ae6a12aba8f5108ec87c842bdff86ae084295de65976330e93b1e9f978c",
+      "git_blob": "ff1ab7b39f6d72e13d706e513aebec1c8990b6c8"
+    },
+    {
+      "path": "shared/src/os/CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/shared/src/os/CMakeLists.txt.md",
+      "source_lines": 3,
+      "source_sha256": "932b72a8801aba2026071d718af1a034dce8b77f520d0809b89238289b546d7b",
+      "git_blob": "0870914827a381a00db330f4f88252e0570c9463"
+    },
+    {
+      "path": "shared/src/os/FileDescriptor.cpp",
+      "category": "shared",
+      "analysis": "01-shared.md",
+      "source_note": "source/shared/src/os/FileDescriptor.cpp.md",
+      "source_lines": 48,
+      "source_sha256": "29ee8df433aee3bc070f9c1551b4c62001d8a39e6c1092107ab25bf5abc26811",
+      "git_blob": "69feccc2554485b1d0395d63ad4525a38ef904cf"
+    },
+    {
+      "path": "shared/src/protocol/Buffer.cpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/src/protocol/Buffer.cpp.md",
+      "source_lines": 157,
+      "source_sha256": "e8c7d17c5f817d59f078050a8aef12a982aef5978de03fe9571be0454be12f73",
+      "git_blob": "3bb689c74e43d0d80807a813b584425b5f3c2485"
+    },
+    {
+      "path": "shared/src/protocol/CMakeLists.txt",
+      "category": "build",
+      "analysis": "06-build-and-entry.md",
+      "source_note": "source/shared/src/protocol/CMakeLists.txt.md",
+      "source_lines": 3,
+      "source_sha256": "9f69f5879520f1bc72c8ca9ee38019a6505c47296f425f21b3c2a266f0518332",
+      "git_blob": "3b6201acad347c50b3382e97037bd8db45374e74"
+    },
+    {
+      "path": "shared/src/protocol/EnvelopeCodec.cpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/src/protocol/EnvelopeCodec.cpp.md",
+      "source_lines": 93,
+      "source_sha256": "0adbd40ac97042351afcb8e4b17e8cba5179ec8a185500166064703385c90f52",
+      "git_blob": "421d300637c95b585c445c673cc9697f26dbd1bc"
+    },
+    {
+      "path": "shared/src/protocol/PacketCodec.cpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/src/protocol/PacketCodec.cpp.md",
+      "source_lines": 164,
+      "source_sha256": "677ca0256eb5d8abe4cc3a16088850d9cea7e9dd9ac4ccf80fa38b4476c3dda3",
+      "git_blob": "dd2c22061f9e254a22056f4a20baec0898496cf4"
+    },
+    {
+      "path": "shared/src/protocol/PacketHeaderCodec.cpp",
+      "category": "protocol",
+      "analysis": "03-protocol.md",
+      "source_note": "source/shared/src/protocol/PacketHeaderCodec.cpp.md",
+      "source_lines": 180,
+      "source_sha256": "3337b4921a4f593fbfea5e69cd76a48c5d57f84cc6270b77aa41b9e6372deb35",
+      "git_blob": "064aa0fb7eaf91f330714135f5df6e514ad7ac7c"
+    },
+    {
+      "path": "tests/CMakeLists.txt",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/CMakeLists.txt.md",
+      "source_lines": 61,
+      "source_sha256": "8f3ab6765b17a127e669099c8c9167c439fcb61ad029905dccfbe0a61e757a32",
+      "git_blob": "6b899c8572a7ec088ac3e2deee4191a0eb5866c9"
+    },
+    {
+      "path": "tests/gateway/net/AsioConnectTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/AsioConnectTest.cpp.md",
+      "source_lines": 618,
+      "source_sha256": "ca079e970086fff4c1dc71307dae541ef9783dfb1720e7365382d8dee2d60b5a",
+      "git_blob": "dc16d311b5933350e3edc3289bd06cacd76ac41b"
+    },
+    {
+      "path": "tests/gateway/net/AsioTcpServerTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/AsioTcpServerTest.cpp.md",
+      "source_lines": 206,
+      "source_sha256": "eaaac0f800487d7dc52b76dd262c7c06ddcd668bdc0d99230b63960c93f7b79b",
+      "git_blob": "4a4f19af5ee9f3dfcd538cd5a03c84608d8ecb5d"
+    },
+    {
+      "path": "tests/gateway/net/AsioTcpServerTestHost.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/AsioTcpServerTestHost.cpp.md",
+      "source_lines": 134,
+      "source_sha256": "5ee1491d4fbad7995339218a0a2b0018e353242c388bd130a2f122910ade3199",
+      "git_blob": "69239e543e8eca74bce4d1f14d5f52fc76ce5add"
+    },
+    {
+      "path": "tests/gateway/net/CMakeLists.txt",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/CMakeLists.txt.md",
+      "source_lines": 280,
+      "source_sha256": "227ee22c3af302b197a2dc1ad961e1ca38c0b2c9bc89442d587ff4dc4ff71207",
+      "git_blob": "f561f064a398bd0fc3ac24f061776d713e81350e"
+    },
+    {
+      "path": "tests/gateway/net/ChannelTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ChannelTest.cpp.md",
+      "source_lines": 156,
+      "source_sha256": "8bfdc8ad0f1e3a31a6d43085a573b80afc99e77fd140d79154d0bd9008f16316",
+      "git_blob": "328a63df90ce3896d609aa6f1f83516c97968bbf"
+    },
+    {
+      "path": "tests/gateway/net/ChaosRun.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ChaosRun.py.md",
+      "source_lines": 551,
+      "source_sha256": "f85f0d9a53c73c0d1b5987c5a9256c8d7c8eed1f4181efb61869aa24256c48f3",
+      "git_blob": "f39d880127beba7a228765d1750c97a2cbb9bdad"
+    },
+    {
+      "path": "tests/gateway/net/ChaosRunFramingTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ChaosRunFramingTest.py.md",
+      "source_lines": 31,
+      "source_sha256": "1f6e6818962029de9cfc5de578fa8f84314c1c7bf9eb6f958fc9b1876d4da1ac",
+      "git_blob": "5b9588d6ae7607c1732a67c25fe38f831ec47b80"
+    },
+    {
+      "path": "tests/gateway/net/ChaosTestProfile.h",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ChaosTestProfile.h.md",
+      "source_lines": 30,
+      "source_sha256": "f88717e26e01edaeef164921a707fe5cf9ebd2ed0d15971b3557e0ebda840cf7",
+      "git_blob": "bab83b303533708f9088d05b487a2e29f3d1f59f"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionContextIntegrationTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionContextIntegrationTest.py.md",
+      "source_lines": 97,
+      "source_sha256": "87abff7d563188cdf046a93154ba8422db4637b3245b16f31778eb81f921588d",
+      "git_blob": "7e8069460d41a749a1079f0b4ff279723897572c"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionContextTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionContextTest.cpp.md",
+      "source_lines": 178,
+      "source_sha256": "c59d8a4772cf0c17ea0b401ef8ad5dc58e142defa0c6ea7994cc3497b2605f5f",
+      "git_blob": "54bd33bf1c4797aa5a7aa13255222b8424d41bfa"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionContextTestHandler.h",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionContextTestHandler.h.md",
+      "source_lines": 61,
+      "source_sha256": "f029cfbefb6739f6a57e71dddb63745e19e8d6fbd8b77e88f38fbf44f945055b",
+      "git_blob": "0cf988cf04ff339bd84dbde3580882ff6829dae5"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionFeatureIntegrationTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionFeatureIntegrationTest.py.md",
+      "source_lines": 124,
+      "source_sha256": "d2a2a8539c55ab81d3477f782557e6f8a68c7f4886ec6357f30a141192d354a9",
+      "git_blob": "59747e0675889b0295c15f6072f33476d50bbce2"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionFeatureTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionFeatureTest.cpp.md",
+      "source_lines": 310,
+      "source_sha256": "c9031b4a8218cc5b23709be54b7c5b4a08a56cb30321b4382e76908dc4f6bf16",
+      "git_blob": "a69c83b456709ebc70bedd18b18f64cf2c56d254"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionFeatureTestProfile.h",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionFeatureTestProfile.h.md",
+      "source_lines": 20,
+      "source_sha256": "be42efbb9f49b27834d9ed2182b9153f2d954737596b8a4195fe447ce2e04079",
+      "git_blob": "9844fb512a5738fbd22dc49398fc6d006806c45a"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionLifecycleTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionLifecycleTest.cpp.md",
+      "source_lines": 1016,
+      "source_sha256": "d285046dca04762434caf8c3bc3025f2bd0961df61b063d70f0adeeefe69d691",
+      "git_blob": "0d8142ca41c75de3139696a7300c7b78fe7bd9ff"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionOwnershipTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionOwnershipTest.cpp.md",
+      "source_lines": 331,
+      "source_sha256": "f1556b464d6c22fa40eb3c2d7cdc670d7b4e14fd9b8bbb7eb305fdebf9e2e53a",
+      "git_blob": "562e4d45399110926d997ce26947ec2b1609643b"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionRuntimeTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionRuntimeTest.cpp.md",
+      "source_lines": 261,
+      "source_sha256": "6f86a7a611d55dec634437eeca7b05db695eb246c8d34991e5af2c25dafc6357",
+      "git_blob": "1e411dbb90a5c0101f99e1d2b5dada21a017101e"
+    },
+    {
+      "path": "tests/gateway/net/ConnectionRuntimeTestSupport.h",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/ConnectionRuntimeTestSupport.h.md",
+      "source_lines": 63,
+      "source_sha256": "866a340858341d95cb62ba10cdae86ca80c13a4996195ce68fcf0a561fe99199",
+      "git_blob": "94c70e3586f2d490553f50b1aafe57968e1e963c"
+    },
+    {
+      "path": "tests/gateway/net/EpollPollerPerformanceTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/EpollPollerPerformanceTest.cpp.md",
+      "source_lines": 133,
+      "source_sha256": "24ecb3a0b0ee6b30a604c973c619f4948674469e1fbd69207af963ab116383e7",
+      "git_blob": "158cb60549d5e98d9df2632446a897e63e46450e"
+    },
+    {
+      "path": "tests/gateway/net/EpollPollerTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/EpollPollerTest.cpp.md",
+      "source_lines": 233,
+      "source_sha256": "8f4d6ff421940c52c306c58455087b569fddcf9b5d164567db6ff0f759efa5f3",
+      "git_blob": "e2d62f3e959460462ce4d0065398ef1e1940f52a"
+    },
+    {
+      "path": "tests/gateway/net/EventLoopTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/EventLoopTest.cpp.md",
+      "source_lines": 208,
+      "source_sha256": "82accffcfc0e8fd168751306810d65a972510076e8ccb199ca78220a79cbc63b",
+      "git_blob": "3d471ea872541db2b2d9a0318b229c54d27cf5b5"
+    },
+    {
+      "path": "tests/gateway/net/EventLoopThreadPoolTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/EventLoopThreadPoolTest.cpp.md",
+      "source_lines": 483,
+      "source_sha256": "0974e351309ff81a5ee24186b17abcf555f49ba7e646dc9ce8b3b7cb3dc36d9e",
+      "git_blob": "b2797bbd9ef99fde2c0ec3dd1944c372b581c253"
+    },
+    {
+      "path": "tests/gateway/net/EventLoopThreadTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/EventLoopThreadTest.cpp.md",
+      "source_lines": 416,
+      "source_sha256": "4c701e6a2c08e58dd2e677ccaa0133e96fc0dc3568d42b7e4cb4f1f8d92678bb",
+      "git_blob": "486d81624c86490adbb07a02041788bf6d13ff3e"
+    },
+    {
+      "path": "tests/gateway/net/IConnectionTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/IConnectionTest.cpp.md",
+      "source_lines": 217,
+      "source_sha256": "b680e0379047b72c4075227a42b53aee5b55a4e924f2fe450896ce0496023b55",
+      "git_blob": "590a92dc99cfed6a2da3c38eb5df6eed930c16c6"
+    },
+    {
+      "path": "tests/gateway/net/MessageDispatchIntegrationTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/MessageDispatchIntegrationTest.py.md",
+      "source_lines": 180,
+      "source_sha256": "b83c9db198c91b889d0b4643d13ff6450f2c8b9553cc8847ac0ed117f21ad631",
+      "git_blob": "7b35cd77d9fb582f937ec27bab73b93135a8078a"
+    },
+    {
+      "path": "tests/gateway/net/MessageDispatchTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/MessageDispatchTest.cpp.md",
+      "source_lines": 570,
+      "source_sha256": "2b8be50b91107e50654e424bc8c0d2242de1a21f6cc75c295f33fbc5502f6717",
+      "git_blob": "8dd1e93dc0e39869a424f1f7554306973960c1b1"
+    },
+    {
+      "path": "tests/gateway/net/MessageDispatchTestProfile.h",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/MessageDispatchTestProfile.h.md",
+      "source_lines": 77,
+      "source_sha256": "37d70105488bb9ac5b8013d233af437d91ac75a491947d4b95f967934cbd8d1c",
+      "git_blob": "368479129c836e67c2bc46ef51fa8356972f9c63"
+    },
+    {
+      "path": "tests/gateway/net/PacketBufferTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/PacketBufferTest.cpp.md",
+      "source_lines": 275,
+      "source_sha256": "905ee03cd138b3cc5233914813f9ff52646e37bfccdf3635605e274f7dbe8a69",
+      "git_blob": "6142413a192e074b42ae72dd7d5076c2a817b6fa"
+    },
+    {
+      "path": "tests/gateway/net/PacketCodecIntegrationTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/PacketCodecIntegrationTest.py.md",
+      "source_lines": 172,
+      "source_sha256": "4c98dc542000d92d9753c84aa2ea2a6214f7ea79649205ea3bf7ccd3b02e5537",
+      "git_blob": "9548f6ee918cc2d4dad1f63fc611172ab95ff2a7"
+    },
+    {
+      "path": "tests/gateway/net/PacketPipelineTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/PacketPipelineTest.cpp.md",
+      "source_lines": 369,
+      "source_sha256": "d7697d69f19b1d39d29498898c4570bceb1247679cd7d478fa56631edbd3020d",
+      "git_blob": "4625de26f2fdd00b94326acbe799fbd4b6e8c6a3"
+    },
+    {
+      "path": "tests/gateway/net/SecurityPolicyIntegrationTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/SecurityPolicyIntegrationTest.py.md",
+      "source_lines": 153,
+      "source_sha256": "7ba999f00f818a7da01996ec59751ffaa34c13327fef2e4a5eab3af69135379e",
+      "git_blob": "b1cdd0e0d579987532129c5f65c5c9f1bda2dc7b"
+    },
+    {
+      "path": "tests/gateway/net/SecurityPolicyTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/SecurityPolicyTest.cpp.md",
+      "source_lines": 407,
+      "source_sha256": "4488bdd3975554e055642f397bbd446da6c2e3fc9c2c99a0f3e1bac28e8bb0dd",
+      "git_blob": "35f3fa0f7712573de5dfdb985f9ddce8e267cb0e"
+    },
+    {
+      "path": "tests/gateway/net/SecurityPolicyTestProfile.h",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/SecurityPolicyTestProfile.h.md",
+      "source_lines": 131,
+      "source_sha256": "94ae60eac1b704c47e544ebd74389549bb0ec28c61421edf6791ce24e7783dbd",
+      "git_blob": "56f51f410982f5d99945d4ed190c6cc3fd021813"
+    },
+    {
+      "path": "tests/gateway/net/SessionManagerTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/SessionManagerTest.cpp.md",
+      "source_lines": 208,
+      "source_sha256": "5950716cbe65537866cc85b8406c26d55670032a289895be16b9335a133b6d6a",
+      "git_blob": "b2704964dac97f0207cd5206643c3b0bdbe2b2e0"
+    },
+    {
+      "path": "tests/gateway/net/SocketTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/SocketTest.cpp.md",
+      "source_lines": 225,
+      "source_sha256": "86a06e09c585019647c17fa38892465511ea13b97fe9a357b49efd1ae5541359",
+      "git_blob": "3b1e7aa3f79def7a9b30091cffc263cbefe76936"
+    },
+    {
+      "path": "tests/gateway/net/TcpServerChurnDashboard.html",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/TcpServerChurnDashboard.html.md",
+      "source_lines": 117,
+      "source_sha256": "9c08a1dad3649b022cf8cbfe013efa9e5b1308aecf734f2ae3f41429187de974",
+      "git_blob": "c93a5988f14f7dea517c8dada21e7c2b4242fd1f"
+    },
+    {
+      "path": "tests/gateway/net/TcpServerChurnMonitor.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/TcpServerChurnMonitor.py.md",
+      "source_lines": 531,
+      "source_sha256": "7946b10783711d270006868f83048e9d397d971f4b6247b829bcb516377d8854",
+      "git_blob": "4c3a71beec92a64cea44616026b82d8b5862b47b"
+    },
+    {
+      "path": "tests/gateway/net/TcpServerIntegrationTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/TcpServerIntegrationTest.py.md",
+      "source_lines": 427,
+      "source_sha256": "305212fd7906ea4e2fb71f1968dbb12a281f65ec027f4aa0a64b756b16186e96",
+      "git_blob": "a8b59a568a8bafe5d7dd560e4bb91fdeaf3dab99"
+    },
+    {
+      "path": "tests/gateway/net/TcpServerTestHost.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/TcpServerTestHost.cpp.md",
+      "source_lines": 180,
+      "source_sha256": "d4fd25b5e0bd3a026adb578ba12d9b317735dfff936c4219d7dcada2ad41ca4c",
+      "git_blob": "92b68b1f10d5ba89194cbf385f17171d0bb0063f"
+    },
+    {
+      "path": "tests/gateway/net/TcpServerWorkerTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/TcpServerWorkerTest.cpp.md",
+      "source_lines": 318,
+      "source_sha256": "5edea758614d645c849e69b967fad25b1557761a4c4379fa2f3da14aa0abbc72",
+      "git_blob": "8277b2b10617ea6317b87773f4199d10a7ecba7b"
+    },
+    {
+      "path": "tests/gateway/net/TimerQueueTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/TimerQueueTest.cpp.md",
+      "source_lines": 253,
+      "source_sha256": "e9d1873a9a55525c1c546177d9c892977140381f067854a507e3d30f472dab31",
+      "git_blob": "80bc0d8c8e345d1344df1ec69059af86e4001546"
+    },
+    {
+      "path": "tests/gateway/net/WebSocketIntegrationTest.py",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/WebSocketIntegrationTest.py.md",
+      "source_lines": 213,
+      "source_sha256": "8ade4f20681ae64eb9e8b35b9e18b4bcb57c9b2e0bf54ab1e4a4d5f02d57c1b0",
+      "git_blob": "d385c24f686d000d4b2f0e063157ac3273d705e0"
+    },
+    {
+      "path": "tests/gateway/net/WebSocketTestHost.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/gateway/net/WebSocketTestHost.cpp.md",
+      "source_lines": 114,
+      "source_sha256": "7959be34d63349b23c20522d9ad914c8c7d052bffb3b5dfb4762526e96277b40",
+      "git_blob": "28c2184b370b32d75d84a44b09554a79405912f8"
+    },
+    {
+      "path": "tests/shared/concurrent/BlockingQueuePerformanceTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/concurrent/BlockingQueuePerformanceTest.cpp.md",
+      "source_lines": 168,
+      "source_sha256": "27a945b570730b5e3fdef60fc3639ebb6c98d0631806e0f5fd5cb4a14d68766b",
+      "git_blob": "76e2c0e13bfcf040327251e1349266c366d9978a"
+    },
+    {
+      "path": "tests/shared/concurrent/BlockingQueueTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/concurrent/BlockingQueueTest.cpp.md",
+      "source_lines": 493,
+      "source_sha256": "71fb2c75080d7e71b0d317a86b2f5bcdcaa2e92672864fd74f5ce34afcb26924",
+      "git_blob": "a8b7bd9350be605c22d86a7e5a3d2ad0bdf469b6"
+    },
+    {
+      "path": "tests/shared/concurrent/CMakeLists.txt",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/concurrent/CMakeLists.txt.md",
+      "source_lines": 1,
+      "source_sha256": "840032e0d2ac0ba38e2482d38eacdb7312b7100596397712dfdd10ccad724b85",
+      "git_blob": "9080d08d53e5cae3010c5557a373fe2f07445a77"
+    },
+    {
+      "path": "tests/shared/concurrent/ThreadPoolPerformanceTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/concurrent/ThreadPoolPerformanceTest.cpp.md",
+      "source_lines": 469,
+      "source_sha256": "de1a57536d3c59b4ab359dff2f0510d7f54ee0452659e331f39fddd350e66328",
+      "git_blob": "98e16a9226ed617ca1d0e024ad0e12c6283807d6"
+    },
+    {
+      "path": "tests/shared/concurrent/ThreadPoolTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/concurrent/ThreadPoolTest.cpp.md",
+      "source_lines": 700,
+      "source_sha256": "2a9452237fa2649606b61ea1b940be7372043522b589b5b846d88e0ae47a9492",
+      "git_blob": "7d1cc7ab8a21b9de8256fafdcf533ec516bbb63f"
+    },
+    {
+      "path": "tests/shared/os/CMakeLists.txt",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/os/CMakeLists.txt.md",
+      "source_lines": 1,
+      "source_sha256": "840032e0d2ac0ba38e2482d38eacdb7312b7100596397712dfdd10ccad724b85",
+      "git_blob": "9080d08d53e5cae3010c5557a373fe2f07445a77"
+    },
+    {
+      "path": "tests/shared/os/FileDescriptorTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/os/FileDescriptorTest.cpp.md",
+      "source_lines": 179,
+      "source_sha256": "db92b1d04841500169984af9a38731a4284843156f9c801bbd7deb2e0d48bf1b",
+      "git_blob": "688035f23a92e586b4d036f49a0023d70aecc18a"
+    },
+    {
+      "path": "tests/shared/protocol/CMakeLists.txt",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/protocol/CMakeLists.txt.md",
+      "source_lines": 25,
+      "source_sha256": "1b132d4fdaaa7782c5c74ad9c8d270a73cd8be330984766204003b8e5ce43caf",
+      "git_blob": "234b9bd59986aef528a58ea2b95de5e26f8c3294"
+    },
+    {
+      "path": "tests/shared/protocol/EnvelopeCodecTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/protocol/EnvelopeCodecTest.cpp.md",
+      "source_lines": 177,
+      "source_sha256": "28216439f3e643ef2122bb566ff6c8857875f3e0a5c98f2849a1d6174cc872a4",
+      "git_blob": "01901ae1f1894d17bba01a97d8ccf8671e08876f"
+    },
+    {
+      "path": "tests/shared/protocol/PacketCodecTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/protocol/PacketCodecTest.cpp.md",
+      "source_lines": 275,
+      "source_sha256": "bb131ae8eb02789e46b02b258b1aa4e191f273c676499611f7b27925e6c1a6b1",
+      "git_blob": "60b5f7346b8f990fa52941352005ac48c7679411"
+    },
+    {
+      "path": "tests/shared/protocol/PacketHeaderCodecTest.cpp",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/protocol/PacketHeaderCodecTest.cpp.md",
+      "source_lines": 593,
+      "source_sha256": "c418604fb9169a36a91fc673aeefcc687ca3d92d274a4a3513a5c6a347653fa2",
+      "git_blob": "46444be3f3ef3ae226364734c98c6c1405f1c22e"
+    },
+    {
+      "path": "tests/shared/protocol/compat/legacy_envelope.proto",
+      "category": "tests",
+      "analysis": "07-tests.md",
+      "source_note": "source/tests/shared/protocol/compat/legacy_envelope.proto.md",
+      "source_lines": 41,
+      "source_sha256": "6989c703433d62e6329b0a6aff21696875bd5ab26fa8bfa6dbb0bd6eee888e09",
+      "git_blob": "6089cc7e8dc8ef4c4a0d5b40f21ad1fefbc3669a"
+    },
+    {
+      "path": "tools/gateway_inspect/capture.py",
+      "category": "tools",
+      "analysis": "08-observability-tools.md",
+      "source_note": "source/tools/gateway_inspect/capture.py.md",
+      "source_lines": 376,
+      "source_sha256": "57bc7b4e040a7293cbc5420671fe1959d10d3899d93998d7cda93c50dd831faa",
+      "git_blob": "85c59b42ea68726c952a5044021602af4c2850a6"
+    },
+    {
+      "path": "tools/gateway_inspect/capture_gdb.py",
+      "category": "tools",
+      "analysis": "08-observability-tools.md",
+      "source_note": "source/tools/gateway_inspect/capture_gdb.py.md",
+      "source_lines": 239,
+      "source_sha256": "c269de91fd50a7bcd3d7abde8069820bd2dea94763d5406bf1e2685c1f64358b",
+      "git_blob": "b97aaf88479ca9a3d4e9dc47534dcb166043f3b4"
+    },
+    {
+      "path": "tools/gateway_inspect/dashboard.html",
+      "category": "tools",
+      "analysis": "08-observability-tools.md",
+      "source_note": "source/tools/gateway_inspect/dashboard.html.md",
+      "source_lines": 126,
+      "source_sha256": "22e48f6b8f8840bc04b575d9108625eff840bcabdb8ce0146c726f6f22f21448",
+      "git_blob": "0f912f7a566fb1d30b7b29a4c519a3512c906985"
+    }
+  ]
+}
