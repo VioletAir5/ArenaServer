@@ -1,0 +1,2863 @@
+{
+  "source_commit": "b6dd2835a050f3b118e2739ff65f992ed44bca5e",
+  "files": [
+    {
+      "path": "tests/gateway/net/AsioConnectTest.cpp",
+      "entries": [
+        {
+          "name": "AsioConnectTest.CopiesSendInputAndPreservesOrder",
+          "kind": "TEST_F",
+          "line": 94,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(transport.pendingBytes(), first.size() + next.size()); / EXPECT_EQ(receivePeer(), \"original bytes followed by bytes\");"
+        },
+        {
+          "name": "AsioConnectTest.PausedInFlightReadIsDeliveredOnResume",
+          "kind": "TEST_F",
+          "line": 109,
+          "checks_static": 3,
+          "check_example": "EXPECT_TRUE(received.empty()); / EXPECT_EQ(received, \"held bytes\");"
+        },
+        {
+          "name": "AsioConnectTest.QueuedSendAndShutdownBeforeStartDrainAfterStart",
+          "kind": "TEST_F",
+          "line": 133,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ(connection->pendingBytes(), payload.size()); / EXPECT_EQ(receivePeer(), payload);"
+        },
+        {
+          "name": "AsioConnectTest.ShutdownDrainsAndStillReceivesUntilPeerFin",
+          "kind": "TEST_F",
+          "line": 156,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ(receivePeer(), payload); / EXPECT_EQ(error, boost::asio::error::eof);"
+        },
+        {
+          "name": "AsioConnectTest.PartialWritesDrainInOrderBeforeFin",
+          "kind": "TEST_F",
+          "line": 189,
+          "checks_static": 6,
+          "check_example": "ASSERT_EQ( / EXPECT_GT(connection->pendingBytes(), 0);"
+        },
+        {
+          "name": "AsioConnectTest.PeerFinFlushesQueuedEchoBeforeClose",
+          "kind": "TEST_F",
+          "line": 227,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(receivePeer(), \"last message\"); / EXPECT_FALSE(connection->connected());"
+        },
+        {
+          "name": "AsioConnectTest.WatermarksAndHardLimitBoundOutput",
+          "kind": "TEST_F",
+          "line": 239,
+          "checks_static": 6,
+          "check_example": "ASSERT_EQ( / EXPECT_EQ(messages, 0);"
+        },
+        {
+          "name": "AsioConnectTest.OutputCallbackCanCloseAndReleaseOwner",
+          "kind": "TEST_F",
+          "line": 294,
+          "checks_static": 1,
+          "check_example": "EXPECT_TRUE(weak.expired());"
+        },
+        {
+          "name": "AsioConnectTest.ConcurrentSendsKeepOneOrderedWriteStream",
+          "kind": "TEST_F",
+          "line": 314,
+          "checks_static": 10,
+          "check_example": "ASSERT_EQ( / ASSERT_GT(connection->pendingBytes(), 0);"
+        },
+        {
+          "name": "AsioConnectTest.ForeignQueuedSendDrainsBeforeShutdownFin",
+          "kind": "TEST_F",
+          "line": 406,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ(connection->pendingBytes(), payload.size()); / EXPECT_EQ(receivePeer(), payload);"
+        },
+        {
+          "name": "AsioConnectTest.ConcurrentOutputLimitClosesOnce",
+          "kind": "TEST_F",
+          "line": 425,
+          "checks_static": 5,
+          "check_example": "EXPECT_LE( / EXPECT_FALSE(connection->connected());"
+        },
+        {
+          "name": "AsioConnectTest.CloseOnceDiscardsQueuedAndCancelledOperations",
+          "kind": "TEST_F",
+          "line": 469,
+          "checks_static": 8,
+          "check_example": "ASSERT_EQ( / ASSERT_GT(connection->pendingBytes(), 0);"
+        },
+        {
+          "name": "AsioConnectTest.CancelledIoDoesNotRetainConnection",
+          "kind": "TEST_F",
+          "line": 519,
+          "checks_static": 1,
+          "check_example": "EXPECT_TRUE(weak.expired());"
+        },
+        {
+          "name": "AsioConnectTest.MessageCallbackCanCloseAndReleaseExternalOwner",
+          "kind": "TEST_F",
+          "line": 532,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ( / EXPECT_TRUE(weak.expired());"
+        },
+        {
+          "name": "AsioConnectTest.CallbackExceptionClosesOnlyThisConnection",
+          "kind": "TEST_F",
+          "line": 557,
+          "checks_static": 2,
+          "check_example": "EXPECT_NO_THROW(pump()); / EXPECT_FALSE(connection->connected());"
+        },
+        {
+          "name": "AsioConnectTest.ForeignThreadMutationIsRejected",
+          "kind": "TEST_F",
+          "line": 569,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(connection->id(), id); / EXPECT_TRUE(rejected);"
+        },
+        {
+          "name": "AsioConnectTest.IdentityIsUniqueAcrossBackends",
+          "kind": "TEST_F",
+          "line": 592,
+          "checks_static": 3,
+          "check_example": "ASSERT_EQ( / EXPECT_NE(native.id(), connection->id());"
+        },
+        {
+          "name": "AsioConnectTest.SocketIsNonblockingAndCloseOnExec",
+          "kind": "TEST_F",
+          "line": 612,
+          "checks_static": 2,
+          "check_example": "EXPECT_NE(::fcntl(connection->fd(), F_GETFL) & O_NONBLOCK, 0); / EXPECT_NE(::fcntl(connection->fd(), F_GETFD) & FD_CLOEXEC, 0);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/AsioTcpServerTest.cpp",
+      "entries": [
+        {
+          "name": "AsioTcpServerTest.InterfaceStopJoinsWorkersAndPreservesExternalContext",
+          "kind": "TEST",
+          "line": 46,
+          "checks_static": 9,
+          "check_example": "EXPECT_EQ(server->maxConnections(), 8); / EXPECT_EQ(server->workerCount(), workers);"
+        },
+        {
+          "name": "AsioTcpServerTest.VirtualDestructionReclaimsActiveAndQueuedConnections",
+          "kind": "TEST",
+          "line": 82,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(server->connectionCount(), 32); / EXPECT_EQ(fdCount(), baseline);"
+        },
+        {
+          "name": "AsioTcpServerTest.ImmediateStopHandlesRegistrationHandoff",
+          "kind": "TEST",
+          "line": 120,
+          "checks_static": 3,
+          "check_example": "ASSERT_EQ(server.connectionCount(), 1); / EXPECT_TRUE(server.stopped());"
+        },
+        {
+          "name": "AsioTcpServerTest.ForeignManagementThreadIsRejected",
+          "kind": "TEST",
+          "line": 150,
+          "checks_static": 2,
+          "check_example": "EXPECT_TRUE(rejected); / EXPECT_FALSE(server.stopped());"
+        },
+        {
+          "name": "AsioTcpServerTest.InvalidConfigurationAndBindFailureLeaveNoDescriptors",
+          "kind": "TEST",
+          "line": 178,
+          "checks_static": 4,
+          "check_example": "EXPECT_THROW( / EXPECT_THROW("
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/AsioTcpServerTestHost.cpp",
+      "entries": []
+    },
+    {
+      "path": "tests/gateway/net/ChannelTest.cpp",
+      "entries": [
+        {
+          "name": "ChannelTest.StoresDescriptorAndInterestMasks",
+          "kind": "TEST",
+          "line": 12,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(channel.fd(), 42); / EXPECT_EQ("
+        },
+        {
+          "name": "ChannelTest.DispatchesOnlyMatchingCallbacks",
+          "kind": "TEST",
+          "line": 26,
+          "checks_static": 8,
+          "check_example": "EXPECT_EQ(reads, 1); / EXPECT_EQ(writes, 0);"
+        },
+        {
+          "name": "ChannelTest.HupDispatchesErrorCallback",
+          "kind": "TEST",
+          "line": 56,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(errors, 1);"
+        },
+        {
+          "name": "ChannelTest.MissingCallbacksAreSafe",
+          "kind": "TEST",
+          "line": 68,
+          "checks_static": 1,
+          "check_example": "EXPECT_NO_THROW(channel.handleEvent());"
+        },
+        {
+          "name": "ChannelTest.InterestHelpersPreserveMasksAndNotifyOnlyOnChange",
+          "kind": "TEST",
+          "line": 76,
+          "checks_static": 8,
+          "check_example": "EXPECT_EQ(channel.events(), static_cast<uint32_t>(EPOLLIN)); / EXPECT_EQ(updates, 3);"
+        },
+        {
+          "name": "ChannelTest.FailedUpdateRestoresInterestMask",
+          "kind": "TEST",
+          "line": 106,
+          "checks_static": 3,
+          "check_example": "EXPECT_THROW(channel.enableWriting(), std::runtime_error); / EXPECT_EQ(channel.events(), static_cast<uint32_t>(EPOLLIN));"
+        },
+        {
+          "name": "ChannelTest.TiedOwnerSurvivesAllCallbacksInOneEvent",
+          "kind": "TEST",
+          "line": 120,
+          "checks_static": 3,
+          "check_example": "EXPECT_FALSE(weak.expired()); / EXPECT_EQ(reads, 1);"
+        },
+        {
+          "name": "ChannelTest.ExpiredTieSuppressesEventCallbacks",
+          "kind": "TEST",
+          "line": 143,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(callbacks, 0);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ChaosRun.py",
+      "entries": [
+        {
+          "name": "read_ws_message",
+          "kind": "def",
+          "line": 42,
+          "checks_static": 6,
+          "check_example": "assert not (first & 0x70), \"unexpected RSV bits\""
+        },
+        {
+          "name": "timestamp",
+          "kind": "def",
+          "line": 70,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.__init__",
+          "kind": "def",
+          "line": 76,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.logs",
+          "kind": "def",
+          "line": 118,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.health",
+          "kind": "def",
+          "line": 144,
+          "checks_static": 2,
+          "check_example": "assert not self.errors, (self.name, self.errors)"
+        },
+        {
+          "name": "Host.wait_ready",
+          "kind": "def",
+          "line": 149,
+          "checks_static": 1,
+          "check_example": "assert time.monotonic() < limit, (self.name, \"startup timeout\")"
+        },
+        {
+          "name": "Host.count",
+          "kind": "def",
+          "line": 156,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.connect",
+          "kind": "def",
+          "line": 160,
+          "checks_static": 1,
+          "check_example": "assert reply.startswith(b\"HTTP/1.1 101\"), reply"
+        },
+        {
+          "name": "Host.send",
+          "kind": "def",
+          "line": 174,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.receive",
+          "kind": "def",
+          "line": 180,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.expect_closed",
+          "kind": "def",
+          "line": 185,
+          "checks_static": 2,
+          "check_example": "assert code == 1008, (self.name, code)"
+        },
+        {
+          "name": "Host.exchange",
+          "kind": "def",
+          "line": 203,
+          "checks_static": 1,
+          "check_example": "assert self.receive(peer) == expected, (self.name, \"response mismatch\")"
+        },
+        {
+          "name": "Host.job",
+          "kind": "def",
+          "line": 225,
+          "checks_static": 4,
+          "check_example": "assert reply.startswith(b\"HTTP/1.1 403\"), reply"
+        },
+        {
+          "name": "Host.wait_fd",
+          "kind": "def",
+          "line": 310,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.stop",
+          "kind": "def",
+          "line": 320,
+          "checks_static": 8,
+          "check_example": "assert not self.reader.is_alive(), (self.name, \"log not drained\")"
+        },
+        {
+          "name": "Host.summary",
+          "kind": "def",
+          "line": 338,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Host.summary.quantile",
+          "kind": "def",
+          "line": 339,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Run.__init__",
+          "kind": "def",
+          "line": 366,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Run.sample",
+          "kind": "def",
+          "line": 380,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Run.snapshot",
+          "kind": "def",
+          "line": 402,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Run.write_live",
+          "kind": "def",
+          "line": 415,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Run.telemetry",
+          "kind": "def",
+          "line": 420,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Run.surge",
+          "kind": "def",
+          "line": 429,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Run.execute",
+          "kind": "def",
+          "line": 446,
+          "checks_static": 3,
+          "check_example": "assert self.workload_seconds >= self.args.duration"
+        },
+        {
+          "name": "main",
+          "kind": "def",
+          "line": 537,
+          "checks_static": 2,
+          "check_example": "assert args.duration >= 10"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ChaosRunFramingTest.py",
+      "entries": [
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 8,
+          "checks_static": 2,
+          "check_example": "assert reply.startswith(b\"HTTP/1.1 101\")"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ConnectionContextIntegrationTest.py",
+      "entries": [
+        {
+          "name": "parse",
+          "kind": "def",
+          "line": 15,
+          "checks_static": 4,
+          "check_example": "assert len(fields) == 6, fields"
+        },
+        {
+          "name": "command",
+          "kind": "def",
+          "line": 25,
+          "checks_static": 2,
+          "check_example": "assert opcode == 2"
+        },
+        {
+          "name": "check",
+          "kind": "def",
+          "line": 40,
+          "checks_static": 8,
+          "check_example": "assert state == 0"
+        },
+        {
+          "name": "check.connect",
+          "kind": "def",
+          "line": 41,
+          "checks_static": 1,
+          "check_example": "assert response.startswith(b\"HTTP/1.1 101\")"
+        },
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 61,
+          "checks_static": 1,
+          "check_example": "assert process.poll() is None and time.monotonic() < deadline, output"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ConnectionContextTest.cpp",
+      "entries": [
+        {
+          "name": "ConnectionContextTest.PreservesAdmissionMetadataAndIsolatesSessions",
+          "kind": "TEST",
+          "line": 13,
+          "checks_static": 8,
+          "check_example": "EXPECT_EQ(first->connectionId, 42u); / EXPECT_EQ(first->peer.ip(), \"127.0.0.2\");"
+        },
+        {
+          "name": "ConnectionContextTest.LoginTransitionsAreTerminalAndMutuallyExclusive",
+          "kind": "TEST",
+          "line": 50,
+          "checks_static": 9,
+          "check_example": "EXPECT_EQ( / EXPECT_TRUE(authenticated.markAuthenticated());"
+        },
+        {
+          "name": "ConnectionContextTest.SessionAccessRequiresItsOwner",
+          "kind": "TEST",
+          "line": 77,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(rejected, 3); / EXPECT_EQ("
+        },
+        {
+          "name": "ConnectionContextTest.CallbackCopiesRetainIgnoredContextUntilFinalRelease",
+          "kind": "TEST",
+          "line": 118,
+          "checks_static": 6,
+          "check_example": "EXPECT_EQ(std::this_thread::get_id(), owner); / EXPECT_EQ(info.get(), context.get());"
+        },
+        {
+          "name": "ConnectionContextTest.RejectsMissingContextAndInvalidFactoryResult",
+          "kind": "TEST",
+          "line": 150,
+          "checks_static": 4,
+          "check_example": "EXPECT_THROW( / EXPECT_THROW("
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ConnectionFeatureIntegrationTest.py",
+      "entries": [
+        {
+          "name": "check",
+          "kind": "def",
+          "line": 17,
+          "checks_static": 5,
+          "check_example": "assert response.startswith(b\"HTTP/1.1 101\")"
+        },
+        {
+          "name": "check.connect",
+          "kind": "def",
+          "line": 18,
+          "checks_static": 1,
+          "check_example": "assert response.startswith(b\"HTTP/1.1 101\")"
+        },
+        {
+          "name": "check.send",
+          "kind": "def",
+          "line": 27,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "check.echo",
+          "kind": "def",
+          "line": 33,
+          "checks_static": 2,
+          "check_example": "assert read_frame(peer) == (2, packet(payload, 2))"
+        },
+        {
+          "name": "check.closed",
+          "kind": "def",
+          "line": 39,
+          "checks_static": 2,
+          "check_example": "assert close_code(peer) == 1008"
+        },
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 77,
+          "checks_static": 3,
+          "check_example": "assert \"packet rate exceeded\" in output and \"packet type rejected\" in output, output"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ConnectionFeatureTest.cpp",
+      "entries": [
+        {
+          "name": "ConnectionFeatureTest.BucketBurstRefillCapacityAndDrop",
+          "kind": "TEST_F",
+          "line": 87,
+          "checks_static": 10,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ("
+        },
+        {
+          "name": "ConnectionFeatureTest.BucketsArePerConnectionAndCloseOnExhaustion",
+          "kind": "TEST_F",
+          "line": 127,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ(first->inspectPacket({1, {}}), FeatureResult::Continue); / EXPECT_EQ(first->inspectPacket({1, {}}), FeatureResult::Close);"
+        },
+        {
+          "name": "ConnectionFeatureTest.WhitelistRejectsDisallowedAndEmptyLists",
+          "kind": "TEST_F",
+          "line": 145,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(first->inspectPacket({7, {}}), FeatureResult::Continue); / EXPECT_EQ(first->inspectPacket({2, {}}), FeatureResult::Close);"
+        },
+        {
+          "name": "TokenBucketFeatureTest.RejectsNonfiniteAndNonlimitingConfiguration",
+          "kind": "TEST",
+          "line": 160,
+          "checks_static": 6,
+          "check_example": "EXPECT_THROW(TokenBucketFeature(0.5, 1), std::invalid_argument); / EXPECT_THROW(TokenBucketFeature(1, 0), std::invalid_argument);"
+        },
+        {
+          "name": "ConnectionFeatureTest.OnlyCompleteFramesConsumeTokens",
+          "kind": "TEST_F",
+          "line": 190,
+          "checks_static": 6,
+          "check_example": "EXPECT_TRUE(transport->sent.empty()); / EXPECT_TRUE(runtime->connected());"
+        },
+        {
+          "name": "ConnectionFeatureTest.DroppedFrameDoesNotPreventNextCoalescedFrame",
+          "kind": "TEST_F",
+          "line": 213,
+          "checks_static": 2,
+          "check_example": "EXPECT_TRUE(runtime->connected()); / EXPECT_EQ("
+        },
+        {
+          "name": "ConnectionFeatureTest.WhitelistRejectsValidEnvelopeBeforeBusinessHandler",
+          "kind": "TEST_F",
+          "line": 247,
+          "checks_static": 3,
+          "check_example": "ASSERT_TRUE(payload); / EXPECT_FALSE(runtime->connected());"
+        },
+        {
+          "name": "ConnectionFeatureTest.RawBytesDoNotBecomePacketEvents",
+          "kind": "TEST_F",
+          "line": 268,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(count.calls, 0);"
+        },
+        {
+          "name": "ConnectionFeatureTest.OnClosedWaitsForActualTransportNotification",
+          "kind": "TEST_F",
+          "line": 287,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(transport->closes, 1); / EXPECT_EQ(count.calls, 0);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ConnectionLifecycleTest.cpp",
+      "entries": [
+        {
+          "name": "TcpConnectionTest.ConcurrentSendsDrainOrderedRecordsOnOwner",
+          "kind": "TEST",
+          "line": 64,
+          "checks_static": 10,
+          "check_example": "ASSERT_GE(flags, 0); / ASSERT_EQ("
+        },
+        {
+          "name": "TcpConnectionTest.PeerFinWaitsForAcceptedForeignSend",
+          "kind": "TEST",
+          "line": 192,
+          "checks_static": 6,
+          "check_example": "ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0); / ASSERT_TRUE(connection->connected());"
+        },
+        {
+          "name": "TcpConnectionTest.ForeignOutputLimitClosesAndReleasesQueue",
+          "kind": "TEST",
+          "line": 220,
+          "checks_static": 4,
+          "check_example": "EXPECT_LE( / EXPECT_FALSE(connection->connected());"
+        },
+        {
+          "name": "TcpConnectionTest.CloseDropsForeignQueuedSendsAndWeakDrain",
+          "kind": "TEST",
+          "line": 250,
+          "checks_static": 5,
+          "check_example": "ASSERT_EQ(connection->pendingBytes(), payload.size()); / EXPECT_EQ(connection->pendingBytes(), 0);"
+        },
+        {
+          "name": "TcpConnectionTest.ReadsAndEchoesIncomingBytes",
+          "kind": "TEST",
+          "line": 281,
+          "checks_static": 3,
+          "check_example": "ASSERT_EQ( / ASSERT_EQ("
+        },
+        {
+          "name": "TcpConnectionTest.ClosedPeerSendDoesNotRaiseSigpipe",
+          "kind": "TEST",
+          "line": 309,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(closes, 1);"
+        },
+        {
+          "name": "TcpConnectionTest.PeerEofNotifiesCloseCallbackOnce",
+          "kind": "TEST",
+          "line": 327,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(closeCount, 1);"
+        },
+        {
+          "name": "SocketTest.NonBlockingAcceptReturnsEmptyWhenNoConnectionIsReady",
+          "kind": "TEST",
+          "line": 346,
+          "checks_static": 1,
+          "check_example": "EXPECT_FALSE(listener.accept().has_value());"
+        },
+        {
+          "name": "SocketTest.AcceptedSocketIsNonBlockingAndCloseOnExec",
+          "kind": "TEST",
+          "line": 355,
+          "checks_static": 5,
+          "check_example": "ASSERT_EQ( / ASSERT_EQ("
+        },
+        {
+          "name": "TcpConnectionTest.EchoesBytesBeforePeerWriteShutdown",
+          "kind": "TEST",
+          "line": 388,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ( / ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);"
+        },
+        {
+          "name": "TcpConnectionTest.LocalWriteShutdownKeepsReceivingUntilPeerFin",
+          "kind": "TEST",
+          "line": 417,
+          "checks_static": 11,
+          "check_example": "ASSERT_EQ(::read(pair.peer.get(), buffer, sizeof(buffer)), 5); / EXPECT_EQ(std::string_view(buffer, 5), \"reply\");"
+        },
+        {
+          "name": "TcpConnectionTest.QueuedWriteShutdownWaitsForPeerFin",
+          "kind": "TEST",
+          "line": 456,
+          "checks_static": 12,
+          "check_example": "ASSERT_EQ( / ASSERT_GT(connection.pendingOutputBytes(), 0U);"
+        },
+        {
+          "name": "TcpConnectionTest.LocalWriteShutdownDrainsBeforeFinAfterPeerFin",
+          "kind": "TEST",
+          "line": 534,
+          "checks_static": 9,
+          "check_example": "ASSERT_EQ( / ASSERT_GT(connection.pendingOutputBytes(), 0U);"
+        },
+        {
+          "name": "AcceptorTest.DispatchesAcceptedSocketAndPeerAddress",
+          "kind": "TEST",
+          "line": 601,
+          "checks_static": 6,
+          "check_example": "ASSERT_EQ( / EXPECT_TRUE(accepted.valid());"
+        },
+        {
+          "name": "TcpConnectionTest.DrainsPendingOutputBeforeClosingAfterPeerShutdown",
+          "kind": "TEST",
+          "line": 652,
+          "checks_static": 8,
+          "check_example": "ASSERT_EQ( / ASSERT_NE(connection.channel().events() & EPOLLOUT, 0U);"
+        },
+        {
+          "name": "TcpConnectionTest.HighWaterPausesReadsAndLowWaterResumesPendingEdge",
+          "kind": "TEST",
+          "line": 729,
+          "checks_static": 8,
+          "check_example": "ASSERT_EQ( / EXPECT_EQ("
+        },
+        {
+          "name": "TcpConnectionTest.SustainedHighWaterDisconnectsSlowClient",
+          "kind": "TEST",
+          "line": 793,
+          "checks_static": 7,
+          "check_example": "ASSERT_EQ( / EXPECT_TRUE(runtime->connected());"
+        },
+        {
+          "name": "TcpConnectionTest.HardOutputLimitDisconnectsImmediately",
+          "kind": "TEST",
+          "line": 852,
+          "checks_static": 2,
+          "check_example": "ASSERT_EQ( / EXPECT_EQ(closes, 1);"
+        },
+        {
+          "name": "TcpConnectionTest.OutputEventsLeaveReadPolicyToComponents",
+          "kind": "TEST",
+          "line": 884,
+          "checks_static": 7,
+          "check_example": "ASSERT_EQ( / EXPECT_EQ(bytes, connection.pendingBytes());"
+        },
+        {
+          "name": "TcpConnectionTest.SlowPeerPendingOutputIsBounded",
+          "kind": "TEST",
+          "line": 931,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ( / EXPECT_LE("
+        },
+        {
+          "name": "TcpServerTest.StopWithoutConnectionsIsImmediateAndIdempotent",
+          "kind": "TEST",
+          "line": 971,
+          "checks_static": 5,
+          "check_example": "EXPECT_FALSE(server.stopped()); / EXPECT_EQ(server.maxConnections(), 4U);"
+        },
+        {
+          "name": "TcpServerTest.StopFromAnotherThreadIsRejectedBeforeMutation",
+          "kind": "TEST",
+          "line": 988,
+          "checks_static": 3,
+          "check_example": "EXPECT_TRUE(rejected); / EXPECT_FALSE(server.stopped());"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ConnectionOwnershipTest.cpp",
+      "entries": [
+        {
+          "name": "ConnectionOwnershipTest.CloseReleasesConnectionExactlyOnce",
+          "kind": "TEST_P",
+          "line": 140,
+          "checks_static": 12,
+          "check_example": "ASSERT_EQ(::setsockopt(pair.peer.get(), SOL_SOCKET, SO_LINGER, / ASSERT_EQ(::setsockopt(pair.peer.get(), SOL_SOCKET, SO_RCVTIMEO,"
+        },
+        {
+          "name": "ConnectionCallbackTest.MessageFinishesAfterLastOwnerIsReleased",
+          "kind": "TEST",
+          "line": 210,
+          "checks_static": 12,
+          "check_example": "EXPECT_FALSE(tracked.weak.expired()); / EXPECT_EQ(tracked.destructions, 0);"
+        },
+        {
+          "name": "ConnectionCallbackTest.ThrowingCallbackStillReleasesConnectionOnce",
+          "kind": "TEST",
+          "line": 249,
+          "checks_static": 6,
+          "check_example": "EXPECT_EQ(tracked.destructions, 0); / ASSERT_EQ(::send(pair.peer.get(), \"x\", 1, MSG_NOSIGNAL), 1);"
+        },
+        {
+          "name": "TcpServerOwnershipTest.QueuedRemovalIsSafeAfterServerDestruction",
+          "kind": "TEST",
+          "line": 272,
+          "checks_static": 9,
+          "check_example": "ASSERT_EQ(::getsockname(reservation.get(), / ASSERT_EQ(::connect(peer.get(), address.sockaddrPtr(),"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/ConnectionRuntimeTest.cpp",
+      "entries": [
+        {
+          "name": "ConnectionRuntimeTest.PauseReasonsDoNotResumeEachOther",
+          "kind": "TEST_F",
+          "line": 101,
+          "checks_static": 3,
+          "check_example": "EXPECT_TRUE(transport->paused); / EXPECT_FALSE(transport->paused);"
+        },
+        {
+          "name": "ConnectionRuntimeTest.PacketShortCircuitAndDeferredCloseOnce",
+          "kind": "TEST_F",
+          "line": 112,
+          "checks_static": 9,
+          "check_example": "EXPECT_EQ(runtime->inspectPacket({1, {}}), FeatureResult::Drop); / EXPECT_EQ(second.packets, 0);"
+        },
+        {
+          "name": "ConnectionRuntimeTest.RegistrationFreezesAtStart",
+          "kind": "TEST_F",
+          "line": 132,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW(runtime->features().add<Count>(), std::logic_error);"
+        },
+        {
+          "name": "ConnectionRuntimeTest.CancelledTimerAndClosedRuntimeNeverInvokeFeature",
+          "kind": "TEST_F",
+          "line": 137,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(fired, 0);"
+        },
+        {
+          "name": "ConnectionRuntimeTest.ExceptionsCloseAndOutputReentryIsCoalesced",
+          "kind": "TEST_F",
+          "line": 158,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(feature.calls, 2); / EXPECT_FALSE(runtime->connected());"
+        },
+        {
+          "name": "ConnectionRuntimeTest.CloseNotificationWaitsUntilFeatureReturns",
+          "kind": "TEST_F",
+          "line": 188,
+          "checks_static": 1,
+          "check_example": "EXPECT_FALSE(feature.notifiedInside);"
+        },
+        {
+          "name": "ConnectionRuntimeTest.BackpressureHysteresisCancelsOldTimer",
+          "kind": "TEST_F",
+          "line": 218,
+          "checks_static": 7,
+          "check_example": "ASSERT_TRUE(transport->paused); / EXPECT_TRUE(transport->paused);"
+        },
+        {
+          "name": "ConnectionRuntimeTest.CloseCancelsBackpressureTimer",
+          "kind": "TEST_F",
+          "line": 239,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(transport->closes, 0);"
+        },
+        {
+          "name": "BackpressureFeatureTest.RejectsInvalidConfiguration",
+          "kind": "TEST",
+          "line": 249,
+          "checks_static": 3,
+          "check_example": "EXPECT_THROW(BackpressureFeature(4, 4), std::invalid_argument); / EXPECT_THROW("
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/EpollPollerPerformanceTest.cpp",
+      "entries": [
+        {
+          "name": "EpollPollerPerformanceTest.ReadyEventThroughput",
+          "kind": "TEST",
+          "line": 39,
+          "checks_static": 6,
+          "check_example": "ASSERT_EQ( / ASSERT_FALSE(active.empty());"
+        },
+        {
+          "name": "EpollPollerPerformanceTest.RegistrationChurn",
+          "kind": "TEST",
+          "line": 107,
+          "checks_static": 0,
+          "check_example": ""
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/EpollPollerTest.cpp",
+      "entries": [
+        {
+          "name": "EpollPollerTest.AddedChannelReportsReadableEvent",
+          "kind": "TEST",
+          "line": 80,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ(::write(fd.get(), &one, sizeof(one)), sizeof(one)); / ASSERT_EQ(active.size(), 1U);"
+        },
+        {
+          "name": "EpollPollerTest.UpdateChangesInterestMask",
+          "kind": "TEST",
+          "line": 99,
+          "checks_static": 4,
+          "check_example": "EXPECT_TRUE(active.empty()); / ASSERT_EQ(active.size(), 1U);"
+        },
+        {
+          "name": "EpollPollerTest.RemovedChannelIsNotReported",
+          "kind": "TEST",
+          "line": 120,
+          "checks_static": 2,
+          "check_example": "ASSERT_EQ(::write(fd.get(), &one, sizeof(one)), sizeof(one)); / EXPECT_TRUE(active.empty());"
+        },
+        {
+          "name": "EpollPollerTest.PollClearsPreviousResultsWhenNoEventsAreReady",
+          "kind": "TEST",
+          "line": 137,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ(::write(fd.get(), &one, sizeof(one)), sizeof(one)); / ASSERT_EQ(active.size(), 1U);"
+        },
+        {
+          "name": "EpollPollerTest.ReportsMoreChannelsThanInitialEventBatch",
+          "kind": "TEST",
+          "line": 158,
+          "checks_static": 5,
+          "check_example": "ASSERT_EQ( / EXPECT_NE(channel->revents() & EPOLLIN, 0U);"
+        },
+        {
+          "name": "EpollPollerTest.InvalidDescriptorIsRejected",
+          "kind": "TEST",
+          "line": 204,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW(poller.addChannel(&channel), std::system_error);"
+        },
+        {
+          "name": "EpollPollerTest.InterruptedWaitClearsPreviousResults",
+          "kind": "TEST",
+          "line": 213,
+          "checks_static": 1,
+          "check_example": "EXPECT_TRUE(active.empty());"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/EventLoopTest.cpp",
+      "entries": [
+        {
+          "name": "EventLoopTest.RunInLoopKeepsCallbacksOnTheOwnerThread",
+          "kind": "TEST",
+          "line": 22,
+          "checks_static": 4,
+          "check_example": "EXPECT_TRUE(ranInline); / EXPECT_FALSE(ranFromOtherThread.load());"
+        },
+        {
+          "name": "EventLoopTest.FourThreadsDeliverFourHundredThousandTasksAndStop",
+          "kind": "TEST",
+          "line": 55,
+          "checks_static": 6,
+          "check_example": "EXPECT_FALSE(timedOut); / EXPECT_FALSE(wrongThread.load());"
+        },
+        {
+          "name": "EventLoopTest.QuitFromAnotherThreadWakesIdlePoll",
+          "kind": "TEST",
+          "line": 149,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "EventLoopTest.RemovingReadyChannelSkipsItsPendingEvent",
+          "kind": "TEST",
+          "line": 168,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(firstFd.valid()); / ASSERT_TRUE(secondFd.valid());"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/EventLoopThreadPoolTest.cpp",
+      "entries": [
+        {
+          "name": "EventLoopThreadPoolTest.RejectsNullBaseLoop",
+          "kind": "TEST",
+          "line": 97,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW("
+        },
+        {
+          "name": "EventLoopThreadPoolTest.ZeroWorkersUseBaseWithoutStoppingIt",
+          "kind": "TEST",
+          "line": 105,
+          "checks_static": 11,
+          "check_example": "EXPECT_FALSE(pool.started()); / EXPECT_THROW(pool.getNextLoop(), std::logic_error);"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.RoundRobinUsesDistinctWorkerOwners",
+          "kind": "TEST",
+          "line": 135,
+          "checks_static": 12,
+          "check_example": "ASSERT_EQ(loops.size(), 3u); / EXPECT_NE(loops[0], loops[1]);"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.RestartAndDestructionDoNotLeakFds",
+          "kind": "TEST",
+          "line": 185,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ(pool.getAllLoops().size(), 3u); / EXPECT_FALSE(pool.started());"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.FailedStartupRollsBackAndCanRetry",
+          "kind": "TEST",
+          "line": 205,
+          "checks_static": 7,
+          "check_example": "EXPECT_THROW(pool.start(), std::system_error); / EXPECT_FALSE(pool.started());"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.ManagementRejectsForeignThread",
+          "kind": "TEST",
+          "line": 225,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(rejected, 6); / EXPECT_TRUE(pool.started());"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.WorkerCannotStopItsOwnPool",
+          "kind": "TEST",
+          "line": 260,
+          "checks_static": 2,
+          "check_example": "ASSERT_EQ(result.wait_for(3s), std::future_status::ready); / EXPECT_TRUE(result.get());"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.StopsAllWorkersBeforeJoiningFirst",
+          "kind": "TEST",
+          "line": 286,
+          "checks_static": 3,
+          "check_example": "ASSERT_EQ(ready.wait_for(3s), std::future_status::ready); / ASSERT_EQ(entered.wait_for(3s), std::future_status::ready);"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.WorkerErrorStillJoinsOtherWorkers",
+          "kind": "TEST",
+          "line": 319,
+          "checks_static": 9,
+          "check_example": "ASSERT_EQ(ready.wait_for(3s), std::future_status::ready); / ASSERT_EQ(entered.wait_for(3s), std::future_status::ready);"
+        },
+        {
+          "name": "EventLoopThreadPoolTest.MultipleProducersRunOnSelectedWorkers",
+          "kind": "TEST",
+          "line": 375,
+          "checks_static": 3,
+          "check_example": "ASSERT_EQ(result.wait_for(3s), std::future_status::ready); / EXPECT_EQ(count.load(), tasksPerWorker);"
+        },
+        {
+          "name": "EventLoopThreadPoolDeathTest.DestructorHandlesWorkerException",
+          "kind": "TEST",
+          "line": 432,
+          "checks_static": 1,
+          "check_example": "EXPECT_EXIT("
+        },
+        {
+          "name": "EventLoopThreadPoolDeathTest.WorkerDestructionTerminatesDirectly",
+          "kind": "TEST",
+          "line": 460,
+          "checks_static": 1,
+          "check_example": "EXPECT_EXIT("
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/EventLoopThreadTest.cpp",
+      "entries": [
+        {
+          "name": "EventLoopThreadTest.UnstartedObjectCanBeDestroyed",
+          "kind": "TEST",
+          "line": 75,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "EventLoopThreadTest.RepeatedStartupAndDestructionWakeIdlePoll",
+          "kind": "TEST",
+          "line": 80,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "EventLoopThreadTest.ReturnedLoopRunsTasksOnWorkerAndStopJoins",
+          "kind": "TEST",
+          "line": 90,
+          "checks_static": 7,
+          "check_example": "ASSERT_NE(loop, nullptr); / EXPECT_EQ(thread.startLoop(), loop);"
+        },
+        {
+          "name": "EventLoopThreadTest.LoopCanExitBeforeWrapperDestruction",
+          "kind": "TEST",
+          "line": 111,
+          "checks_static": 1,
+          "check_example": "ASSERT_EQ(done.wait_for(std::chrono::seconds(3)),"
+        },
+        {
+          "name": "EventLoopThreadTest.CallbackExceptionIsReportedByStop",
+          "kind": "TEST",
+          "line": 131,
+          "checks_static": 2,
+          "check_example": "ASSERT_EQ(started.wait_for(std::chrono::seconds(3)), / EXPECT_THROW(thread.stop(), std::runtime_error);"
+        },
+        {
+          "name": "EventLoopThreadTest.DestructorHandlesWorkerException",
+          "kind": "TEST",
+          "line": 147,
+          "checks_static": 1,
+          "check_example": "ASSERT_EQ(started.wait_for(std::chrono::seconds(3)),"
+        },
+        {
+          "name": "EventLoopThreadTest.StopWaitsForCurrentCallback",
+          "kind": "TEST",
+          "line": 163,
+          "checks_static": 2,
+          "check_example": "ASSERT_EQ(started.wait_for(std::chrono::seconds(3)), / EXPECT_TRUE(returned);"
+        },
+        {
+          "name": "EventLoopThreadTest.WorkerRejectsJoiningItself",
+          "kind": "TEST",
+          "line": 189,
+          "checks_static": 3,
+          "check_example": "ASSERT_EQ(result.wait_for(std::chrono::seconds(3)), / EXPECT_TRUE(result.get());"
+        },
+        {
+          "name": "EventLoopThreadDeathTest.ConstructionFailureReachesStartingThread",
+          "kind": "TEST",
+          "line": 213,
+          "checks_static": 1,
+          "check_example": "EXPECT_EXIT("
+        },
+        {
+          "name": "EventLoopThreadTest.StopWaitsForStartupBeforeJoining",
+          "kind": "TEST",
+          "line": 238,
+          "checks_static": 6,
+          "check_example": "EXPECT_TRUE(EventLoopThreadTestPeer::waitForStop(thread)); / EXPECT_EQ(done.wait_for(std::chrono::milliseconds(50)),"
+        },
+        {
+          "name": "EventLoopThreadTest.ConcurrentStopsJoinOnlyOnce",
+          "kind": "TEST",
+          "line": 298,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(failures.load(), 0); / EXPECT_THROW(thread.startLoop(), std::logic_error);"
+        },
+        {
+          "name": "EventLoopThreadDeathTest.WorkerDestructionTerminatesWithoutThrowing",
+          "kind": "TEST",
+          "line": 329,
+          "checks_static": 1,
+          "check_example": "EXPECT_EXIT("
+        },
+        {
+          "name": "EventLoopThreadDeathTest.WorkerStopRejectsWhileAnotherCallerJoins",
+          "kind": "TEST",
+          "line": 353,
+          "checks_static": 1,
+          "check_example": "EXPECT_EXIT("
+        },
+        {
+          "name": "EventLoopThreadTest.WorkerCanRequestStopWithoutJoining",
+          "kind": "TEST",
+          "line": 392,
+          "checks_static": 3,
+          "check_example": "ASSERT_EQ(done.wait_for(std::chrono::seconds(3)), / EXPECT_NO_THROW(thread.stop());"
+        },
+        {
+          "name": "EventLoopThreadTest.UnstartedStopRequestAllowsLaterStartup",
+          "kind": "TEST",
+          "line": 409,
+          "checks_static": 3,
+          "check_example": "EXPECT_NO_THROW(thread.requestStop()); / EXPECT_NE(thread.startLoop(), nullptr);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/IConnectionTest.cpp",
+      "entries": [
+        {
+          "name": "IConnectionTest.ReportsClosedStateAndClosesOnlyOnce",
+          "kind": "TEST_F",
+          "line": 73,
+          "checks_static": 7,
+          "check_example": "EXPECT_TRUE(connection->connected()); / EXPECT_NE(id, 0U);"
+        },
+        {
+          "name": "IConnectionTest.PauseAndResumeDeliverAlreadyAvailableBytes",
+          "kind": "TEST_F",
+          "line": 90,
+          "checks_static": 6,
+          "check_example": "ASSERT_EQ(concrete->channel().events() & EPOLLIN, 0U); / ASSERT_EQ(::write(pair.peer.get(), \"held\", 4), 4);"
+        },
+        {
+          "name": "IConnectionTest.HalfClosedConnectionKeepsReceivingUntilPeerFin",
+          "kind": "TEST_F",
+          "line": 110,
+          "checks_static": 10,
+          "check_example": "EXPECT_TRUE(connection->connected()); / ASSERT_EQ(::read(pair.peer.get(), buffer, sizeof(buffer)), 5);"
+        },
+        {
+          "name": "IConnectionTest.QueuedSendOwnsBytesUntilDrainedBeforeFin",
+          "kind": "TEST_F",
+          "line": 135,
+          "checks_static": 12,
+          "check_example": "ASSERT_EQ(::setsockopt(concrete->fd(), SOL_SOCKET, SO_SNDBUF, / ASSERT_GT(connection->pendingBytes(), 0U);"
+        },
+        {
+          "name": "IConnectionTest.IdentityIsStableAndNotReusedAfterDestruction",
+          "kind": "TEST_F",
+          "line": 186,
+          "checks_static": 4,
+          "check_example": "EXPECT_NE(firstId, secondId); / EXPECT_NE(second->id(), firstId);"
+        },
+        {
+          "name": "IConnectionOwnershipTest.VirtualDestructionOnOwnerClosesSocket",
+          "kind": "TEST",
+          "line": 206,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(::read(pair.peer.get(), &byte, 1), 0);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/MessageDispatchIntegrationTest.py",
+      "entries": [
+        {
+          "name": "envelope",
+          "kind": "def",
+          "line": 18,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "fields",
+          "kind": "def",
+          "line": 23,
+          "checks_static": 3,
+          "check_example": "assert offset < len(data) and shift < 70"
+        },
+        {
+          "name": "fields.number",
+          "kind": "def",
+          "line": 25,
+          "checks_static": 1,
+          "check_example": "assert offset < len(data) and shift < 70"
+        },
+        {
+          "name": "response",
+          "kind": "def",
+          "line": 51,
+          "checks_static": 3,
+          "check_example": "assert magic == 0x4152454E and size == len(data) - 8"
+        },
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 63,
+          "checks_static": 4,
+          "check_example": "assert len(starts) == 2 and sorted(starts) == sorted(ends), output"
+        },
+        {
+          "name": "run_profile",
+          "kind": "def",
+          "line": 101,
+          "checks_static": 9,
+          "check_example": "assert \"do-not-log-private-business-data\" not in logs, logs"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/MessageDispatchTest.cpp",
+      "entries": [
+        {
+          "name": "MessageDispatchTest.UnknownMessageReturnsStableTypedErrorAndRequestId",
+          "kind": "TEST_F",
+          "line": 142,
+          "checks_static": 6,
+          "check_example": "EXPECT_EQ(reply.msg_id(), wire::MSG_ERROR); / EXPECT_EQ(reply.request_id(), 1234567890123ULL);"
+        },
+        {
+          "name": "MessageDispatchTest.TypedBusinessExceptionMapsToStableError",
+          "kind": "TEST_F",
+          "line": 161,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ(reply.request_id(), 77); / ASSERT_TRUE(reply.has_error());"
+        },
+        {
+          "name": "MessageDispatchTest.TimeoutRepliesOnceAndLateCompletionIsIgnored",
+          "kind": "TEST_F",
+          "line": 183,
+          "checks_static": 8,
+          "check_example": "EXPECT_TRUE(transport->output.empty()); / ASSERT_EQ(deadlines.size(), 1);"
+        },
+        {
+          "name": "MessageDispatchTest.MalformedBusinessReplyBecomesInternalError",
+          "kind": "TEST_F",
+          "line": 215,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(reply.has_error()); / EXPECT_EQ(reply.error().code(), 9000);"
+        },
+        {
+          "name": "MessageDispatchTest.ResponseRespectsOuterPacketBudget",
+          "kind": "TEST_F",
+          "line": 238,
+          "checks_static": 3,
+          "check_example": "ASSERT_TRUE(reply.has_error()); / EXPECT_EQ(reply.error().code(), wire::ERR_INTERNAL);"
+        },
+        {
+          "name": "MessageDispatchTest.LegacyRequestIdFallbackAndSpdlogTraceStayConsistent",
+          "kind": "TEST_F",
+          "line": 272,
+          "checks_static": 10,
+          "check_example": "EXPECT_EQ(request->requestId, 7); / EXPECT_EQ(request->context->connectionId, 1);"
+        },
+        {
+          "name": "MessageDispatchTest.AuthenticationIsCheckedBeforeRegisteredBusinessHandler",
+          "kind": "TEST_F",
+          "line": 331,
+          "checks_static": 6,
+          "check_example": "EXPECT_EQ(response().error().code(), 1003); / EXPECT_EQ(calls, 0);"
+        },
+        {
+          "name": "MessageDispatchTest.MismatchedMsgIdAndPayloadNeverInvokeHandler",
+          "kind": "TEST_F",
+          "line": 363,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(response().error().code(), 1002); / EXPECT_EQ(calls, 0);"
+        },
+        {
+          "name": "MessageDispatchTest.OldCompletionAndTimerCannotFinishReusedRequestId",
+          "kind": "TEST_F",
+          "line": 383,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(response().error().code(), 1004); / EXPECT_TRUE(transport->output.empty());"
+        },
+        {
+          "name": "MessageDispatchTest.DuplicateActiveRequestTerminatesOriginalWithOneError",
+          "kind": "TEST_F",
+          "line": 414,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(response().error().code(), 1006); / EXPECT_EQ(calls, 1);"
+        },
+        {
+          "name": "MessageDispatchTest.PendingRequestsHaveAnExplicitBound",
+          "kind": "TEST_F",
+          "line": 444,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(response().error().code(), 1005); / EXPECT_EQ(deadlines.size(), 64);"
+        },
+        {
+          "name": "MessageDispatchTest.DisconnectCancelsTimersAndLateCallbacksOwnNoConnection",
+          "kind": "TEST_F",
+          "line": 464,
+          "checks_static": 4,
+          "check_example": "EXPECT_TRUE(weak.expired()); / EXPECT_EQ(cancellations, 1);"
+        },
+        {
+          "name": "MessageDispatchTest.UntypedExceptionsAndInvalidTypedCodesMapToInternal",
+          "kind": "TEST_F",
+          "line": 502,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(response().error().code(), 9000); / EXPECT_EQ("
+        },
+        {
+          "name": "MessageRegistryTest.RejectsDuplicateMissingInvalidAndLateRegistrations",
+          "kind": "TEST",
+          "line": 531,
+          "checks_static": 6,
+          "check_example": "EXPECT_THROW( / EXPECT_THROW("
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/PacketBufferTest.cpp",
+      "entries": [
+        {
+          "name": "PacketBufferTest.InitialState",
+          "kind": "TEST",
+          "line": 12,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(buffer.readableBytes(), 0); / EXPECT_GT(buffer.writableBytes(), 0);"
+        },
+        {
+          "name": "PacketBufferTest.AppendData",
+          "kind": "TEST",
+          "line": 20,
+          "checks_static": 3,
+          "check_example": "EXPECT_TRUE(buffer.append(data, 5)); / EXPECT_EQ(buffer.readableBytes(), 5);"
+        },
+        {
+          "name": "PacketBufferTest.SkipData",
+          "kind": "TEST",
+          "line": 36,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(buffer.append(data, 5)); / EXPECT_TRUE(buffer.skip(2));"
+        },
+        {
+          "name": "PacketBufferTest.SkipAllDataResetsBuffer",
+          "kind": "TEST",
+          "line": 54,
+          "checks_static": 6,
+          "check_example": "ASSERT_TRUE(buffer.append(data, 5)); / ASSERT_TRUE(buffer.skip(5));"
+        },
+        {
+          "name": "PacketBufferTest.SkipTooMuchFails",
+          "kind": "TEST",
+          "line": 78,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(buffer.append(data, 5)); / EXPECT_FALSE(buffer.skip(6));"
+        },
+        {
+          "name": "PacketBufferTest.NullptrWithNonZeroLengthFails",
+          "kind": "TEST",
+          "line": 97,
+          "checks_static": 2,
+          "check_example": "EXPECT_FALSE(buffer.append(nullptr, 10)); / EXPECT_EQ(buffer.readableBytes(), 0);"
+        },
+        {
+          "name": "PacketBufferTest.NullptrWithZeroLengthIsAllowed",
+          "kind": "TEST",
+          "line": 106,
+          "checks_static": 2,
+          "check_example": "EXPECT_TRUE(buffer.append(nullptr, 0)); / EXPECT_EQ(buffer.readableBytes(), 0);"
+        },
+        {
+          "name": "PacketBufferTest.ResizeWhenCapacityIsInsufficient",
+          "kind": "TEST",
+          "line": 115,
+          "checks_static": 3,
+          "check_example": "ASSERT_TRUE(buffer.append(data, 10)); / EXPECT_EQ(buffer.readableBytes(), 10);"
+        },
+        {
+          "name": "PacketBufferTest.AppendFailsWhenExceedingMaxCapacity",
+          "kind": "TEST",
+          "line": 131,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(buffer.append(first, 4)); / EXPECT_FALSE(buffer.append(second, 5));"
+        },
+        {
+          "name": "PacketBufferTest.CompactConsumedSpaceBeforeResize",
+          "kind": "TEST",
+          "line": 151,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(buffer.append(first, 6)); / ASSERT_TRUE(buffer.skip(4));"
+        },
+        {
+          "name": "PacketBufferTest.MultipleAppendMaintainsOrder",
+          "kind": "TEST",
+          "line": 199,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(buffer.append(first, 3)); / ASSERT_TRUE(buffer.append(second, 3));"
+        },
+        {
+          "name": "PacketBufferTest.AppendAfterPartialSkip",
+          "kind": "TEST",
+          "line": 223,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(buffer.append(\"abcdef\", 6)); / ASSERT_TRUE(buffer.skip(3));"
+        },
+        {
+          "name": "PacketBufferTest.SharesBaseStorageAndLegacyReadNames",
+          "kind": "TEST",
+          "line": 244,
+          "checks_static": 8,
+          "check_example": "EXPECT_EQ(base.prependableBytes(), 0); / ASSERT_TRUE(base.append(\"abcd\", 4));"
+        },
+        {
+          "name": "PacketBufferTest.DefaultCapacityRemainsOneMiB",
+          "kind": "TEST",
+          "line": 261,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(buffer.append(data.data(), data.size())); / EXPECT_EQ("
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/PacketCodecIntegrationTest.py",
+      "entries": [
+        {
+          "name": "packet",
+          "kind": "def",
+          "line": 21,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "receive_exact",
+          "kind": "def",
+          "line": 24,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "expect_closed",
+          "kind": "def",
+          "line": 33,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 40,
+          "checks_static": 14,
+          "check_example": "assert \"TcpServer stopped\" in diagnostics"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/PacketPipelineTest.cpp",
+      "entries": [
+        {
+          "name": "PacketPipelineTest.ForwardsInOrderAndStopsWhenHandled",
+          "kind": "TEST",
+          "line": 132,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(packet.payload, \"payload\"); / EXPECT_EQ(pipeline.process(context), PacketHandleResult::Handled);"
+        },
+        {
+          "name": "PacketPipelineTest.RejectStopsBeforeDownstreamHandler",
+          "kind": "TEST",
+          "line": 167,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(pipeline.process(context), PacketHandleResult::Reject); / EXPECT_EQ(downstream, 0);"
+        },
+        {
+          "name": "PacketPipelineTest.UnhandledFrameIsRejectedAndEmptyHeadIsInvalid",
+          "kind": "TEST",
+          "line": 189,
+          "checks_static": 3,
+          "check_example": "EXPECT_THROW((PacketPipeline(nullptr)), std::invalid_argument); / EXPECT_FALSE(connection.connected());"
+        },
+        {
+          "name": "PacketPipelineTest.EnvelopeDecoderFeedsNextHandlerAndRejectsMalformed",
+          "kind": "TEST",
+          "line": 206,
+          "checks_static": 8,
+          "check_example": "ASSERT_TRUE(wire); / EXPECT_TRUE(packet.envelope.has_value());"
+        },
+        {
+          "name": "PacketPipelineTest.HandlerRunsOnlyForCompleteFramesAndClosesOnReject",
+          "kind": "TEST",
+          "line": 246,
+          "checks_static": 7,
+          "check_example": "EXPECT_EQ(calls, 0); / EXPECT_TRUE(connection.connected());"
+        },
+        {
+          "name": "PacketPipelineTest.FreshChainsIsolateStateAndCallbackCopiesRetainNodes",
+          "kind": "TEST",
+          "line": 279,
+          "checks_static": 7,
+          "check_example": "EXPECT_TRUE(connection1.connected()); / EXPECT_TRUE(connection2.connected());"
+        },
+        {
+          "name": "PacketPipelineTest.HandlerExceptionClosesAndDiscardsRemainingFrames",
+          "kind": "TEST",
+          "line": 314,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(calls, 1); / EXPECT_EQ(connection.closes, 1);"
+        },
+        {
+          "name": "PacketPipelineTest.PingHandlerForwardsOtherEnvelopesToLaterRouter",
+          "kind": "TEST",
+          "line": 338,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(wire); / EXPECT_TRUE(context.envelope->has_login_request());"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/SecurityPolicyIntegrationTest.py",
+      "entries": [
+        {
+          "name": "login",
+          "kind": "def",
+          "line": 17,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "check",
+          "kind": "def",
+          "line": 22,
+          "checks_static": 5,
+          "check_example": "assert response.startswith(b\"HTTP/1.1 101\")"
+        },
+        {
+          "name": "check.connect",
+          "kind": "def",
+          "line": 23,
+          "checks_static": 1,
+          "check_example": "assert response.startswith(b\"HTTP/1.1 101\")"
+        },
+        {
+          "name": "check.send",
+          "kind": "def",
+          "line": 32,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "check.response",
+          "kind": "def",
+          "line": 38,
+          "checks_static": 2,
+          "check_example": "assert read_frame(peer) == (2, expected)"
+        },
+        {
+          "name": "check.closed",
+          "kind": "def",
+          "line": 44,
+          "checks_static": 2,
+          "check_example": "assert opcode == 8 and payload[:2] == b\"\\x03\\xf0\", (opcode, payload)"
+        },
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 104,
+          "checks_static": 2,
+          "check_example": "assert match, output"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/SecurityPolicyTest.cpp",
+      "entries": [
+        {
+          "name": "SecurityPolicyTest.BurstStopsBeforeDecodeRouteAndRemainingCoalescedFrames",
+          "kind": "TEST_F",
+          "line": 142,
+          "checks_static": 7,
+          "check_example": "EXPECT_EQ(routed, 2); / EXPECT_FALSE(runtime->connected());"
+        },
+        {
+          "name": "SecurityPolicyTest.DropCountsEachRejectedPacketWithoutRoutingIt",
+          "kind": "TEST_F",
+          "line": 174,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(routed, 1); / EXPECT_TRUE(runtime->connected());"
+        },
+        {
+          "name": "SecurityPolicyTest.PendingBusinessCannotReachRouter",
+          "kind": "TEST_F",
+          "line": 194,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ(routed, 0); / EXPECT_FALSE(runtime->connected());"
+        },
+        {
+          "name": "SecurityPolicyTest.PendingPingAndLoginDoNotAuthenticate",
+          "kind": "TEST_F",
+          "line": 204,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ(routed, 2); / EXPECT_EQ("
+        },
+        {
+          "name": "SecurityPolicyTest.HandshakePayloadCannotBypassGateWithBusinessOuterType",
+          "kind": "TEST_F",
+          "line": 224,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(routed, 0); / EXPECT_EQ(counters->count(RejectionReason::Unauthenticated), 1);"
+        },
+        {
+          "name": "SecurityPolicyTest.AuthenticatedBusinessReachesRouter",
+          "kind": "TEST_F",
+          "line": 235,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(context->session->markAuthenticated()); / EXPECT_EQ(routed, 1);"
+        },
+        {
+          "name": "SecurityPolicyTest.ExpiredSessionCannotRestartLoginOrPing",
+          "kind": "TEST_F",
+          "line": 245,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(context->session->expireLogin()); / EXPECT_FALSE(context->session->markAuthenticated());"
+        },
+        {
+          "name": "SecurityPolicyTest.WhitelistRejectionIsCountedOnceBeforeDecode",
+          "kind": "TEST_F",
+          "line": 255,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(routed, 0); / EXPECT_EQ("
+        },
+        {
+          "name": "SecurityPolicyTest.MalformedEnvelopeCountsDecodeReasonOnly",
+          "kind": "TEST_F",
+          "line": 273,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ(routed, 0); / EXPECT_EQ(counters->count(RejectionReason::InvalidEnvelope), 1);"
+        },
+        {
+          "name": "SecurityPolicyTest.MalformedFrameCountsFrameReasonOnly",
+          "kind": "TEST_F",
+          "line": 283,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(routed, 0); / EXPECT_EQ(counters->count(RejectionReason::InvalidFrame), 1);"
+        },
+        {
+          "name": "SecurityPolicyTest.TailRejectAndCallbackFailureHaveDistinctReasons",
+          "kind": "TEST_F",
+          "line": 294,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ(counters->count(RejectionReason::HandlerRejected), 1); / EXPECT_EQ(counters->count(RejectionReason::CallbackFailure), 1);"
+        },
+        {
+          "name": "SecurityPolicyConfigurationTest.GateAndCountersFailClosedOnMissingDependencies",
+          "kind": "TEST",
+          "line": 334,
+          "checks_static": 5,
+          "check_example": "EXPECT_THROW( / EXPECT_THROW("
+        },
+        {
+          "name": "RejectionCountersTest.SharedWorkersDoNotLoseCountsAndCountsOutliveConnection",
+          "kind": "TEST",
+          "line": 367,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ(counters->snapshot()[0], 1);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/SessionManagerTest.cpp",
+      "entries": [
+        {
+          "name": "SessionManagerTest.AddAndFindSession",
+          "kind": "TEST",
+          "line": 39,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ(::pipe(pipeFds), 0); / EXPECT_TRUE("
+        },
+        {
+          "name": "SessionManagerTest.FindMissingSessionReturnsNullptr",
+          "kind": "TEST",
+          "line": 64,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(session, nullptr);"
+        },
+        {
+          "name": "SessionManagerTest.DuplicateSessionIdIsRejected",
+          "kind": "TEST",
+          "line": 75,
+          "checks_static": 7,
+          "check_example": "ASSERT_EQ(::pipe(pipeA), 0); / ASSERT_EQ(::pipe(pipeB), 0);"
+        },
+        {
+          "name": "SessionManagerTest.RemoveSession",
+          "kind": "TEST",
+          "line": 114,
+          "checks_static": 5,
+          "check_example": "ASSERT_EQ(::pipe(pipeFds), 0); / ASSERT_TRUE("
+        },
+        {
+          "name": "SessionManagerTest.RemoveSessionClosesDescriptor",
+          "kind": "TEST",
+          "line": 140,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ(::pipe(pipeFds), 0); / ASSERT_TRUE("
+        },
+        {
+          "name": "SessionManagerTest.DestructorReleasesAllSessions",
+          "kind": "TEST",
+          "line": 166,
+          "checks_static": 8,
+          "check_example": "ASSERT_EQ(::pipe(pipeA), 0); / ASSERT_EQ(::pipe(pipeB), 0);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/SocketTest.cpp",
+      "entries": [
+        {
+          "name": "SocketTest.CreateTcpSocket",
+          "kind": "TEST",
+          "line": 18,
+          "checks_static": 4,
+          "check_example": "EXPECT_TRUE(socket.valid()); / EXPECT_GE(socket.get(), 0);"
+        },
+        {
+          "name": "SocketTest.CreateTcpNonBlocking",
+          "kind": "TEST",
+          "line": 43,
+          "checks_static": 3,
+          "check_example": "ASSERT_TRUE(socket.valid()); / ASSERT_NE(flags, -1);"
+        },
+        {
+          "name": "SocketTest.CreateTcpNonBlockingHasCloseOnExec",
+          "kind": "TEST",
+          "line": 56,
+          "checks_static": 3,
+          "check_example": "ASSERT_TRUE(socket.valid()); / ASSERT_NE(flags, -1);"
+        },
+        {
+          "name": "SocketTest.BindToLoopback",
+          "kind": "TEST",
+          "line": 69,
+          "checks_static": 4,
+          "check_example": "EXPECT_NO_THROW( / ASSERT_EQ("
+        },
+        {
+          "name": "SocketTest.Listen",
+          "kind": "TEST",
+          "line": 97,
+          "checks_static": 3,
+          "check_example": "EXPECT_NO_THROW( / ASSERT_EQ("
+        },
+        {
+          "name": "SocketTest.AcceptConnection",
+          "kind": "TEST",
+          "line": 126,
+          "checks_static": 7,
+          "check_example": "ASSERT_EQ( / ASSERT_GE(fd, 0);"
+        },
+        {
+          "name": "SocketTest.DestructorClosesDescriptor",
+          "kind": "TEST",
+          "line": 195,
+          "checks_static": 4,
+          "check_example": "ASSERT_GE(fd, 0); / EXPECT_NE("
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/TcpServerChurnMonitor.py",
+      "entries": [
+        {
+          "name": "percentile",
+          "kind": "def",
+          "line": 31,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "ticks",
+          "kind": "def",
+          "line": 38,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "proc_metrics",
+          "kind": "def",
+          "line": 43,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.__init__",
+          "kind": "def",
+          "line": 80,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.event",
+          "kind": "def",
+          "line": 114,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.snapshot",
+          "kind": "def",
+          "line": 123,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.write_snapshot",
+          "kind": "def",
+          "line": 139,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.read_logs",
+          "kind": "def",
+          "line": 144,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.sample",
+          "kind": "def",
+          "line": 176,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.sample_loop",
+          "kind": "def",
+          "line": 222,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.start_http",
+          "kind": "def",
+          "line": 229,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.start_http.Handler.do_GET",
+          "kind": "def",
+          "line": 234,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.start_http.Handler.log_message",
+          "kind": "def",
+          "line": 251,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.wait_fd",
+          "kind": "async def",
+          "line": 260,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.check_health",
+          "kind": "def",
+          "line": 270,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.churn_round",
+          "kind": "async def",
+          "line": 276,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.churn_round.open_peer",
+          "kind": "async def",
+          "line": 286,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.churn_round.echo_peer",
+          "kind": "async def",
+          "line": 297,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.churn_round.close_peer",
+          "kind": "async def",
+          "line": 311,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.churn_round.settle",
+          "kind": "async def",
+          "line": 335,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.workload",
+          "kind": "async def",
+          "line": 369,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.write_report",
+          "kind": "def",
+          "line": 454,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "Monitor.run",
+          "kind": "def",
+          "line": 493,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "main",
+          "kind": "def",
+          "line": 511,
+          "checks_static": 0,
+          "check_example": ""
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/TcpServerIntegrationTest.py",
+      "entries": [
+        {
+          "name": "wait_until",
+          "kind": "def",
+          "line": 19,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "fd_count",
+          "kind": "def",
+          "line": 32,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "reserve_port",
+          "kind": "def",
+          "line": 36,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "connect",
+          "kind": "def",
+          "line": 42,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 48,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "run.constrain_fds",
+          "kind": "def",
+          "line": 62,
+          "checks_static": 0,
+          "check_example": ""
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/TcpServerTestHost.cpp",
+      "entries": []
+    },
+    {
+      "path": "tests/gateway/net/TcpServerWorkerTest.cpp",
+      "entries": [
+        {
+          "name": "TcpServerWorkerTest.StopsAndJoinsIdlePoolBeforeReportingStopped",
+          "kind": "TEST",
+          "line": 99,
+          "checks_static": 9,
+          "check_example": "EXPECT_EQ(server.workerCount(), 4u); / EXPECT_EQ(server.maxConnections(), 16u);"
+        },
+        {
+          "name": "TcpServerWorkerTest.ActiveDestructionReclaimsSocketsAndSkipsLateNotices",
+          "kind": "TEST",
+          "line": 122,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ(base.pendingTimerCount(), 1u); / EXPECT_FALSE(timedOut);"
+        },
+        {
+          "name": "TcpServerWorkerTest.GracefulStopFansOutFinAndReclaimsDeadlinePeers",
+          "kind": "TEST",
+          "line": 188,
+          "checks_static": 5,
+          "check_example": "EXPECT_FALSE(timedOut); / EXPECT_TRUE(requested);"
+        },
+        {
+          "name": "TcpServerWorkerTest.ForeignRegistrationAndConstructionAreRejected",
+          "kind": "TEST",
+          "line": 260,
+          "checks_static": 4,
+          "check_example": "EXPECT_THROW(owner->addChannel(nullptr), std::logic_error); / EXPECT_THROW(owner->updateChannel(nullptr), std::logic_error);"
+        },
+        {
+          "name": "TcpConnectionOwnershipDeathTest.ForeignFinalReleaseTerminatesWithoutThrow",
+          "kind": "TEST",
+          "line": 278,
+          "checks_static": 1,
+          "check_example": "EXPECT_EXIT("
+        },
+        {
+          "name": "ITcpServerTest.NegativeGraceDoesNotChangeRunningState",
+          "kind": "TEST",
+          "line": 305,
+          "checks_static": 6,
+          "check_example": "EXPECT_EQ(server->workerCount(), 0u); / EXPECT_THROW(server->stop(-1ms), std::invalid_argument);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/TimerQueueTest.cpp",
+      "entries": [
+        {
+          "name": "TimerQueueTest.OneShotTimersRunInDeadlineOrder",
+          "kind": "TEST",
+          "line": 19,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(fired, (std::vector<int>{1, 2, 3})); / EXPECT_EQ(loop.pendingTimerCount(), 0U);"
+        },
+        {
+          "name": "TimerQueueTest.CancelEarliestAndRepeatingTimer",
+          "kind": "TEST",
+          "line": 34,
+          "checks_static": 6,
+          "check_example": "EXPECT_TRUE(loop.cancelTimer(canceled)); / EXPECT_FALSE(loop.cancelTimer(canceled));"
+        },
+        {
+          "name": "TimerQueueTest.CallbackCanAddAndCancelOtherTimers",
+          "kind": "TEST",
+          "line": 67,
+          "checks_static": 2,
+          "check_example": "EXPECT_TRUE(loop.cancelTimer(later)); / EXPECT_EQ(fired, (std::vector<int>{1, 2}));"
+        },
+        {
+          "name": "TimerQueueTest.RejectsInvalidInputAndForeignThreadMutation",
+          "kind": "TEST",
+          "line": 91,
+          "checks_static": 4,
+          "check_example": "EXPECT_THROW(loop.runAfter(0ms, [] {}), std::invalid_argument); / EXPECT_THROW(loop.runEvery(-1ms, [] {}), std::invalid_argument);"
+        },
+        {
+          "name": "TimerQueueTest.CancelManyTimersKeepsHeapIndexValid",
+          "kind": "TEST",
+          "line": 115,
+          "checks_static": 3,
+          "check_example": "EXPECT_TRUE(loop.cancelTimer(ids[i])); / EXPECT_EQ(executions[i], i % 3 == 0 ? 0 : 1) << i;"
+        },
+        {
+          "name": "TimerQueueTest.HundredThousandTimersFireOrCancelExactlyOnce",
+          "kind": "TEST",
+          "line": 143,
+          "checks_static": 8,
+          "check_example": "ASSERT_TRUE(loop.cancelTimer(ids[i])) << i; / EXPECT_EQ(loop.pendingTimerCount(), expectedFires);"
+        },
+        {
+          "name": "TimerQueueTest.DestructionDropsPendingCallbacks",
+          "kind": "TEST",
+          "line": 232,
+          "checks_static": 5,
+          "check_example": "ASSERT_EQ(repeatedCalls->load(), 1); / ASSERT_EQ(oneShotCalls->load(), 0);"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/WebSocketIntegrationTest.py",
+      "entries": [
+        {
+          "name": "exact",
+          "kind": "def",
+          "line": 20,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "varint",
+          "kind": "def",
+          "line": 30,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "envelope_ping",
+          "kind": "def",
+          "line": 39,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "packet",
+          "kind": "def",
+          "line": 44,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "packet_pong",
+          "kind": "def",
+          "line": 48,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "read_tcp_packet",
+          "kind": "def",
+          "line": 53,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "upgrade",
+          "kind": "def",
+          "line": 59,
+          "checks_static": 1,
+          "check_example": "assert len(reply) < 8192"
+        },
+        {
+          "name": "send_frame",
+          "kind": "def",
+          "line": 77,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "read_frame",
+          "kind": "def",
+          "line": 94,
+          "checks_static": 2,
+          "check_example": "assert not second & 0x80, \"server frame must be unmasked\""
+        },
+        {
+          "name": "close_code",
+          "kind": "def",
+          "line": 106,
+          "checks_static": 1,
+          "check_example": "assert len(payload) >= 2"
+        },
+        {
+          "name": "run_host",
+          "kind": "def",
+          "line": 119,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "run_host.content",
+          "kind": "def",
+          "line": 128,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "stop_host",
+          "kind": "def",
+          "line": 140,
+          "checks_static": 1,
+          "check_example": "assert process.wait(timeout=8) == 0"
+        },
+        {
+          "name": "run",
+          "kind": "def",
+          "line": 152,
+          "checks_static": 14,
+          "check_example": "assert \"code=1003\" in output and \"code=4001\" in output, output"
+        }
+      ]
+    },
+    {
+      "path": "tests/gateway/net/WebSocketTestHost.cpp",
+      "entries": []
+    },
+    {
+      "path": "tests/shared/concurrent/BlockingQueuePerformanceTest.cpp",
+      "entries": [
+        {
+          "name": "BlockingQueuePerformanceTest.SingleProducerSingleConsumer",
+          "kind": "TEST",
+          "line": 23,
+          "checks_static": 2,
+          "check_example": "ASSERT_TRUE(queue.push(i)); / EXPECT_EQ(checksum, expected);"
+        },
+        {
+          "name": "BlockingQueuePerformanceTest.MultiProducerMultiConsumer",
+          "kind": "TEST",
+          "line": 82,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ(consumed.load(), total_items);"
+        }
+      ]
+    },
+    {
+      "path": "tests/shared/concurrent/BlockingQueueTest.cpp",
+      "entries": [
+        {
+          "name": "BlockingQueueTest.InitialState",
+          "kind": "TEST",
+          "line": 24,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ(queue.capacity(), 4); / EXPECT_EQ(queue.size(), 0);"
+        },
+        {
+          "name": "BlockingQueueTest.ZeroCapacityThrows",
+          "kind": "TEST",
+          "line": 36,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW("
+        },
+        {
+          "name": "BlockingQueueTest.PushAndPopSingleElement",
+          "kind": "TEST",
+          "line": 45,
+          "checks_static": 7,
+          "check_example": "EXPECT_TRUE(queue.push(42)); / EXPECT_EQ(queue.size(), 1);"
+        },
+        {
+          "name": "BlockingQueueTest.FIFOOrder",
+          "kind": "TEST",
+          "line": 64,
+          "checks_static": 9,
+          "check_example": "EXPECT_TRUE(queue.push(1)); / EXPECT_TRUE(queue.push(2));"
+        },
+        {
+          "name": "BlockingQueueTest.FullState",
+          "kind": "TEST",
+          "line": 86,
+          "checks_static": 6,
+          "check_example": "EXPECT_TRUE(queue.push(1)); / EXPECT_TRUE(queue.push(2));"
+        },
+        {
+          "name": "BlockingQueueTest.SupportsMoveOnlyType",
+          "kind": "TEST",
+          "line": 103,
+          "checks_static": 5,
+          "check_example": "EXPECT_TRUE(queue.push(std::move(ptr))); / EXPECT_EQ(ptr, nullptr);"
+        },
+        {
+          "name": "BlockingQueueTest.CloseChangesState",
+          "kind": "TEST",
+          "line": 125,
+          "checks_static": 2,
+          "check_example": "EXPECT_FALSE(queue.closed()); / EXPECT_TRUE(queue.closed());"
+        },
+        {
+          "name": "BlockingQueueTest.CloseIsIdempotent",
+          "kind": "TEST",
+          "line": 137,
+          "checks_static": 1,
+          "check_example": "EXPECT_TRUE(queue.closed());"
+        },
+        {
+          "name": "BlockingQueueTest.PushFailsAfterClose",
+          "kind": "TEST",
+          "line": 149,
+          "checks_static": 2,
+          "check_example": "EXPECT_FALSE(queue.push(1)); / EXPECT_EQ(queue.size(), 0);"
+        },
+        {
+          "name": "BlockingQueueTest.ExistingElementsRemainAvailableAfterClose",
+          "kind": "TEST",
+          "line": 160,
+          "checks_static": 7,
+          "check_example": "EXPECT_TRUE(queue.push(10)); / EXPECT_TRUE(queue.push(20));"
+        },
+        {
+          "name": "BlockingQueueTest.PopReturnsNulloptWhenClosedAndEmpty",
+          "kind": "TEST",
+          "line": 183,
+          "checks_static": 1,
+          "check_example": "EXPECT_FALSE(result.has_value());"
+        },
+        {
+          "name": "BlockingQueueTest.ConsumerBlocksUntilPush",
+          "kind": "TEST",
+          "line": 199,
+          "checks_static": 4,
+          "check_example": "EXPECT_FALSE(consumer_finished.load()); / EXPECT_TRUE(queue.push(123));"
+        },
+        {
+          "name": "BlockingQueueTest.ProducerBlocksWhenFull",
+          "kind": "TEST",
+          "line": 237,
+          "checks_static": 7,
+          "check_example": "ASSERT_TRUE(queue.push(1)); / EXPECT_FALSE(producer_finished.load());"
+        },
+        {
+          "name": "BlockingQueueTest.CloseWakesBlockedConsumer",
+          "kind": "TEST",
+          "line": 278,
+          "checks_static": 3,
+          "check_example": "EXPECT_FALSE(value.has_value()); / EXPECT_FALSE(finished.load());"
+        },
+        {
+          "name": "BlockingQueueTest.CloseWakesBlockedProducer",
+          "kind": "TEST",
+          "line": 304,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(queue.push(1)); / EXPECT_FALSE(finished.load());"
+        },
+        {
+          "name": "BlockingQueueTest.MultipleProducersMultipleConsumers",
+          "kind": "TEST",
+          "line": 335,
+          "checks_static": 3,
+          "check_example": "ASSERT_TRUE(queue.push(value)); / EXPECT_EQ(consumed_count.load(), total_items);"
+        },
+        {
+          "name": "BlockingQueueTest.NoLostOrDuplicatedItems",
+          "kind": "TEST",
+          "line": 422,
+          "checks_static": 2,
+          "check_example": "ASSERT_TRUE(queue.push(value)); / EXPECT_EQ("
+        }
+      ]
+    },
+    {
+      "path": "tests/shared/concurrent/ThreadPoolPerformanceTest.cpp",
+      "entries": [
+        {
+          "name": "ThreadPoolPerformanceTest.MandelbrotBenchmark",
+          "kind": "TEST",
+          "line": 249,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        }
+      ]
+    },
+    {
+      "path": "tests/shared/concurrent/ThreadPoolTest.cpp",
+      "entries": [
+        {
+          "name": "ThreadPoolTest.StartAndShutdown",
+          "kind": "TEST",
+          "line": 70,
+          "checks_static": 2,
+          "check_example": "EXPECT_NO_THROW(pool.start()); / EXPECT_NO_THROW(pool.shutdown());"
+        },
+        {
+          "name": "ThreadPoolTest.CannotStartTwice",
+          "kind": "TEST",
+          "line": 79,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW("
+        },
+        {
+          "name": "ThreadPoolTest.ShutdownBeforeStartIsSafe",
+          "kind": "TEST",
+          "line": 94,
+          "checks_static": 1,
+          "check_example": "EXPECT_NO_THROW("
+        },
+        {
+          "name": "ThreadPoolTest.CannotStartAfterShutdown",
+          "kind": "TEST",
+          "line": 104,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW("
+        },
+        {
+          "name": "ThreadPoolTest.MultipleShutdownIsSafe",
+          "kind": "TEST",
+          "line": 117,
+          "checks_static": 3,
+          "check_example": "EXPECT_NO_THROW(pool.shutdown()); / EXPECT_NO_THROW(pool.shutdown());"
+        },
+        {
+          "name": "ThreadPoolTest.RejectSubmitBeforeStart",
+          "kind": "TEST",
+          "line": 133,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW("
+        },
+        {
+          "name": "ThreadPoolTest.RejectSubmitAfterShutdown",
+          "kind": "TEST",
+          "line": 146,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW("
+        },
+        {
+          "name": "ThreadPoolTest.SubmitReturnsFutureResult",
+          "kind": "TEST",
+          "line": 162,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.SubmitVoidTask",
+          "kind": "TEST",
+          "line": 181,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.SubmitTaskWithArguments",
+          "kind": "TEST",
+          "line": 207,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.SubmitMoveOnlyArgument",
+          "kind": "TEST",
+          "line": 230,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ(future.get(), 42); / EXPECT_EQ(ptr, nullptr);"
+        },
+        {
+          "name": "ThreadPoolTest.TaskExceptionPropagatesThroughFuture",
+          "kind": "TEST",
+          "line": 256,
+          "checks_static": 1,
+          "check_example": "EXPECT_THROW("
+        },
+        {
+          "name": "ThreadPoolTest.ExceptionDoesNotKillWorkerThread",
+          "kind": "TEST",
+          "line": 275,
+          "checks_static": 2,
+          "check_example": "EXPECT_THROW( / EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.MultipleTasksReturnCorrectResults",
+          "kind": "TEST",
+          "line": 307,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.GracefulShutdownCompletesQueuedTasks",
+          "kind": "TEST",
+          "line": 343,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.ShutdownWaitsForRunningTask",
+          "kind": "TEST",
+          "line": 374,
+          "checks_static": 2,
+          "check_example": "EXPECT_FALSE( / EXPECT_TRUE("
+        },
+        {
+          "name": "ThreadPoolTest.ConcurrentSubmit",
+          "kind": "TEST",
+          "line": 433,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.ConcurrentSubmitAndShutdownIsSafe",
+          "kind": "TEST",
+          "line": 486,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ( / EXPECT_THROW("
+        },
+        {
+          "name": "ThreadPoolTest.ConcurrentShutdownIsSafe",
+          "kind": "TEST",
+          "line": 556,
+          "checks_static": 2,
+          "check_example": "EXPECT_NO_THROW( / EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.DestructorPerformsGracefulShutdown",
+          "kind": "TEST",
+          "line": 607,
+          "checks_static": 1,
+          "check_example": "EXPECT_EQ("
+        },
+        {
+          "name": "ThreadPoolTest.WorkerHooksAreCalled",
+          "kind": "TEST",
+          "line": 642,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ("
+        }
+      ]
+    },
+    {
+      "path": "tests/shared/os/FileDescriptorTest.cpp",
+      "entries": [
+        {
+          "name": "FileDescriptorTest.CopyDisabledMoveEnabled",
+          "kind": "TEST",
+          "line": 31,
+          "checks_static": 0,
+          "check_example": ""
+        },
+        {
+          "name": "FileDescriptorTest.InvalidDescriptor",
+          "kind": "TEST",
+          "line": 45,
+          "checks_static": 2,
+          "check_example": "EXPECT_FALSE(fd.valid()); / EXPECT_EQ(fd.get(), -1);"
+        },
+        {
+          "name": "FileDescriptorTest.DestructorClosesDescriptor",
+          "kind": "TEST",
+          "line": 54,
+          "checks_static": 4,
+          "check_example": "ASSERT_EQ(pipe(pipeFds), 0); / EXPECT_TRUE(fd.valid());"
+        },
+        {
+          "name": "FileDescriptorTest.MoveConstructorTransfersOwnership",
+          "kind": "TEST",
+          "line": 77,
+          "checks_static": 8,
+          "check_example": "ASSERT_EQ(pipe(pipeFds), 0); / ASSERT_TRUE(source.valid());"
+        },
+        {
+          "name": "FileDescriptorTest.MoveAssignmentReleasesOldDescriptor",
+          "kind": "TEST",
+          "line": 110,
+          "checks_static": 11,
+          "check_example": "ASSERT_EQ(pipe(pipeA), 0); / ASSERT_EQ(pipe(pipeB), 0);"
+        },
+        {
+          "name": "FileDescriptorTest.SelfMoveAssignmentIsSafe",
+          "kind": "TEST",
+          "line": 151,
+          "checks_static": 6,
+          "check_example": "ASSERT_EQ(pipe(pipeFds), 0); / ASSERT_TRUE(fd.valid());"
+        }
+      ]
+    },
+    {
+      "path": "tests/shared/protocol/EnvelopeCodecTest.cpp",
+      "entries": [
+        {
+          "name": "EnvelopeCodecTest.OldClientReadsNewLoginAndPreservesUnknownFields",
+          "kind": "TEST",
+          "line": 29,
+          "checks_static": 13,
+          "check_example": "ASSERT_TRUE(wire); / ASSERT_TRUE(older.ParseFromString(*wire));"
+        },
+        {
+          "name": "EnvelopeCodecTest.NewClientReadsOldPingAndPreservesRetiredTag",
+          "kind": "TEST",
+          "line": 58,
+          "checks_static": 11,
+          "check_example": "ASSERT_TRUE(older.SerializeToString(&wire)); / ASSERT_TRUE(decode(wire, newer));"
+        },
+        {
+          "name": "EnvelopeCodecTest.OtherPayloadsUseStableTags",
+          "kind": "TEST",
+          "line": 80,
+          "checks_static": 14,
+          "check_example": "ASSERT_TRUE(wire); / ASSERT_TRUE(oldLogin.ParseFromString(*wire));"
+        },
+        {
+          "name": "EnvelopeCodecTest.FieldNumbersAreStableAndRetiredTagIsReserved",
+          "kind": "TEST",
+          "line": 110,
+          "checks_static": 7,
+          "check_example": "EXPECT_TRUE(descriptor->IsReservedNumber(2)); / EXPECT_TRUE(descriptor->IsReservedName(\"legacy_client_tag\"));"
+        },
+        {
+          "name": "EnvelopeCodecTest.RejectsOversizedPayloadAndLeavesOutputUnchanged",
+          "kind": "TEST",
+          "line": 134,
+          "checks_static": 5,
+          "check_example": "EXPECT_FALSE(EnvelopeCodec::encode(huge)); / ASSERT_TRUE(huge.SerializeToString(&wire));"
+        },
+        {
+          "name": "EnvelopeCodecTest.RejectsDeeplyNestedError",
+          "kind": "TEST",
+          "line": 148,
+          "checks_static": 5,
+          "check_example": "EXPECT_FALSE(EnvelopeCodec::encode(deep)); / ASSERT_TRUE(deep.SerializeToString(&wire));"
+        },
+        {
+          "name": "EnvelopeCodecTest.RejectsMalformedAndPayloadlessMessages",
+          "kind": "TEST",
+          "line": 166,
+          "checks_static": 5,
+          "check_example": "EXPECT_FALSE(decode(\"\", output)); / EXPECT_FALSE(decode(malformed, output));"
+        }
+      ]
+    },
+    {
+      "path": "tests/shared/protocol/PacketCodecTest.cpp",
+      "entries": [
+        {
+          "name": "PacketCodecTest.DecodesBytewiseHeadersAndCoalescedBinaryFrames",
+          "kind": "TEST",
+          "line": 32,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ("
+        },
+        {
+          "name": "PacketCodecTest.ProcessesAggregateLargerThanItsBound",
+          "kind": "TEST",
+          "line": 66,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ(payload, \"payload\");"
+        },
+        {
+          "name": "PacketCodecTest.RejectsConfiguredLengthAsSoonAsPrefixArrives",
+          "kind": "TEST",
+          "line": 92,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ(codec.pendingBytes(), PacketHeader::kPrefixSize);"
+        },
+        {
+          "name": "PacketCodecTest.RejectsMalformedHeaderBeforeBodyRetention",
+          "kind": "TEST",
+          "line": 120,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ( / EXPECT_FALSE(delivered);"
+        },
+        {
+          "name": "PacketCodecTest.CallbackStopIsTerminalAndDoesNotDeliverTail",
+          "kind": "TEST",
+          "line": 144,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ(codec.pendingBytes(), 0);"
+        },
+        {
+          "name": "PacketCodecTest.ThrowingAndReentrantCallbacksInvalidateDecoder",
+          "kind": "TEST",
+          "line": 165,
+          "checks_static": 4,
+          "check_example": "EXPECT_THROW( / EXPECT_EQ("
+        },
+        {
+          "name": "PacketCodecTest.SupportsSharedFourMiBCeilingAndRejectsInvalidEncode",
+          "kind": "TEST",
+          "line": 198,
+          "checks_static": 12,
+          "check_example": "ASSERT_TRUE(output); / EXPECT_EQ("
+        },
+        {
+          "name": "PacketCodecTest.RejectsBadMagicAtFourBytes",
+          "kind": "TEST",
+          "line": 260,
+          "checks_static": 4,
+          "check_example": "EXPECT_EQ(codec.feed(badMagic, receive), FrameDecodeStatus::Invalid); / EXPECT_EQ(codec.pendingBytes(), badMagic.size());"
+        }
+      ]
+    },
+    {
+      "path": "tests/shared/protocol/PacketHeaderCodecTest.cpp",
+      "entries": [
+        {
+          "name": "ProtocolBufferTest.PrependsHeaderWithoutMovingPayload",
+          "kind": "TEST",
+          "line": 24,
+          "checks_static": 8,
+          "check_example": "ASSERT_EQ(buffer.prependableBytes(), PacketHeader::kHeaderSize); / ASSERT_TRUE(buffer.append(\"abc\", 3));"
+        },
+        {
+          "name": "ProtocolBufferTest.CompactsBeforeGrowingAndPreservesDataOnFailure",
+          "kind": "TEST",
+          "line": 44,
+          "checks_static": 6,
+          "check_example": "ASSERT_TRUE(buffer.append(\"abcdefghij\", 10)); / ASSERT_TRUE(buffer.retrieve(8));"
+        },
+        {
+          "name": "ProtocolBufferTest.DirectWriteRequiresWritableSpace",
+          "kind": "TEST",
+          "line": 63,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(buffer.hasWritten(4)); / EXPECT_FALSE(buffer.hasWritten(1));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.EncodesExactBigEndianHeaderAndDecodesIt",
+          "kind": "TEST",
+          "line": 77,
+          "checks_static": 10,
+          "check_example": "ASSERT_TRUE(buffer.append(\"abc\", 3)); / ASSERT_TRUE(PacketHeaderCodec::encode(buffer, header));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.RejectsIncompleteAndInvalidLengthsEarly",
+          "kind": "TEST",
+          "line": 114,
+          "checks_static": 7,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ("
+        },
+        {
+          "name": "PacketHeaderCodecTest.RejectsUnknownTypeAndVersion",
+          "kind": "TEST",
+          "line": 149,
+          "checks_static": 2,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ("
+        },
+        {
+          "name": "PacketHeaderCodecTest.EncodeRejectsMismatchedLengthWithoutMutation",
+          "kind": "TEST",
+          "line": 167,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(buffer.append(\"abc\", 3)); / EXPECT_FALSE(PacketHeaderCodec::encode(buffer, header));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.AcceptsMaximumLegalBodyLength",
+          "kind": "TEST",
+          "line": 191,
+          "checks_static": 3,
+          "check_example": "EXPECT_EQ( / EXPECT_EQ(decoded.m_length, header.m_length);"
+        },
+        {
+          "name": "PacketHeaderCodecTest.ParsesFragmentedAndCoalescedFrames",
+          "kind": "TEST",
+          "line": 207,
+          "checks_static": 8,
+          "check_example": "EXPECT_TRUE(output.append(payload.data(), payload.size())); / EXPECT_TRUE(PacketHeaderCodec::encode(output, header));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.InvalidLengthStopsBeforePayloadAllocation",
+          "kind": "TEST",
+          "line": 260,
+          "checks_static": 4,
+          "check_example": "ASSERT_TRUE(input.append(oversized, sizeof(oversized))); / EXPECT_EQ("
+        },
+        {
+          "name": "PacketHeaderCodecTest.CallbackCanStopAfterOneFrame",
+          "kind": "TEST",
+          "line": 281,
+          "checks_static": 6,
+          "check_example": "ASSERT_TRUE(PacketHeaderCodec::encode(first, header)); / ASSERT_TRUE(input.append(first.peek(), first.readableBytes()));"
+        },
+        {
+          "name": "ProtocolBufferTest.GrowsSafelyAfterPrependingHeader",
+          "kind": "TEST",
+          "line": 306,
+          "checks_static": 5,
+          "check_example": "ASSERT_TRUE(buffer.append(\"abcde\", 5)); / ASSERT_TRUE(buffer.prepend(\"01234567890\", 11));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.OneByteThroughMaximumPayloadBoundaries",
+          "kind": "TEST",
+          "line": 319,
+          "checks_static": 14,
+          "check_example": "ASSERT_TRUE(output.append(payload.data(), payload.size())); / ASSERT_TRUE(PacketHeaderCodec::encode(output, header));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.TenThousandFramesAcrossRandomChunks",
+          "kind": "TEST",
+          "line": 388,
+          "checks_static": 12,
+          "check_example": "ASSERT_TRUE(output.append(payload.data(), payload.size())); / ASSERT_TRUE(PacketHeaderCodec::encode(output, header));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.OversizedAndNegativeLengthBitPatternsAreInvalid",
+          "kind": "TEST",
+          "line": 476,
+          "checks_static": 7,
+          "check_example": "ASSERT_TRUE(input.append(&networkMagic, sizeof(networkMagic))); / ASSERT_TRUE(input.append(&networkLength, sizeof(networkLength)));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.EveryTruncatedPrefixOrPayloadNeedsMoreBytes",
+          "kind": "TEST",
+          "line": 520,
+          "checks_static": 11,
+          "check_example": "ASSERT_TRUE(frame.append(\"abc\", 3)); / ASSERT_TRUE(PacketHeaderCodec::encode(frame, header));"
+        },
+        {
+          "name": "PacketHeaderCodecTest.RejectsBadMagicBeforeLengthAndEncode",
+          "kind": "TEST",
+          "line": 574,
+          "checks_static": 5,
+          "check_example": "EXPECT_EQ(PacketHeaderCodec::decode(wire.data(), 3, decoded), / EXPECT_EQ(PacketHeaderCodec::decode(wire.data(), 4, decoded),"
+        }
+      ]
+    }
+  ]
+}
