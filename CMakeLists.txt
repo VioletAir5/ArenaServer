@@ -26,5 +26,6 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 add_subdirectory(shared)
+add_subdirectory(domain)
 add_subdirectory(services/gateway)
 add_subdirectory(tests)
