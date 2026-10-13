@@ -17,6 +17,7 @@
 #include "net/PreLoginHandshake.h"
 #include "net/WebSocketServer.h"
 
+#include "AuthTestProfile.h"
 #include "ChaosTestProfile.h"
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
@@ -53,6 +54,8 @@ int main(int argc, char** argv)
             handshake = [](ConnectionContext::Ptr)
             { return makePacketEchoHandler(); };
     }
+    if (mode == "auth")
+        handshake = makeAuthTestFactory();
     if (mode == "rpc")
         handshake = makeRpcTestFactory();
     if (mode == "security")

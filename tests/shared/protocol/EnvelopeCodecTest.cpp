@@ -175,3 +175,35 @@ TEST(EnvelopeCodecTest, RejectsMalformedAndPayloadlessMessages) {
     EXPECT_FALSE(decode(trailingJunk, output));
     EXPECT_EQ(output.request_id(), 17);
 }
+TEST(EnvelopeCodecTest, LoginCredentialModeAndSessionBindingRemainWireCompatible) {
+    Old oldRequest;
+    oldRequest.mutable_login_request()->set_account("alice");
+    oldRequest.mutable_login_request()->set_credential("password");
+    std::string bytes;
+    ASSERT_TRUE(oldRequest.SerializeToString(&bytes));
+    New request;
+    ASSERT_TRUE(decode(bytes, request));
+    EXPECT_EQ(request.login_request().credential_kind(), arena::protocol::CREDENTIAL_PASSWORD);
+
+    New response;
+    response.mutable_login_response()->set_accepted(true);
+    response.mutable_login_response()->set_session_token("signed-token");
+    response.mutable_login_response()->set_player_id(42);
+    response.mutable_login_response()->set_session_epoch(123);
+    ASSERT_TRUE(response.SerializeToString(&bytes));
+    Old older;
+    ASSERT_TRUE(older.ParseFromString(bytes));
+    EXPECT_TRUE(older.login_response().accepted());
+    EXPECT_EQ(older.login_response().session_token(), "signed-token");
+    ASSERT_TRUE(older.SerializeToString(&bytes));
+    New forwarded;
+    ASSERT_TRUE(decode(bytes, forwarded));
+    EXPECT_EQ(forwarded.login_response().player_id(), 42u);
+    EXPECT_EQ(forwarded.login_response().session_epoch(), 123u);
+    EXPECT_EQ(arena::protocol::LoginRequest::descriptor()
+        ->FindFieldByName("credential_kind")->number(), 4);
+    EXPECT_EQ(arena::protocol::LoginResponse::descriptor()
+        ->FindFieldByName("player_id")->number(), 4);
+    EXPECT_EQ(arena::protocol::LoginResponse::descriptor()
+        ->FindFieldByName("session_epoch")->number(), 5);
+}

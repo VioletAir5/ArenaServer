@@ -47,16 +47,25 @@ message Envelope {
   }
 }
 
+// Explicit credential mode; zero preserves the old password request.
+enum CredentialKind {
+  CREDENTIAL_PASSWORD = 0;
+  CREDENTIAL_JWT = 1;
+}
+
 message LoginRequest {
   string account = 1;
   bytes credential = 2;
   string client_version = 3;
+  CredentialKind credential_kind = 4;
 }
 
 message LoginResponse {
   bool accepted = 1;
   string session_token = 2;
   Error error = 3;
+  uint64 player_id = 4;
+  uint64 session_epoch = 5;
 }
 
 message Ping {

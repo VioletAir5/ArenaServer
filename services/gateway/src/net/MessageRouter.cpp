@@ -162,7 +162,7 @@ struct MessageRouter::State : std::enable_shared_from_this<State>
     }
     void respond(const Pending& entry, MessageReply result)
     {
-        if (!connection->connected())
+        if (!connection->connected() || context->session->superseded())
         {
             log("request_end",
                 *entry.request,
@@ -294,6 +294,11 @@ PacketHandleResult MessageRouter::handle(PacketContext& packet)
             "message router belongs to one connection"
         );
     m_state->connection = &packet.connection;
+    if (m_state->context->session->superseded())
+    {
+        packet.rejectionReason = RejectionReason::Unauthenticated;
+        return PacketHandleResult::Reject;
+    }
     const auto& envelope = *packet.envelope;
     auto request = std::make_shared<const RequestMessage>(
         RequestMessage{

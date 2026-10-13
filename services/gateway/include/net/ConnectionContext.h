@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <thread>
 
@@ -13,6 +14,7 @@
 
 namespace service::gateway
 {
+class SessionLease;
 // Authentication state belongs to the connection owner. Shared
 // ownership extends lifetime; it does not permit access from a
 // different thread. This passive object owns no socket, timer, or
@@ -30,6 +32,7 @@ public:
     };
 
     ConnectionSession();
+    ~ConnectionSession();
     ConnectionSession(const ConnectionSession&) = delete;
     ConnectionSession& operator=(const ConnectionSession&) = delete;
 
@@ -39,14 +42,23 @@ public:
     // authentication.
     bool markAuthenticated();
     bool expireLogin();
+    void setCloseRequest(std::function<void()>);
+    std::function<void()> closeRequest() const;
+    bool bind(std::shared_ptr<SessionLease>);
+    bool superseded() const;
 
 private:
+    friend class ConnectionRuntime;
+    void disconnect() noexcept; // Runtime lifecycle only; never a foreign control API.
     void requireOwner() const;
 
     /// Thread that owns mutable connection state.
     const std::thread::id m_owner;
     /// Authentication state mutated only by the owner thread.
     LoginState m_loginState{LoginState::Pending};
+    std::shared_ptr<SessionLease> m_binding;
+    struct CloseEndpoint;
+    std::shared_ptr<CloseEndpoint> m_closeEndpoint;
 };
 
 // Immutable admission metadata, created on the connection owner using

@@ -89,6 +89,15 @@ void ConnectionRuntime::start()
             "runtime start requires shared ownership"
         );
     auto keep = shared_from_this();
+    m_context->session->setCloseRequest(
+        [weak = weak_from_this(), defer = m_scheduler.defer]
+        {
+            defer([weak]
+            {
+                if (auto self = weak.lock())
+                    self->requestClose();
+            });
+        });
     m_started = true;
     m_features.m_sealed = true;
     ++m_eventDepth;
@@ -179,6 +188,7 @@ void ConnectionRuntime::notifyClosed() noexcept
     if (m_closedNotified)
         return;
     m_closedNotified = true;
+    m_context->session->disconnect();
     for (auto& feature : m_features.m_features)
         feature->onClosed();
 }
@@ -241,6 +251,7 @@ void ConnectionRuntime::requestClose()
     requireOwner();
     if (m_closing.exchange(true))
         return;
+    m_context->session->disconnect();
     auto weak = weak_from_this();
     try
     {

@@ -8,8 +8,9 @@
 namespace service::gateway
 {
 class EventLoop;
-// Schedulers and cancellation are owner-only. Loop/context must
-// outlive runtime.
+// Timers and cancellation are owner-only. defer is thread-safe and always
+// queues; callers must stop foreign posts before releasing the loop/context.
+// ConnectionSession's close endpoint supplies that lifetime barrier.
 ConnectionScheduler connectionScheduler(EventLoop&);
 /** @brief Creates a scheduler for the supplied executor. */
 ConnectionScheduler connectionScheduler(boost::asio::any_io_executor);

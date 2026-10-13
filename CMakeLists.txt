@@ -27,5 +27,6 @@ enable_testing()
 
 add_subdirectory(shared)
 add_subdirectory(domain)
+add_subdirectory(services/auth)
 add_subdirectory(services/gateway)
 add_subdirectory(tests)

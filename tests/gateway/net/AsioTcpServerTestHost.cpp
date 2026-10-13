@@ -10,6 +10,7 @@
 #include "net/AsioTcpServer.h"
 #include "net/PacketEcho.h"
 
+#include "AuthTestProfile.h"
 #include "ChaosTestProfile.h"
 #include "ConnectionContextTestHandler.h"
 #include "ConnectionFeatureTestProfile.h"
@@ -41,6 +42,10 @@ int main(int argc, char** argv)
                     return service::gateway::
                         makePreLoginHandshakeHandler(std::move(ctx));
                 };
+        }
+        else if (std::string_view(argv[4]) == "auth")
+        {
+            handlerFactory = service::gateway::makeAuthTestFactory();
         }
         else if (std::string_view(argv[4]) == "rpc")
         {
