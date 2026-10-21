@@ -36,10 +36,12 @@ protected:
 
     void SetUp() override
     {
-        peer.connect(Tcp::endpoint(
-            boost::asio::ip::address_v4::loopback(),
-            listener.local_endpoint().port()
-        ));
+        peer.connect(
+            Tcp::endpoint(
+                boost::asio::ip::address_v4::loopback(),
+                listener.local_endpoint().port()
+            )
+        );
         Tcp::socket accepted(context);
         listener.accept(accepted);
         connection = std::make_shared<AsioConnect>(
@@ -353,7 +355,8 @@ TEST_F(AsioConnectTest, ConcurrentSendsKeepOneOrderedWriteStream)
                         33 + producer * recordsPerProducer + record
                     );
                     const std::string payload(recordSize, value);
-                    connection->send(std::as_bytes(std::span(payload))
+                    connection->send(
+                        std::as_bytes(std::span(payload))
                     );
                 }
             }
@@ -525,8 +528,8 @@ TEST_F(AsioConnectTest, CancelledIoDoesNotRetainConnection)
     connection->close();
     connection.reset();
     EXPECT_TRUE(weak.expired());
-    pump(
-    ); // Cancellation handlers still require their captured buffers.
+    pump(); // Cancellation handlers still require their captured
+            // buffers.
 }
 
 TEST_F(

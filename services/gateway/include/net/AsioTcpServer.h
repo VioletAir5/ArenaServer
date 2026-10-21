@@ -40,8 +40,9 @@ public:
     AsioTcpServer(const AsioTcpServer&) = delete;
     AsioTcpServer& operator=(const AsioTcpServer&) = delete;
 
-    void stop(std::chrono::milliseconds grace = kDefaultStopGrace)
-        override;
+    void stop(
+        std::chrono::milliseconds grace = kDefaultStopGrace
+    ) override;
     /** @brief Reports whether shutdown has completed. */
     bool stopped() const noexcept override;
     /** @brief Returns the number of active connections. */

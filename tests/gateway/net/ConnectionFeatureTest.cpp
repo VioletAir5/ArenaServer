@@ -70,7 +70,8 @@ struct ConnectionFeatureTest : testing::Test
             ConnectionScheduler{
                 [&](auto action)
                 { posted.push_back(std::move(action)); },
-                [](auto, auto) { return ConnectionTimer{}; }},
+                [](auto, auto) { return ConnectionTimer{}; }
+            },
             std::move(handler)
         );
     }
@@ -195,8 +196,9 @@ TEST_F(ConnectionFeatureTest, OnlyCompleteFramesConsumeTokens)
     const auto bytes = frame("partial");
     for (std::size_t i = 0; i < bytes.size() - 1; ++i)
     {
-        runtime->received(std::as_bytes(std::span(bytes.data() + i, 1)
-        ));
+        runtime->received(
+            std::as_bytes(std::span(bytes.data() + i, 1))
+        );
         EXPECT_TRUE(transport->sent.empty());
         EXPECT_TRUE(runtime->connected());
     }
@@ -250,7 +252,11 @@ TEST_F(
 )
 {
     auto runtime = make(makePreLoginHandshakeHandler(
-        std::make_shared<ConnectionContext>(1, InetAddress("127.0.0.1", 1), now)
+        std::make_shared<ConnectionContext>(
+            1,
+            InetAddress("127.0.0.1", 1),
+            now
+        )
     ));
     runtime->features().add<PacketWhitelistFeature>(
         std::vector<std::uint16_t>{2}

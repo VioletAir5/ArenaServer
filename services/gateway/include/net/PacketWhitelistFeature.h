@@ -12,7 +12,8 @@ namespace service::gateway
 class PacketWhitelistFeature final : public IConnectionFeature
 {
 public:
-    explicit PacketWhitelistFeature(std::vector<std::uint16_t> allowed
+    explicit PacketWhitelistFeature(
+        std::vector<std::uint16_t> allowed
     );
     FeatureResult onPacket(IConnectionControl&, PacketView) override;
 

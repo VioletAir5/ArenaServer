@@ -484,11 +484,17 @@ TEST(
           std::uint32_t{0xffffffffU}})
     {
         SCOPED_TRACE(bodyLength);
-        const std::uint32_t networkMagic = ::htonl(PacketHeader::kMagic);
+        const std::uint32_t networkMagic = ::htonl(
+            PacketHeader::kMagic
+        );
         const std::uint32_t networkLength = ::htonl(bodyLength);
         Buffer input;
-        ASSERT_TRUE(input.append(&networkMagic, sizeof(networkMagic)));
-        ASSERT_TRUE(input.append(&networkLength, sizeof(networkLength)));
+        ASSERT_TRUE(
+            input.append(&networkMagic, sizeof(networkMagic))
+        );
+        ASSERT_TRUE(
+            input.append(&networkLength, sizeof(networkLength))
+        );
         PacketHeader output;
         output.m_requestId = 77;
         EXPECT_EQ(
@@ -573,14 +579,18 @@ TEST(
 
 TEST(PacketHeaderCodecTest, RejectsBadMagicBeforeLengthAndEncode)
 {
-    const std::array<char, PacketHeader::kHeaderSize> wire{
-        0, 0, 0, 0, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1};
+    const std::array<char, PacketHeader::kHeaderSize>
+        wire{0, 0, 0, 0, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1};
     PacketHeader decoded;
     decoded.m_requestId = 42;
-    EXPECT_EQ(PacketHeaderCodec::decode(wire.data(), 3, decoded),
-              HeaderDecodeStatus::Incomplete);
-    EXPECT_EQ(PacketHeaderCodec::decode(wire.data(), 4, decoded),
-              HeaderDecodeStatus::Invalid);
+    EXPECT_EQ(
+        PacketHeaderCodec::decode(wire.data(), 3, decoded),
+        HeaderDecodeStatus::Incomplete
+    );
+    EXPECT_EQ(
+        PacketHeaderCodec::decode(wire.data(), 4, decoded),
+        HeaderDecodeStatus::Invalid
+    );
     EXPECT_EQ(decoded.m_requestId, 42U);
 
     Buffer buffer;

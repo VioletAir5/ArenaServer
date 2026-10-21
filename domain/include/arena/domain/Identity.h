@@ -6,16 +6,21 @@
 namespace arena::domain
 {
 // Stable, nonzero business identity. Tags prevent mixing entity IDs.
-template<typename Tag>
-class Identity final
+template <typename Tag> class Identity final
 {
 public:
-    explicit Identity(std::uint64_t value) : m_value(value)
+    explicit Identity(std::uint64_t value)
+        : m_value(value)
     {
         if (!value)
-            throw std::invalid_argument("domain identity must be nonzero");
+            throw std::invalid_argument(
+                "domain identity must be nonzero"
+            );
     }
-    std::uint64_t value() const noexcept { return m_value; }
+    std::uint64_t value() const noexcept
+    {
+        return m_value;
+    }
     bool operator==(const Identity&) const = default;
 
 private:

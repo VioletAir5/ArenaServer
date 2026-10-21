@@ -31,10 +31,13 @@ int main(int argc, char** argv)
         {
             handlerFactory = makeContextTestFactory();
         }
-        else if (std::string_view(argv[4]) == "chaos" || std::string_view(argv[4]) == "chaos_packet")
+        else if (
+            std::string_view(argv[4]) == "chaos" ||
+            std::string_view(argv[4]) == "chaos_packet"
+        )
         {
-            featureFactory = service::gateway::makeChaosTestFeatures(
-            );
+            featureFactory = service::gateway::
+                makeChaosTestFeatures();
             if (std::string_view(argv[4]) == "chaos")
                 handlerFactory =
                     [](service::gateway::ConnectionContext::Ptr ctx)
@@ -60,8 +63,8 @@ int main(int argc, char** argv)
         }
         else if (std::string_view(argv[4]) == "features")
         {
-            featureFactory = service::gateway::makeFeatureTestProfile(
-            );
+            featureFactory = service::gateway::
+                makeFeatureTestProfile();
         }
         else if (std::string_view(argv[4]) != "packet")
         {

@@ -66,14 +66,17 @@ public:
     PacketHandleResult handle(PacketContext& context) override;
 };
 
-// Place after EnvelopeDecodeHandler and before login/business routing.
-// Pending sessions permit only request-type LoginRequest and Ping. Only the
-// actual authentication handler may mark the session authenticated.
+// Place after EnvelopeDecodeHandler and before login/business
+// routing. Pending sessions permit only request-type LoginRequest and
+// Ping. Only the actual authentication handler may mark the session
+// authenticated.
 /** @brief Represents authentication gate handler. */
 class AuthenticationGateHandler final : public PacketHandler
 {
 public:
-    explicit AuthenticationGateHandler(std::shared_ptr<ConnectionSession>);
+    explicit AuthenticationGateHandler(
+        std::shared_ptr<ConnectionSession>
+    );
     PacketHandleResult handle(PacketContext&) override;
 
 private:
@@ -83,7 +86,8 @@ private:
 
 // Owns the chain head. Framing stays in PacketCodec; nodes see
 // complete frames.
-/** @brief Runs packet handlers in order until one stops processing. */
+/** @brief Runs packet handlers in order until one stops processing.
+ */
 class PacketPipeline
 {
 public:
@@ -99,8 +103,7 @@ private:
 // Creates a per-connection decoder and attaches the chain to complete
 // frames. Reject (including an unhandled frame) and callback
 // exceptions close it.
-ConnectionMessageCallback
-makePacketHandler(
+ConnectionMessageCallback makePacketHandler(
     PacketPipeline pipeline,
     std::size_t maxBodySize,
     RejectionCounters::Ptr counters = defaultRejectionCounters()

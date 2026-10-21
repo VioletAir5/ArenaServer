@@ -2,11 +2,12 @@
  * @brief Carries immutable connection identity and session context.
  */
 #include "net/ConnectionContext.h"
-#include "net/AccountSessions.h"
 
-#include <stdexcept>
 #include <mutex>
+#include <stdexcept>
 #include <utility>
+
+#include "net/AccountSessions.h"
 
 namespace service::gateway
 {
@@ -70,7 +71,9 @@ void ConnectionSession::setCloseRequest(std::function<void()> close)
     requireOwner();
     std::lock_guard lock(m_closeEndpoint->mutex);
     if (!close || m_closeEndpoint->post)
-        throw std::logic_error("session closer must be installed once");
+        throw std::logic_error(
+            "session closer must be installed once"
+        );
     m_closeEndpoint->post = std::move(close);
 }
 
@@ -79,12 +82,15 @@ std::function<void()> ConnectionSession::closeRequest() const
     requireOwner();
     std::lock_guard lock(m_closeEndpoint->mutex);
     if (!m_closeEndpoint->post)
-        throw std::logic_error("authenticated session requires owner close scheduler");
+        throw std::logic_error(
+            "authenticated session requires owner close scheduler"
+        );
     return [endpoint = m_closeEndpoint]
     {
         std::lock_guard gate(endpoint->mutex);
         if (endpoint->post)
-            endpoint->post(); // defer must enqueue, never invoke the action inline.
+            endpoint->post(); // defer must enqueue, never invoke the
+                              // action inline.
     };
 }
 
@@ -113,7 +119,8 @@ void ConnectionSession::disconnect() noexcept
 {
     {
         std::lock_guard lock(m_closeEndpoint->mutex);
-        m_closeEndpoint->post = {}; // Wait for concurrent posts before owner context can die.
+        m_closeEndpoint->post = {}; // Wait for concurrent posts
+                                    // before owner context can die.
     }
     if (m_binding)
         m_binding->release();
@@ -135,7 +142,8 @@ ConnectionContext::ConnectionContext(
     if (id == 0 || !rejections)
     {
         throw std::invalid_argument(
-            "connection context requires nonzero id and rejection counters"
+            "connection context requires nonzero id and rejection "
+            "counters"
         );
     }
 }

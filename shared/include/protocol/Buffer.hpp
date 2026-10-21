@@ -12,7 +12,8 @@ namespace service::protocol
 {
 // A bounded byte buffer with reserved space for prepending one wire
 // header.
-/** @brief Stores readable bytes and grows within its configured limit. */
+/** @brief Stores readable bytes and grows within its configured
+ * limit. */
 class Buffer
 {
 public:

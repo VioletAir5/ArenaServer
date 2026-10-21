@@ -1,7 +1,5 @@
 #include "net/IConnection.h"
 
-#include <gtest/gtest.h>
-
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -11,6 +9,8 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+
+#include <gtest/gtest.h>
 
 #include "net/EventLoop.h"
 #include "net/Socket.h"
@@ -30,10 +30,18 @@ struct SocketPair
     SocketPair()
     {
         int descriptors[2];
-        if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
-                         0, descriptors) != 0)
+        if (::socketpair(
+                AF_UNIX,
+                SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                0,
+                descriptors
+            ) != 0)
         {
-            throw std::system_error(errno, std::generic_category(), "socketpair");
+            throw std::system_error(
+                errno,
+                std::generic_category(),
+                "socketpair"
+            );
         }
         connection = FileDescriptor(descriptors[0]);
         peer = FileDescriptor(descriptors[1]);
@@ -47,12 +55,16 @@ class IConnectionTest : public testing::Test
 {
 protected:
     IConnectionTest()
-        : concrete(std::make_shared<TcpConnection>(
-              &loop, Socket(std::move(pair.connection))))
+        : concrete(
+              std::make_shared<TcpConnection>(
+                  &loop, Socket(std::move(pair.connection))
+              )
+          )
         , connection(concrete)
     {
         concrete->channel().tie(concrete);
-        concrete->setCloseCallback([this](TcpConnection*) { ++closes; });
+        concrete->setCloseCallback([this](TcpConnection*)
+                                   { ++closes; });
     }
 
     ~IConnectionTest() override
@@ -90,8 +102,9 @@ TEST_F(IConnectionTest, ReportsClosedStateAndClosesOnlyOnce)
 TEST_F(IConnectionTest, PauseAndResumeDeliverAlreadyAvailableBytes)
 {
     std::string received;
-    concrete->setMessageCallback(
-        [&](TcpConnection&, std::string_view bytes) { received.append(bytes); });
+    concrete->setMessageCallback([&](TcpConnection&,
+                                     std::string_view bytes)
+                                 { received.append(bytes); });
 
     connection->pauseRead();
     connection->pauseRead();
@@ -107,11 +120,14 @@ TEST_F(IConnectionTest, PauseAndResumeDeliverAlreadyAvailableBytes)
     EXPECT_EQ(received, "held");
 }
 
-TEST_F(IConnectionTest, HalfClosedConnectionKeepsReceivingUntilPeerFin)
+TEST_F(
+    IConnectionTest, HalfClosedConnectionKeepsReceivingUntilPeerFin
+)
 {
     std::string received;
-    concrete->setMessageCallback(
-        [&](TcpConnection&, std::string_view bytes) { received.append(bytes); });
+    concrete->setMessageCallback([&](TcpConnection&,
+                                     std::string_view bytes)
+                                 { received.append(bytes); });
     connection->send(std::as_bytes(std::span("reply", 5)));
     connection->shutdown();
     EXPECT_TRUE(connection->connected());
@@ -135,13 +151,26 @@ TEST_F(IConnectionTest, HalfClosedConnectionKeepsReceivingUntilPeerFin)
 TEST_F(IConnectionTest, QueuedSendOwnsBytesUntilDrainedBeforeFin)
 {
     int sendBufferSize = 4096;
-    ASSERT_EQ(::setsockopt(concrete->fd(), SOL_SOCKET, SO_SNDBUF,
-                           &sendBufferSize, sizeof(sendBufferSize)), 0);
+    ASSERT_EQ(
+        ::setsockopt(
+            concrete->fd(),
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &sendBufferSize,
+            sizeof(sendBufferSize)
+        ),
+        0
+    );
     std::string payload(128 * 1024, 'x');
     const std::string expected = payload;
-    connection->send(std::as_bytes(std::span(payload.data(), payload.size())));
+    connection->send(
+        std::as_bytes(std::span(payload.data(), payload.size()))
+    );
     ASSERT_GT(connection->pendingBytes(), 0U);
-    EXPECT_EQ(connection->pendingBytes(), concrete->pendingOutputBytes());
+    EXPECT_EQ(
+        connection->pendingBytes(),
+        concrete->pendingOutputBytes()
+    );
     payload.assign(payload.size(), 'y');
     connection->shutdown();
     EXPECT_TRUE(connection->connected());
@@ -153,7 +182,11 @@ TEST_F(IConnectionTest, QueuedSendOwnsBytesUntilDrainedBeforeFin)
     {
         while (true)
         {
-            const ssize_t n = ::read(pair.peer.get(), buffer, sizeof(buffer));
+            const ssize_t n = ::read(
+                pair.peer.get(),
+                buffer,
+                sizeof(buffer)
+            );
             if (n > 0)
             {
                 received.append(buffer, static_cast<std::size_t>(n));
@@ -188,7 +221,9 @@ TEST_F(IConnectionTest, IdentityIsStableAndNotReusedAfterDestruction)
     const auto firstId = connection->id();
     SocketPair secondPair;
     auto second = std::make_unique<TcpConnection>(
-        &loop, Socket(std::move(secondPair.connection)));
+        &loop,
+        Socket(std::move(secondPair.connection))
+    );
     const auto secondId = second->id();
     EXPECT_NE(firstId, secondId);
     loop.removeChannel(&second->channel());
@@ -196,7 +231,9 @@ TEST_F(IConnectionTest, IdentityIsStableAndNotReusedAfterDestruction)
 
     SocketPair thirdPair;
     second = std::make_unique<TcpConnection>(
-        &loop, Socket(std::move(thirdPair.connection)));
+        &loop,
+        Socket(std::move(thirdPair.connection))
+    );
     EXPECT_NE(second->id(), firstId);
     EXPECT_NE(second->id(), secondId);
     EXPECT_EQ(connection->id(), firstId);
@@ -208,7 +245,9 @@ TEST(IConnectionOwnershipTest, VirtualDestructionOnOwnerClosesSocket)
     SocketPair pair;
     EventLoop loop;
     auto concrete = std::make_unique<TcpConnection>(
-        &loop, Socket(std::move(pair.connection)));
+        &loop,
+        Socket(std::move(pair.connection))
+    );
     loop.removeChannel(&concrete->channel());
     std::unique_ptr<IConnection> connection(std::move(concrete));
     connection.reset();

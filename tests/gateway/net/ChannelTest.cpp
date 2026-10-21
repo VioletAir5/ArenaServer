@@ -116,11 +116,9 @@ TEST(ChannelTest, FailedUpdateRestoresInterestMask)
     EXPECT_FALSE(channel.isWriting());
 }
 
-
 TEST(ChannelTest, TiedOwnerSurvivesAllCallbacksInOneEvent)
 {
-    std::shared_ptr<Channel> channel =
-        std::make_shared<Channel>(42);
+    std::shared_ptr<Channel> channel = std::make_shared<Channel>(42);
     std::weak_ptr<Channel> weak = channel;
     channel->tie(channel);
 

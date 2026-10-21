@@ -12,14 +12,16 @@
 
 namespace service::protocol
 {
-/** @brief Classifies a fixed header as incomplete, invalid, or complete. */
+/** @brief Classifies a fixed header as incomplete, invalid, or
+ * complete. */
 enum class HeaderDecodeStatus
 {
     Incomplete,
     Invalid,
     Complete
 };
-/** @brief Describes incremental frame progress or a terminal result. */
+/** @brief Describes incremental frame progress or a terminal result.
+ */
 enum class FrameDecodeStatus
 {
     NeedMore,

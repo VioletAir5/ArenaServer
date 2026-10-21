@@ -1,5 +1,3 @@
-#include "net/ITcpServer.h"
-
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -20,6 +18,7 @@
 
 #include "net/EventLoop.h"
 #include "net/EventLoopThread.h"
+#include "net/ITcpServer.h"
 #include "net/InetAddress.h"
 #include "net/Socket.h"
 #include "net/TcpConnection.h"
@@ -101,7 +100,8 @@ TEST(TcpServerWorkerTest, StopsAndJoinsIdlePoolBeforeReportingStopped)
     EventLoop base;
     const auto baseline = openFds();
     {
-        TcpServer implementation(&base, InetAddress(0, true), 16, 60s, 4);
+        TcpServer
+            implementation(&base, InetAddress(0, true), 16, 60s, 4);
         ITcpServer& server = implementation;
         EXPECT_EQ(server.workerCount(), 4u);
         EXPECT_EQ(server.maxConnections(), 16u);
@@ -131,13 +131,8 @@ TEST(
         EventLoop base;
         std::vector<Socket> peers;
         const auto address = unusedAddress();
-        std::unique_ptr<ITcpServer> server = std::make_unique<TcpServer>(
-            &base,
-            address,
-            128,
-            60s,
-            workers
-        );
+        std::unique_ptr<ITcpServer> server = std::make_unique<
+            TcpServer>(&base, address, 128, 60s, workers);
         for (int i = 0; i < 64; ++i)
         {
             peers.push_back(connectTo(address));
@@ -292,8 +287,10 @@ TEST(
                 Socket::createTcpNonBlocking()
             );
             owner.removeChannel(&connection->channel());
-            std::jthread foreign([connection = std::move(connection)](
-                                 ) mutable { connection.reset(); });
+            std::jthread foreign(
+                [connection = std::move(connection)]() mutable
+                { connection.reset(); }
+            );
             foreign.join();
             ::_exit(3);
         },
@@ -306,7 +303,10 @@ TEST(ITcpServerTest, NegativeGraceDoesNotChangeRunningState)
 {
     EventLoop base;
     std::unique_ptr<ITcpServer> server = std::make_unique<TcpServer>(
-        &base, InetAddress(0, true), 4);
+        &base,
+        InetAddress(0, true),
+        4
+    );
 
     EXPECT_EQ(server->workerCount(), 0u);
     EXPECT_THROW(server->stop(-1ms), std::invalid_argument);

@@ -8,20 +8,23 @@
 
 namespace service::protocol
 {
-// Wire format: magic (u32), body length (u32), type (u16), request id (u32),
-// version (u8), then payload. All multibyte integers are unsigned and
-// big-endian. The length counts the seven metadata bytes after the
-// length field plus payload; magic is outside the length count.
+// Wire format: magic (u32), body length (u32), type (u16), request id
+// (u32), version (u8), then payload. All multibyte integers are
+// unsigned and big-endian. The length counts the seven metadata bytes
+// after the length field plus payload; magic is outside the length
+// count.
 /** @brief Defines the fixed wire header and protocol limits. */
 struct PacketHeader
 {
     static constexpr std::size_t kLengthSize = sizeof(std::uint32_t);
     static constexpr std::size_t kTypeSize = sizeof(std::uint16_t);
-    static constexpr std::size_t kRequestIdSize = sizeof(std::uint32_t
+    static constexpr std::size_t kRequestIdSize = sizeof(
+        std::uint32_t
     );
     static constexpr std::size_t kVersionSize = sizeof(std::uint8_t);
     static constexpr std::size_t kMagicSize = sizeof(std::uint32_t);
-    static constexpr std::size_t kPrefixSize = kMagicSize + kLengthSize;
+    static constexpr std::size_t kPrefixSize = kMagicSize +
+                                               kLengthSize;
     static constexpr std::size_t kMetadataSize = kTypeSize +
                                                  kRequestIdSize +
                                                  kVersionSize;

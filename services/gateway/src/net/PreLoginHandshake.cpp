@@ -40,9 +40,11 @@ PacketHandleResult PingHandler::handle(PacketContext& context)
     {
         return PacketHandleResult::Reject;
     }
-    context.connection.send(std::as_bytes(
-        std::span(frame->peek(), frame->readableBytes())
-    ));
+    context.connection.send(
+        std::as_bytes(
+            std::span(frame->peek(), frame->readableBytes())
+        )
+    );
     return context.connection.connected()
                ? PacketHandleResult::Handled
                : PacketHandleResult::Reject;
@@ -67,7 +69,8 @@ std::shared_ptr<const MessageRegistry> defaultMessageRegistry()
         );
         routes->registerHandler(
             arena::protocol::MSG_LOGIN_REQUEST,
-            [](auto, auto complete) {
+            [](auto, auto complete)
+            {
                 complete(
                     std::unexpected(arena::protocol::ERR_UNAVAILABLE)
                 );
@@ -75,8 +78,9 @@ std::shared_ptr<const MessageRegistry> defaultMessageRegistry()
             MessageRouteOptions{false}
         );
         routes->seal();
-        return std::shared_ptr<const MessageRegistry>(std::move(routes
-        ));
+        return std::shared_ptr<const MessageRegistry>(
+            std::move(routes)
+        );
     }();
     return registry;
 }
@@ -91,10 +95,12 @@ ConnectionMessageCallback makePreLoginHandshakeHandler(
             "handshake requires connection context"
         );
     auto decoder = std::make_unique<EnvelopeDecodeHandler>();
-    decoder->setNext(std::make_unique<MessageRouter>(
-        context,
-        registry ? std::move(registry) : defaultMessageRegistry()
-    ));
+    decoder->setNext(
+        std::make_unique<MessageRouter>(
+            context,
+            registry ? std::move(registry) : defaultMessageRegistry()
+        )
+    );
     return makePacketHandler(
         PacketPipeline(std::move(decoder)),
         kMaxPacketSize,

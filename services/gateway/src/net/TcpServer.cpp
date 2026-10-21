@@ -307,25 +307,27 @@ TcpServer::TcpServer(
     const std::weak_ptr<void> guard = m_callbackGuard;
     for (auto* owner : m_threadPool.getAllLoops())
     {
-        m_workers.push_back(std::make_shared<Worker>(
-            owner,
-            idleTimeout,
-            handlerFactory,
-            featureFactory,
-            [base = m_loop, this, guard](std::uint64_t id)
-            {
-                // Never dereference TcpServer on a worker thread.
-                base->queueInLoop(
-                    [this, guard, id]()
-                    {
-                        if (guard.lock())
+        m_workers.push_back(
+            std::make_shared<Worker>(
+                owner,
+                idleTimeout,
+                handlerFactory,
+                featureFactory,
+                [base = m_loop, this, guard](std::uint64_t id)
+                {
+                    // Never dereference TcpServer on a worker thread.
+                    base->queueInLoop(
+                        [this, guard, id]()
                         {
-                            handleConnectionRemoved(id);
+                            if (guard.lock())
+                            {
+                                handleConnectionRemoved(id);
+                            }
                         }
-                    }
-                );
-            }
-        ));
+                    );
+                }
+            )
+        );
     }
     m_acceptor.setNewConnectionCallback(
         [this](Socket&& socket, const InetAddress& peer)
@@ -384,7 +386,8 @@ void TcpServer::cleanupWorkers()
                     }
                     catch (...)
                     {
-                        signal->set_exception(std::current_exception()
+                        signal->set_exception(
+                            std::current_exception()
                         );
                     }
                 }

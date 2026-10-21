@@ -15,9 +15,9 @@
 #include "net/EpollPoller.h"
 #include "os/FileDescriptor.h"
 
+using service::FileDescriptor;
 using service::gateway::Channel;
 using service::gateway::EpollPoller;
-using service::FileDescriptor;
 
 namespace
 {
@@ -92,7 +92,8 @@ TEST(EpollPollerPerformanceTest, ReadyEventThroughput)
     )
                              .count();
 
-    const auto totalEvents = static_cast<std::uint64_t>(channelCount
+    const auto totalEvents = static_cast<std::uint64_t>(
+                                 channelCount
                              ) *
                              rounds;
     std::cout << "\n[EpollPoller ready-event throughput]\n"

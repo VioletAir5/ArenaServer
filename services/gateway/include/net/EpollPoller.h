@@ -11,7 +11,8 @@
 #include "os/FileDescriptor.h"
 namespace service::gateway
 {
-/** @brief Registers channels and collects ready Linux epoll events. */
+/** @brief Registers channels and collects ready Linux epoll events.
+ */
 class EpollPoller
 {
 private:

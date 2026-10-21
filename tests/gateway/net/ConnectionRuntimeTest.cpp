@@ -71,7 +71,8 @@ struct ConnectionRuntimeTest : ::testing::Test
                         }
                     );
                     return ConnectionTimer([live] { *live = false; });
-                }},
+                }
+            },
             [](auto&, auto) {}
         );
     void drain()

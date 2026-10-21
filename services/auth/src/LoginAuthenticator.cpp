@@ -7,17 +7,24 @@ namespace service::auth
 {
 LoginAuthenticator::LoginAuthenticator(
     std::shared_ptr<const PasswordAccounts> accounts,
-    std::shared_ptr<const PasswordDigest> digest)
-    : m_accounts(std::move(accounts)), m_digest(std::move(digest))
+    std::shared_ptr<const PasswordDigest> digest
+)
+    : m_accounts(std::move(accounts))
+    , m_digest(std::move(digest))
 {
     if (!m_accounts || !m_digest)
-        throw std::invalid_argument("password authentication requires adapters");
+        throw std::invalid_argument(
+            "password authentication requires adapters"
+        );
 }
 
 std::expected<arena::domain::PlayerId, AuthError>
-LoginAuthenticator::authenticate(std::string_view account, std::string_view password) const
+LoginAuthenticator::authenticate(
+    std::string_view account, std::string_view password
+) const
 {
-    if (account.empty() || account.size() > 128 || password.empty() || password.size() > 1024)
+    if (account.empty() || account.size() > 128 || password.empty() ||
+        password.size() > 1024)
         return std::unexpected(AuthError::InvalidCredentials);
     auto record = m_accounts->find(account);
     if (!record)

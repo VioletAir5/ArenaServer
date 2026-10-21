@@ -1,5 +1,6 @@
 /** @file
- * @brief Selects the gateway backend and starts its TCP or WebSocket listeners.
+ * @brief Selects the gateway backend and starts its TCP or WebSocket
+ * listeners.
  */
 #include <chrono>
 #include <csignal>
@@ -19,8 +20,8 @@
 #include "net/BackpressureFeature.h"
 #include "net/EventLoop.h"
 #include "net/ITcpServer.h"
-#include "net/LoginHandler.h"
 #include "net/InetAddress.h"
+#include "net/LoginHandler.h"
 #include "net/PacketEcho.h"
 #include "net/PacketWhitelistFeature.h"
 #include "net/PreLoginHandshake.h"
@@ -57,15 +58,22 @@ int main(int argc, char** argv)
         {
             try
             {
-                auto passwords = std::make_shared<service::auth::LoginAuthenticator>(
-                    std::make_shared<service::auth::UnavailablePasswordAccounts>(),
-                    std::make_shared<service::auth::UnavailablePasswordDigest>());
+                auto passwords = std::make_shared<
+                    service::auth::LoginAuthenticator>(
+                    std::make_shared<
+                        service::auth::UnavailablePasswordAccounts>(),
+                    std::make_shared<
+                        service::auth::UnavailablePasswordDigest>()
+                );
                 service::auth::JwtConfig jwt;
                 jwt.key = key;
-                auto tokens = std::make_shared<service::auth::JwtTokens>(std::move(jwt));
+                auto tokens = std::make_shared<
+                    service::auth::JwtTokens>(std::move(jwt));
                 registry = makeLoginMessageRegistry(
-                    std::move(passwords), std::move(tokens),
-                    std::make_shared<AccountSessions>());
+                    std::move(passwords),
+                    std::move(tokens),
+                    std::make_shared<AccountSessions>()
+                );
             }
             catch (const std::exception&)
             {
@@ -73,8 +81,12 @@ int main(int argc, char** argv)
                 return 2;
             }
         }
-        handlerFactory = [registry](ConnectionContext::Ptr connection) {
-            return makePreLoginHandshakeHandler(std::move(connection), registry);
+        handlerFactory = [registry](ConnectionContext::Ptr connection)
+        {
+            return makePreLoginHandshakeHandler(
+                std::move(connection),
+                registry
+            );
         };
     }
     ConnectionFeatureFactory featureFactory;

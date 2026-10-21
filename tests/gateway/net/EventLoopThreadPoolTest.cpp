@@ -149,17 +149,19 @@ TEST(EventLoopThreadPoolTest, RoundRobinUsesDistinctWorkerOwners)
     {
         EXPECT_NE(loop, &base);
         EXPECT_FALSE(loop->isInLoopThread());
-        auto result = std::make_shared<std::promise<std::thread::id>>(
-        );
+        auto result = std::make_shared<
+            std::promise<std::thread::id>>();
         owners.push_back(result->get_future());
         loop->queueInLoop(
             [loop, result]()
             {
                 if (!loop->isInLoopThread())
                 {
-                    result->set_exception(std::make_exception_ptr(
-                        std::logic_error("wrong loop owner")
-                    ));
+                    result->set_exception(
+                        std::make_exception_ptr(
+                            std::logic_error("wrong loop owner")
+                        )
+                    );
                     return;
                 }
                 result->set_value(std::this_thread::get_id());
@@ -470,8 +472,8 @@ TEST(
             EventLoop base;
             auto* pool = new EventLoopThreadPool(&base, 1);
             pool->start();
-            pool->getNextLoop()->queueInLoop([pool]() { delete pool; }
-            );
+            pool->getNextLoop()->queueInLoop([pool]()
+                                             { delete pool; });
             for (;;)
             {
                 ::pause();

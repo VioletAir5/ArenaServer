@@ -333,8 +333,8 @@ TEST(TcpConnectionTest, PeerEofNotifiesCloseCallbackOnce)
         Socket(std::move(pair.connection))
     );
     int closeCount = 0;
-    connection.setCloseCallback([&](TcpConnection*) { ++closeCount; }
-    );
+    connection.setCloseCallback([&](TcpConnection*)
+                                { ++closeCount; });
 
     pair.peer = FileDescriptor();
     connection.handleRead();
@@ -661,8 +661,8 @@ TEST(
         Socket(std::move(pair.connection))
     );
     int closeCount = 0;
-    connection.setCloseCallback([&](TcpConnection*) { ++closeCount; }
-    );
+    connection.setCloseCallback([&](TcpConnection*)
+                                { ++closeCount; });
 
     int sendBufferSize = 4096;
     ASSERT_EQ(
@@ -962,8 +962,8 @@ TEST(TcpConnectionTest, SlowPeerPendingOutputIsBounded)
     }
 
     ASSERT_EQ(closes, 1);
-    const std::size_t pendingAtClose = connection.pendingOutputBytes(
-    );
+    const std::size_t pendingAtClose = connection
+                                           .pendingOutputBytes();
     connection.send(payload.data(), payload.size());
     EXPECT_EQ(connection.pendingOutputBytes(), pendingAtClose);
 }

@@ -22,7 +22,8 @@ public:
     explicit PacketCodec(
         std::size_t maxBodySize = PacketHeader::kMaxPacketSize
     );
-    /** @brief Copy construction is disabled because decode state is stream-local. */
+    /** @brief Copy construction is disabled because decode state is
+     * stream-local. */
     PacketCodec(const PacketCodec&) = delete;
     PacketCodec& operator=(const PacketCodec&) = delete;
 
@@ -31,12 +32,15 @@ public:
     // Remaining bytes in this call are discarded on either terminal
     // result. No reentrant feed. A throwing callback invalidates this
     // decoder and rethrows.
-    FrameDecodeStatus
-    feed(std::span<const std::byte>, const PacketHeaderCodec::FrameCallback&);
+    FrameDecodeStatus feed(
+        std::span<const std::byte>,
+        const PacketHeaderCodec::FrameCallback&
+    );
     /** @brief Returns bytes retained for an incomplete frame. */
     std::size_t pendingBytes() const noexcept;
 
-    /** @brief Encodes a complete packet when its fields satisfy protocol limits.
+    /** @brief Encodes a complete packet when its fields satisfy
+     * protocol limits.
      * @param[in] type Packet message type.
      * @param[in] requestId Request correlation identifier.
      * @param[in] payload Body bytes to copy into the frame.

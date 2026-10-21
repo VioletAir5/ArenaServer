@@ -1,11 +1,11 @@
-#include <gtest/gtest.h>
-
 #include "net/PacketBuffer.h"
 
 #include <cstring>
 #include <string>
 #include <string_view>
 #include <type_traits>
+
+#include <gtest/gtest.h>
 
 using service::gateway::PacketBuffer;
 
@@ -27,10 +27,7 @@ TEST(PacketBufferTest, AppendData)
 
     EXPECT_EQ(buffer.readableBytes(), 5);
 
-    EXPECT_EQ(
-        std::memcmp(buffer.readPtr(), data, 5),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), data, 5), 0);
 }
 
 TEST(PacketBufferTest, SkipData)
@@ -45,10 +42,7 @@ TEST(PacketBufferTest, SkipData)
 
     EXPECT_EQ(buffer.readableBytes(), 3);
 
-    EXPECT_EQ(
-        std::memcmp(buffer.readPtr(), "llo", 3),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), "llo", 3), 0);
 }
 
 TEST(PacketBufferTest, SkipAllDataResetsBuffer)
@@ -69,10 +63,7 @@ TEST(PacketBufferTest, SkipAllDataResetsBuffer)
 
     EXPECT_EQ(buffer.readableBytes(), 3);
 
-    EXPECT_EQ(
-        std::memcmp(buffer.readPtr(), newData, 3),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), newData, 3), 0);
 }
 
 TEST(PacketBufferTest, SkipTooMuchFails)
@@ -88,10 +79,7 @@ TEST(PacketBufferTest, SkipTooMuchFails)
     // 状态不能被修改
     EXPECT_EQ(buffer.readableBytes(), 5);
 
-    EXPECT_EQ(
-        std::memcmp(buffer.readPtr(), data, 5),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), data, 5), 0);
 }
 
 TEST(PacketBufferTest, NullptrWithNonZeroLengthFails)
@@ -122,10 +110,7 @@ TEST(PacketBufferTest, ResizeWhenCapacityIsInsufficient)
 
     EXPECT_EQ(buffer.readableBytes(), 10);
 
-    EXPECT_EQ(
-        std::memcmp(buffer.readPtr(), data, 10),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), data, 10), 0);
 }
 
 TEST(PacketBufferTest, AppendFailsWhenExceedingMaxCapacity)
@@ -142,10 +127,7 @@ TEST(PacketBufferTest, AppendFailsWhenExceedingMaxCapacity)
     // 原来的数据必须还在
     EXPECT_EQ(buffer.readableBytes(), 4);
 
-    EXPECT_EQ(
-        std::memcmp(buffer.readPtr(), first, 4),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), first, 4), 0);
 }
 
 TEST(PacketBufferTest, CompactConsumedSpaceBeforeResize)
@@ -186,14 +168,7 @@ TEST(PacketBufferTest, CompactConsumedSpaceBeforeResize)
 
     EXPECT_EQ(buffer.readableBytes(), 6);
 
-    EXPECT_EQ(
-        std::memcmp(
-            buffer.readPtr(),
-            "efghij",
-            6
-        ),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), "efghij", 6), 0);
 }
 
 TEST(PacketBufferTest, MultipleAppendMaintainsOrder)
@@ -210,14 +185,7 @@ TEST(PacketBufferTest, MultipleAppendMaintainsOrder)
 
     EXPECT_EQ(buffer.readableBytes(), 9);
 
-    EXPECT_EQ(
-        std::memcmp(
-            buffer.readPtr(),
-            "abcdefghi",
-            9
-        ),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), "abcdefghi", 9), 0);
 }
 
 TEST(PacketBufferTest, AppendAfterPartialSkip)
@@ -231,21 +199,14 @@ TEST(PacketBufferTest, AppendAfterPartialSkip)
 
     EXPECT_EQ(buffer.readableBytes(), 7);
 
-    EXPECT_EQ(
-        std::memcmp(
-            buffer.readPtr(),
-            "defghij",
-            7
-        ),
-        0
-    );
+    EXPECT_EQ(std::memcmp(buffer.readPtr(), "defghij", 7), 0);
 }
 
 TEST(PacketBufferTest, SharesBaseStorageAndLegacyReadNames)
 {
-    static_assert(std::is_base_of_v<
-                  service::protocol::Buffer,
-                  PacketBuffer>);
+    static_assert(
+        std::is_base_of_v<service::protocol::Buffer, PacketBuffer>
+    );
     PacketBuffer buffer(4, 16);
     service::protocol::Buffer& base = buffer;
     EXPECT_EQ(base.prependableBytes(), 0);

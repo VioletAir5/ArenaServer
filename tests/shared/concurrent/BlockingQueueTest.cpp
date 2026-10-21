@@ -1,7 +1,3 @@
-#include <gtest/gtest.h>
-
-#include <concurrent/BlockingQueue.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -11,11 +7,14 @@
 #include <unordered_set>
 #include <vector>
 
+#include <gtest/gtest.h>
+
+#include <concurrent/BlockingQueue.h>
+
 using namespace std::chrono_literals;
 
 // 如果你的 BlockingQueue 在 service namespace
 using service::BlockingQueue;
-
 
 // ============================================================
 // Basic tests
@@ -32,15 +31,10 @@ TEST(BlockingQueueTest, InitialState)
     EXPECT_FALSE(queue.closed());
 }
 
-
 TEST(BlockingQueueTest, ZeroCapacityThrows)
 {
-    EXPECT_THROW(
-        BlockingQueue<int> queue(0),
-        std::invalid_argument
-    );
+    EXPECT_THROW(BlockingQueue<int> queue(0), std::invalid_argument);
 }
-
 
 TEST(BlockingQueueTest, PushAndPopSingleElement)
 {
@@ -59,7 +53,6 @@ TEST(BlockingQueueTest, PushAndPopSingleElement)
     EXPECT_TRUE(queue.empty());
     EXPECT_EQ(queue.size(), 0);
 }
-
 
 TEST(BlockingQueueTest, FIFOOrder)
 {
@@ -82,7 +75,6 @@ TEST(BlockingQueueTest, FIFOOrder)
     EXPECT_EQ(*c, 3);
 }
 
-
 TEST(BlockingQueueTest, FullState)
 {
     BlockingQueue<int> queue(2);
@@ -98,7 +90,6 @@ TEST(BlockingQueueTest, FullState)
     ASSERT_TRUE(value.has_value());
     EXPECT_FALSE(queue.full());
 }
-
 
 TEST(BlockingQueueTest, SupportsMoveOnlyType)
 {
@@ -117,7 +108,6 @@ TEST(BlockingQueueTest, SupportsMoveOnlyType)
     EXPECT_EQ(**result, 123);
 }
 
-
 // ============================================================
 // Close semantics
 // ============================================================
@@ -133,7 +123,6 @@ TEST(BlockingQueueTest, CloseChangesState)
     EXPECT_TRUE(queue.closed());
 }
 
-
 TEST(BlockingQueueTest, CloseIsIdempotent)
 {
     BlockingQueue<int> queue(4);
@@ -145,7 +134,6 @@ TEST(BlockingQueueTest, CloseIsIdempotent)
     EXPECT_TRUE(queue.closed());
 }
 
-
 TEST(BlockingQueueTest, PushFailsAfterClose)
 {
     BlockingQueue<int> queue(4);
@@ -155,7 +143,6 @@ TEST(BlockingQueueTest, PushFailsAfterClose)
     EXPECT_FALSE(queue.push(1));
     EXPECT_EQ(queue.size(), 0);
 }
-
 
 TEST(BlockingQueueTest, ExistingElementsRemainAvailableAfterClose)
 {
@@ -179,7 +166,6 @@ TEST(BlockingQueueTest, ExistingElementsRemainAvailableAfterClose)
     EXPECT_FALSE(c.has_value());
 }
 
-
 TEST(BlockingQueueTest, PopReturnsNulloptWhenClosedAndEmpty)
 {
     BlockingQueue<int> queue(4);
@@ -190,7 +176,6 @@ TEST(BlockingQueueTest, PopReturnsNulloptWhenClosedAndEmpty)
 
     EXPECT_FALSE(result.has_value());
 }
-
 
 // ============================================================
 // Blocking behaviour
@@ -205,19 +190,24 @@ TEST(BlockingQueueTest, ConsumerBlocksUntilPush)
 
     int result = 0;
 
-    std::thread consumer([&] {
-        consumer_started = true;
+    std::thread consumer(
+        [&]
+        {
+            consumer_started = true;
 
-        auto value = queue.pop();
+            auto value = queue.pop();
 
-        if (value) {
-            result = *value;
+            if (value)
+            {
+                result = *value;
+            }
+
+            consumer_finished = true;
         }
+    );
 
-        consumer_finished = true;
-    });
-
-    while (!consumer_started.load()) {
+    while (!consumer_started.load())
+    {
         std::this_thread::yield();
     }
 
@@ -233,7 +223,6 @@ TEST(BlockingQueueTest, ConsumerBlocksUntilPush)
     EXPECT_EQ(result, 123);
 }
 
-
 TEST(BlockingQueueTest, ProducerBlocksWhenFull)
 {
     BlockingQueue<int> queue(1);
@@ -243,15 +232,19 @@ TEST(BlockingQueueTest, ProducerBlocksWhenFull)
     std::atomic<bool> producer_started{false};
     std::atomic<bool> producer_finished{false};
 
-    std::thread producer([&] {
-        producer_started = true;
+    std::thread producer(
+        [&]
+        {
+            producer_started = true;
 
-        queue.push(2);
+            queue.push(2);
 
-        producer_finished = true;
-    });
+            producer_finished = true;
+        }
+    );
 
-    while (!producer_started.load()) {
+    while (!producer_started.load())
+    {
         std::this_thread::yield();
     }
 
@@ -274,20 +267,22 @@ TEST(BlockingQueueTest, ProducerBlocksWhenFull)
     EXPECT_EQ(*second, 2);
 }
 
-
 TEST(BlockingQueueTest, CloseWakesBlockedConsumer)
 {
     BlockingQueue<int> queue(4);
 
     std::atomic<bool> finished{false};
 
-    std::thread consumer([&] {
-        auto value = queue.pop();
+    std::thread consumer(
+        [&]
+        {
+            auto value = queue.pop();
 
-        EXPECT_FALSE(value.has_value());
+            EXPECT_FALSE(value.has_value());
 
-        finished = true;
-    });
+            finished = true;
+        }
+    );
 
     std::this_thread::sleep_for(50ms);
 
@@ -300,7 +295,6 @@ TEST(BlockingQueueTest, CloseWakesBlockedConsumer)
     EXPECT_TRUE(finished.load());
 }
 
-
 TEST(BlockingQueueTest, CloseWakesBlockedProducer)
 {
     BlockingQueue<int> queue(1);
@@ -310,10 +304,13 @@ TEST(BlockingQueueTest, CloseWakesBlockedProducer)
     std::atomic<bool> finished{false};
     std::atomic<bool> push_result{true};
 
-    std::thread producer([&] {
-        push_result = queue.push(2);
-        finished = true;
-    });
+    std::thread producer(
+        [&]
+        {
+            push_result = queue.push(2);
+            finished = true;
+        }
+    );
 
     std::this_thread::sleep_for(50ms);
 
@@ -327,7 +324,6 @@ TEST(BlockingQueueTest, CloseWakesBlockedProducer)
     EXPECT_FALSE(push_result.load());
 }
 
-
 // ============================================================
 // Multi-producer / Multi-consumer
 // ============================================================
@@ -338,8 +334,7 @@ TEST(BlockingQueueTest, MultipleProducersMultipleConsumers)
     constexpr int consumer_count = 4;
     constexpr int items_per_producer = 10000;
 
-    constexpr int total_items =
-        producer_count * items_per_producer;
+    constexpr int total_items = producer_count * items_per_producer;
 
     BlockingQueue<int> queue(256);
 
@@ -349,70 +344,77 @@ TEST(BlockingQueueTest, MultipleProducersMultipleConsumers)
     std::vector<std::thread> consumers;
     consumers.reserve(consumer_count);
 
-    for (int i = 0; i < consumer_count; ++i) {
-        consumers.emplace_back([&] {
-            while (true) {
-                auto value = queue.pop();
+    for (int i = 0; i < consumer_count; ++i)
+    {
+        consumers.emplace_back(
+            [&]
+            {
+                while (true)
+                {
+                    auto value = queue.pop();
 
-                if (!value) {
-                    break;
+                    if (!value)
+                    {
+                        break;
+                    }
+
+                    consumed_sum.fetch_add(
+                        *value,
+                        std::memory_order_relaxed
+                    );
+
+                    consumed_count.fetch_add(
+                        1,
+                        std::memory_order_relaxed
+                    );
                 }
-
-                consumed_sum.fetch_add(
-                    *value,
-                    std::memory_order_relaxed
-                );
-
-                consumed_count.fetch_add(
-                    1,
-                    std::memory_order_relaxed
-                );
             }
-        });
+        );
     }
 
     std::vector<std::thread> producers;
     producers.reserve(producer_count);
 
-    for (int producer = 0;
-         producer < producer_count;
-         ++producer) {
+    for (int producer = 0; producer < producer_count; ++producer)
+    {
 
-        producers.emplace_back([&, producer] {
-            const int begin =
-                producer * items_per_producer;
+        producers.emplace_back(
+            [&, producer]
+            {
+                const int begin = producer * items_per_producer;
 
-            const int end =
-                begin + items_per_producer;
+                const int end = begin + items_per_producer;
 
-            for (int value = begin;
-                 value < end;
-                 ++value) {
+                for (int value = begin; value < end; ++value)
+                {
 
-                ASSERT_TRUE(queue.push(value));
+                    ASSERT_TRUE(queue.push(value));
+                }
             }
-        });
+        );
     }
 
-    for (auto& producer : producers) {
+    for (auto& producer : producers)
+    {
         producer.join();
     }
 
     queue.close();
 
-    for (auto& consumer : consumers) {
+    for (auto& consumer : consumers)
+    {
         consumer.join();
     }
 
     EXPECT_EQ(consumed_count.load(), total_items);
 
-    const std::int64_t expected_sum =
-        static_cast<std::int64_t>(total_items - 1)
-        * total_items / 2;
+    const std::int64_t expected_sum = static_cast<std::int64_t>(
+                                          total_items - 1
+                                      ) *
+                                      total_items / 2;
 
     EXPECT_EQ(consumed_sum.load(), expected_sum);
 }
-
 
 // ============================================================
 // Stronger correctness test:
@@ -425,69 +427,71 @@ TEST(BlockingQueueTest, NoLostOrDuplicatedItems)
     constexpr int consumer_count = 4;
     constexpr int items_per_producer = 5000;
 
-    constexpr int total_items =
-        producer_count * items_per_producer;
+    constexpr int total_items = producer_count * items_per_producer;
 
     BlockingQueue<int> queue(128);
 
     std::vector<std::atomic<int>> seen(total_items);
 
-    for (auto& value : seen) {
+    for (auto& value : seen)
+    {
         value.store(0, std::memory_order_relaxed);
     }
 
     std::vector<std::thread> consumers;
 
-    for (int i = 0; i < consumer_count; ++i) {
-        consumers.emplace_back([&] {
-            while (auto value = queue.pop()) {
-                seen[*value].fetch_add(
-                    1,
-                    std::memory_order_relaxed
-                );
+    for (int i = 0; i < consumer_count; ++i)
+    {
+        consumers.emplace_back(
+            [&]
+            {
+                while (auto value = queue.pop())
+                {
+                    seen[*value].fetch_add(
+                        1,
+                        std::memory_order_relaxed
+                    );
+                }
             }
-        });
+        );
     }
 
     std::vector<std::thread> producers;
 
-    for (int producer = 0;
-         producer < producer_count;
-         ++producer) {
+    for (int producer = 0; producer < producer_count; ++producer)
+    {
 
-        producers.emplace_back([&, producer] {
-            const int begin =
-                producer * items_per_producer;
+        producers.emplace_back(
+            [&, producer]
+            {
+                const int begin = producer * items_per_producer;
 
-            const int end =
-                begin + items_per_producer;
+                const int end = begin + items_per_producer;
 
-            for (int value = begin;
-                 value < end;
-                 ++value) {
+                for (int value = begin; value < end; ++value)
+                {
 
-                ASSERT_TRUE(queue.push(value));
+                    ASSERT_TRUE(queue.push(value));
+                }
             }
-        });
+        );
     }
 
-    for (auto& producer : producers) {
+    for (auto& producer : producers)
+    {
         producer.join();
     }
 
     queue.close();
 
-    for (auto& consumer : consumers) {
+    for (auto& consumer : consumers)
+    {
         consumer.join();
     }
 
-    for (int i = 0; i < total_items; ++i) {
-        EXPECT_EQ(
-            seen[i].load(std::memory_order_relaxed),
-            1
-        ) << "value " << i
-          << " was lost or duplicated";
+    for (int i = 0; i < total_items; ++i)
+    {
+        EXPECT_EQ(seen[i].load(std::memory_order_relaxed), 1)
+            << "value " << i << " was lost or duplicated";
     }
 }
-
-

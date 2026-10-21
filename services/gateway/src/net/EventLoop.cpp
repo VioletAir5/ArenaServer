@@ -1,5 +1,6 @@
 /** @file
- * @brief Runs channel callbacks, timers, and queued work on one thread.
+ * @brief Runs channel callbacks, timers, and queued work on one
+ * thread.
  */
 #include "net/EventLoop.h"
 
@@ -193,8 +194,12 @@ void EventLoop::removeChannel(Channel* channel)
     // epoll DEL cannot retract events already copied by poll().
     // Keep the vector shape stable while a callback removes another
     // ready Channel; the dispatcher skips invalidated entries.
-    std::replace(m_activeChannels.begin(), m_activeChannels.end(),
-                 channel, static_cast<Channel*>(nullptr));
+    std::replace(
+        m_activeChannels.begin(),
+        m_activeChannels.end(),
+        channel,
+        static_cast<Channel*>(nullptr)
+    );
 }
 
 void EventLoop::wakeup()

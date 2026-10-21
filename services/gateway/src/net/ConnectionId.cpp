@@ -17,7 +17,8 @@ std::uint64_t nextConnectionId()
     {
         if (value == 0)
         {
-            throw std::overflow_error("connection identity exhausted"
+            throw std::overflow_error(
+                "connection identity exhausted"
             );
         }
         const auto successor = value == std::numeric_limits<

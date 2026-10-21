@@ -1,5 +1,6 @@
 /** @file
- * @brief Defines the transport operations exposed to gateway handlers.
+ * @brief Defines the transport operations exposed to gateway
+ * handlers.
  */
 #pragma once
 
@@ -10,11 +11,13 @@
 
 namespace service::gateway
 {
-// Operations and final release belong to the owning execution context,
-// except immutable id() and documented concrete-method exceptions.
-// AsioConnect::send and TcpConnection::send accept concurrent callers.
-// Ptr shares lifetime, not general cross-thread access.
-/** @brief Defines the transport operations exposed to gateway handlers. */
+// Operations and final release belong to the owning execution
+// context, except immutable id() and documented concrete-method
+// exceptions. AsioConnect::send and TcpConnection::send accept
+// concurrent callers. Ptr shares lifetime, not general cross-thread
+// access.
+/** @brief Defines the transport operations exposed to gateway
+ * handlers. */
 class IConnection
 {
 public:
@@ -28,15 +31,17 @@ public:
 
     // Sends immediately or copies queued bytes before returning. The
     // caller may release the input afterwards. Ignored after shutdown
-    // starts or close; an output-limit violation closes the connection.
+    // starts or close; an output-limit violation closes the
+    // connection.
     virtual void send(std::span<const std::byte> data) = 0;
 
-    // Stop accepting sends, drain queued bytes, then shut down the write
-    // half. Continue receiving until peer EOF or an error/timeout.
+    // Stop accepting sends, drain queued bytes, then shut down the
+    // write half. Continue receiving until peer EOF or an
+    // error/timeout.
     virtual void shutdown() = 0;
     // Logical close and notification, without flushing pending bytes.
-    // Owner unregisters I/O before final release. Callback code must not
-    // synchronously destroy this connection. Idempotent.
+    // Owner unregisters I/O before final release. Callback code must
+    // not synchronously destroy this connection. Idempotent.
     virtual void close() = 0;
 
     // True until logical close, including draining and half-closed
@@ -45,12 +50,14 @@ public:
 
     /** @brief Pauses inbound reads. */
     virtual void pauseRead() = 0;
-    // Resume delivery of already available bytes as well as future data.
+    // Resume delivery of already available bytes as well as future
+    // data.
     virtual void resumeRead() = 0;
 
     // Output bytes whose successful write has not yet been observed.
     // Async implementations include in-flight bytes until completion;
-    // excludes bytes already acknowledged by a successful write result.
+    // excludes bytes already acknowledged by a successful write
+    // result.
     virtual std::size_t pendingBytes() const noexcept = 0;
 };
 } // namespace service::gateway

@@ -160,24 +160,32 @@ TEST(TimerQueueTest, HundredThousandTimersFireOrCancelExactlyOnce)
     const auto registrationStart = Clock::now();
     for (std::size_t i = 0; i < count; ++i)
     {
-        // addAfter samples the clock later, so this estimated deadline
-        // makes the recorded drift an upper bound on callback lateness.
+        // addAfter samples the clock later, so this estimated
+        // deadline makes the recorded drift an upper bound on
+        // callback lateness.
         deadlineLowerBounds.push_back(Clock::now() + delay);
-        ids.push_back(loop.runAfter(delay, [&, i]
-        {
-            ++calls[i];
-            if ((i & 1U) == 0)
+        ids.push_back(loop.runAfter(
+            delay,
+            [&, i]
             {
-                return;
+                ++calls[i];
+                if ((i & 1U) == 0)
+                {
+                    return;
+                }
+                driftUs.push_back(
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds>(
+                        Clock::now() - deadlineLowerBounds[i]
+                    )
+                        .count()
+                );
+                if (++fired == expectedFires)
+                {
+                    loop.quit();
+                }
             }
-            driftUs.push_back(std::chrono::duration_cast<
-                std::chrono::microseconds
-            >(Clock::now() - deadlineLowerBounds[i]).count());
-            if (++fired == expectedFires)
-            {
-                loop.quit();
-            }
-        }));
+        ));
     }
     const auto registrationEnd = Clock::now();
     for (std::size_t i = count; i-- > 0;)
@@ -191,11 +199,14 @@ TEST(TimerQueueTest, HundredThousandTimersFireOrCancelExactlyOnce)
     EXPECT_EQ(loop.pendingTimerCount(), expectedFires);
 
     bool timedOut = false;
-    const auto watchdog = loop.runAfter(20s, [&]
-    {
-        timedOut = true;
-        loop.quit();
-    });
+    const auto watchdog = loop.runAfter(
+        20s,
+        [&]
+        {
+            timedOut = true;
+            loop.quit();
+        }
+    );
     loop.loop();
     EXPECT_TRUE(loop.cancelTimer(watchdog));
 
@@ -212,14 +223,21 @@ TEST(TimerQueueTest, HundredThousandTimersFireOrCancelExactlyOnce)
         std::sort(driftUs.begin(), driftUs.end());
         const auto percentile = [&](std::size_t numerator)
         {
-            return driftUs[(numerator * driftUs.size() + 99) / 100 - 1];
+            return driftUs
+                [(numerator * driftUs.size() + 99) / 100 - 1];
         };
         const auto registrationMs = std::chrono::duration_cast<
-            std::chrono::milliseconds
-        >(registrationEnd - registrationStart).count();
+                                        std::chrono::milliseconds>(
+                                        registrationEnd -
+                                        registrationStart
+        )
+                                        .count();
         const auto cancellationMs = std::chrono::duration_cast<
-            std::chrono::milliseconds
-        >(cancellationEnd - registrationEnd).count();
+                                        std::chrono::milliseconds>(
+                                        cancellationEnd -
+                                        registrationEnd
+        )
+                                        .count();
         std::cout << "TimerQueue 100k: registered=" << registrationMs
                   << " ms, canceled=" << cancellationMs
                   << " ms, drift upper bound P50=" << percentile(50)
@@ -236,11 +254,14 @@ TEST(TimerQueueTest, DestructionDropsPendingCallbacks)
     {
         EventLoop loop;
         loop.runAfter(20ms, [oneShotCalls] { ++*oneShotCalls; });
-        loop.runEvery(1ms, [&loop, repeatedCalls]
-        {
-            ++*repeatedCalls;
-            loop.quit();
-        });
+        loop.runEvery(
+            1ms,
+            [&loop, repeatedCalls]
+            {
+                ++*repeatedCalls;
+                loop.quit();
+            }
+        );
         loop.loop();
         ASSERT_EQ(repeatedCalls->load(), 1);
         ASSERT_EQ(oneShotCalls->load(), 0);

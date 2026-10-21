@@ -167,7 +167,8 @@ private:
 
     /// Time of the most recent connection activity.
     std::chrono::steady_clock::time_point m_lastActivity{
-        std::chrono::steady_clock::now()};
+        std::chrono::steady_clock::now()
+    };
 
     /// Current lifecycle state.
     TcpConnectionState m_state{TcpConnectionState::Connected};

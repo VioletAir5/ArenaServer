@@ -29,8 +29,10 @@ EventLoop* requireConnectionLoop(EventLoop* loop)
 {
     if (loop == nullptr || !loop->isInLoopThread())
     {
-        throw std::logic_error("TcpConnection construction requires "
-                               "owner EventLoop thread");
+        throw std::logic_error(
+            "TcpConnection construction requires "
+            "owner EventLoop thread"
+        );
     }
     return loop;
 }
@@ -214,7 +216,10 @@ void TcpConnection::drainSendQueue()
     {
         finishShutdownWrite();
     }
-    else if (m_state == TcpConnectionState::PeerHalfClosed && pendingBytes() == 0)
+    else if (
+        m_state == TcpConnectionState::PeerHalfClosed &&
+        pendingBytes() == 0
+    )
     {
         handleClose();
     }
@@ -314,9 +319,11 @@ std::size_t TcpConnection::pendingBytes() const noexcept
 
 void TcpConnection::send(const void* data, std::size_t length)
 {
-    send(std::as_bytes(
-        std::span(static_cast<const char*>(data), length)
-    ));
+    send(
+        std::as_bytes(
+            std::span(static_cast<const char*>(data), length)
+        )
+    );
 }
 
 void TcpConnection::handleRead()
@@ -517,8 +524,9 @@ void TcpConnection::handleClose()
         m_pendingBytes = 0;
     }
 
-    // The close callback arranges owner-side Channel removal and final
-    // release after the active event dispatch. Do not close the fd here.
+    // The close callback arranges owner-side Channel removal and
+    // final release after the active event dispatch. Do not close the
+    // fd here.
 
     if (m_closeCallback)
     {

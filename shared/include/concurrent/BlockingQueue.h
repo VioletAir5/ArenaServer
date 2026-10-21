@@ -1,5 +1,6 @@
 /** @file
- * @brief Transfers queued values between producer and consumer threads.
+ * @brief Transfers queued values between producer and consumer
+ * threads.
  */
 #pragma once
 
@@ -74,10 +75,16 @@ BlockingQueue<T>::BlockingQueue(size_t capacity)
     }
 }
 
-template <typename T> template <typename U> bool BlockingQueue<T>::push(U&& task)
+template <typename T>
+template <typename U>
+bool BlockingQueue<T>::push(U&& task)
 {
     std::unique_lock<std::mutex> lock(_mtx);
-    _not_full.wait(lock, [this] { return (this->_queue.size() < _capacity) || this->_closed; });
+    _not_full.wait(
+        lock,
+        [this]
+        { return (this->_queue.size() < _capacity) || this->_closed; }
+    );
     if (_closed)
     {
         return false;
@@ -91,7 +98,10 @@ template <typename T> template <typename U> bool BlockingQueue<T>::push(U&& task
 template <typename T> std::optional<T> BlockingQueue<T>::pop()
 {
     std::unique_lock<std::mutex> lock(_mtx);
-    _not_empty.wait(lock, [this] { return !(this->_queue.empty()) || this->_closed; });
+    _not_empty.wait(
+        lock,
+        [this] { return !(this->_queue.empty()) || this->_closed; }
+    );
     std::optional<T> task;
     if (!_queue.empty())
     {

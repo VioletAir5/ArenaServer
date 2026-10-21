@@ -19,16 +19,14 @@ enum class TransitionError
     RevisionExhausted
 };
 
-template<typename State>
-struct Snapshot
+template <typename State> struct Snapshot
 {
     State state;
     std::uint64_t revision;
     bool operator==(const Snapshot&) const = default;
 };
 
-template<typename State, typename Event>
-struct Rule
+template <typename State, typename Event> struct Rule
 {
     State from;
     Event event;
@@ -37,7 +35,7 @@ struct Rule
 
 namespace detail
 {
-template<typename Values, typename Value>
+template <typename Values, typename Value>
 constexpr bool contains(const Values& values, Value value)
 {
     for (const auto candidate : values)
@@ -46,19 +44,20 @@ constexpr bool contains(const Values& values, Value value)
     return false;
 }
 
-// A definition is a closed, deterministic graph; reject ambiguous rules
-// and undeclared states/events at compile time.
-template<typename Definition>
-consteval bool validDefinition()
+// A definition is a closed, deterministic graph; reject ambiguous
+// rules and undeclared states/events at compile time.
+template <typename Definition> consteval bool validDefinition()
 {
     if (!contains(Definition::states, Definition::initial))
         return false;
     for (std::size_t i = 0; i < Definition::states.size(); ++i)
-        for (std::size_t j = i + 1; j < Definition::states.size(); ++j)
+        for (std::size_t j = i + 1; j < Definition::states.size();
+             ++j)
             if (Definition::states[i] == Definition::states[j])
                 return false;
     for (std::size_t i = 0; i < Definition::events.size(); ++i)
-        for (std::size_t j = i + 1; j < Definition::events.size(); ++j)
+        for (std::size_t j = i + 1; j < Definition::events.size();
+             ++j)
             if (Definition::events[i] == Definition::events[j])
                 return false;
     for (std::size_t i = 0; i < Definition::rules.size(); ++i)
@@ -78,9 +77,9 @@ consteval bool validDefinition()
 } // namespace detail
 
 // Construct and mutate on one executor thread. Foreign access rejects
-// before reading mutable state. Copy snapshots, never share mutable entities.
-template<typename Definition>
-class OwnedStateMachine final
+// before reading mutable state. Copy snapshots, never share mutable
+// entities.
+template <typename Definition> class OwnedStateMachine final
 {
 public:
     using State = typename Definition::State;
@@ -101,7 +100,10 @@ public:
     OwnedStateMachine(OwnedStateMachine&&) = delete;
     OwnedStateMachine& operator=(OwnedStateMachine&&) = delete;
 
-    std::thread::id ownerThread() const noexcept { return m_owner; }
+    std::thread::id ownerThread() const noexcept
+    {
+        return m_owner;
+    }
 
     Result snapshot() const noexcept
     {
@@ -122,8 +124,11 @@ public:
         {
             if (rule.from != m_state || rule.event != event)
                 continue;
-            if (m_revision == std::numeric_limits<std::uint64_t>::max())
-                return std::unexpected(TransitionError::RevisionExhausted);
+            if (m_revision ==
+                std::numeric_limits<std::uint64_t>::max())
+                return std::unexpected(
+                    TransitionError::RevisionExhausted
+                );
             m_state = rule.to;
             ++m_revision;
             return Snapshot<State>{m_state, m_revision};

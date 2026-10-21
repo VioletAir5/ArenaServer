@@ -39,7 +39,8 @@ bool PacketHeaderCodec::encode(
     std::array<char, PacketHeader::kHeaderSize> bytes{};
     const std::uint32_t networkLength = ::htonl(header.m_length);
     const std::uint16_t networkType = ::htons(header.m_type);
-    const std::uint32_t networkRequestId = ::htonl(header.m_requestId
+    const std::uint32_t networkRequestId = ::htonl(
+        header.m_requestId
     );
     const std::uint32_t networkMagic = ::htonl(header.m_magic);
 

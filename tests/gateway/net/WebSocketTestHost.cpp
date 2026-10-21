@@ -30,9 +30,11 @@ int main(int argc, char** argv)
 {
     if (argc != 5)
         return 2;
-    const auto tcpPort = static_cast<std::uint16_t>(std::stoi(argv[1])
+    const auto tcpPort = static_cast<std::uint16_t>(
+        std::stoi(argv[1])
     );
-    const auto wsPort = static_cast<std::uint16_t>(std::stoi(argv[2])
+    const auto wsPort = static_cast<std::uint16_t>(
+        std::stoi(argv[2])
     );
     const std::string origin = argv[3];
     const std::string mode = argv[4];

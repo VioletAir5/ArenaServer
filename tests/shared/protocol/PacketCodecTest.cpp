@@ -93,12 +93,15 @@ TEST(PacketCodecTest, RejectsConfiguredLengthAsSoonAsPrefixArrives)
 {
     PacketCodec codec(32);
     const std::array<std::byte, 8> prefix{
-        std::byte{0x41}, std::byte{0x52},
-        std::byte{0x45}, std::byte{0x4e},
+        std::byte{0x41},
+        std::byte{0x52},
+        std::byte{0x45},
+        std::byte{0x4e},
         std::byte{0},
         std::byte{0},
         std::byte{0},
-        std::byte{33}};
+        std::byte{33}
+    };
     int delivered = 0;
     auto receive = [&](auto&, auto)
     {
@@ -245,11 +248,13 @@ TEST(
     EXPECT_FALSE(
         PacketCodec::encode(PacketHeader::kEchoRequest, 1, {}, 99)
     );
-    EXPECT_FALSE(PacketCodec::encode(
-        PacketHeader::kEchoRequest,
-        1,
-        bytes(payload + "x")
-    ));
+    EXPECT_FALSE(
+        PacketCodec::encode(
+            PacketHeader::kEchoRequest,
+            1,
+            bytes(payload + "x")
+        )
+    );
     EXPECT_THROW(PacketCodec(6), std::invalid_argument);
     EXPECT_THROW(
         PacketCodec(PacketHeader::kMaxPacketSize + 1),
@@ -261,15 +266,25 @@ TEST(PacketCodecTest, RejectsBadMagicAtFourBytes)
 {
     PacketCodec codec;
     const std::array<std::byte, 4> badMagic{
-        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}};
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0}
+    };
     int delivered = 0;
-    auto receive = [&](auto&, auto) {
+    auto receive = [&](auto&, auto)
+    {
         ++delivered;
         return true;
     };
-    EXPECT_EQ(codec.feed(badMagic, receive), FrameDecodeStatus::Invalid);
+    EXPECT_EQ(
+        codec.feed(badMagic, receive),
+        FrameDecodeStatus::Invalid
+    );
     EXPECT_EQ(codec.pendingBytes(), badMagic.size());
-    EXPECT_EQ(codec.feed(bytes(frame("ignored")), receive),
-              FrameDecodeStatus::Invalid);
+    EXPECT_EQ(
+        codec.feed(bytes(frame("ignored")), receive),
+        FrameDecodeStatus::Invalid
+    );
     EXPECT_EQ(delivered, 0);
 }

@@ -101,17 +101,19 @@ TEST(
         for (int i = 0; i != 32; ++i)
         {
             peers.emplace_back(context);
-            peers.back().connect(Tcp::endpoint(
-                boost::asio::ip::address_v4::loopback(),
-                port
-            ));
+            peers.back().connect(
+                Tcp::endpoint(
+                    boost::asio::ip::address_v4::loopback(),
+                    port
+                )
+            );
         }
         context.run_for(20ms);
         EXPECT_EQ(server->connectionCount(), 32);
         server.reset();
         context.restart();
-        context.poll(
-        ); // Late accept/close/ack callbacks must be harmless.
+        context.poll(); // Late accept/close/ack callbacks must be
+                        // harmless.
         peers.clear();
         EXPECT_EQ(fdCount(), baseline);
     }
@@ -131,10 +133,12 @@ TEST(AsioTcpServerTest, ImmediateStopHandlesRegistrationHandoff)
             workers
         );
         Tcp::socket peer(context);
-        peer.connect(Tcp::endpoint(
-            boost::asio::ip::address_v4::loopback(),
-            port
-        ));
+        peer.connect(
+            Tcp::endpoint(
+                boost::asio::ip::address_v4::loopback(),
+                port
+            )
+        );
         context.run_one();
         ASSERT_EQ(server.connectionCount(), 1);
         // An accepted socket can be queued on its worker when stop is

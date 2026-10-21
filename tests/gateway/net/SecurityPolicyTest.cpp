@@ -94,7 +94,8 @@ struct SecurityPolicyTest : testing::Test
             context,
             ConnectionScheduler{
                 [&](auto task) { posted.push_back(std::move(task)); },
-                [](auto, auto) { return ConnectionTimer{}; }},
+                [](auto, auto) { return ConnectionTimer{}; }
+            },
             makePacketHandler(
                 PacketPipeline(std::move(decoder)),
                 256,
@@ -128,7 +129,8 @@ struct SecurityPolicyTest : testing::Test
         // message type is added.
         arena::protocol::Envelope value;
         value.mutable_error()->set_code(42);
-        return frame(*service::protocol::EnvelopeCodec::encode(value)
+        return frame(
+            *service::protocol::EnvelopeCodec::encode(value)
         );
     }
     void receive(
@@ -323,7 +325,8 @@ TEST_F(
         context,
         ConnectionScheduler{
             [](auto) {},
-            [](auto, auto) { return ConnectionTimer{}; }},
+            [](auto, auto) { return ConnectionTimer{}; }
+        },
         std::move(throwing)
     );
     runtime->start();
@@ -376,7 +379,8 @@ TEST(
             [counters]
             {
                 for (int j = 0; j < 10000; ++j)
-                    counters->record(RejectionReason::Unauthenticated
+                    counters->record(
+                        RejectionReason::Unauthenticated
                     );
             }
         );
@@ -389,7 +393,8 @@ TEST(
             ConnectionClock::now(),
             counters
         );
-        context.rejections->record(RejectionReason::PacketRateExceeded
+        context.rejections->record(
+            RejectionReason::PacketRateExceeded
         );
     }
     EXPECT_EQ(

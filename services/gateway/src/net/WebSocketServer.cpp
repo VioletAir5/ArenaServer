@@ -206,19 +206,22 @@ public:
     {
         auto self = shared_from_this();
         m_handshakeTimer.expires_after(std::chrono::seconds(5));
-        m_handshakeTimer.async_wait(asio::bind_executor(
-            m_strand,
-            [self](Error error)
-            {
-                if (!error && self->m_state.load() != State::Open &&
-                    self->m_state.load() != State::Closed)
+        m_handshakeTimer.async_wait(
+            asio::bind_executor(
+                m_strand,
+                [self](Error error)
                 {
-                    std::cerr << "WebSocket handshake timeout id="
-                              << self->m_id << '\n';
-                    self->abort();
+                    if (!error &&
+                        self->m_state.load() != State::Open &&
+                        self->m_state.load() != State::Closed)
+                    {
+                        std::cerr << "WebSocket handshake timeout id="
+                                  << self->m_id << '\n';
+                        self->abort();
+                    }
                 }
-            }
-        ));
+            )
+        );
         http::async_read(
             m_ws.next_layer(),
             m_httpBuffer,
@@ -410,8 +413,8 @@ private:
     void writeNext()
     {
         const auto state = m_state.load();
-        if ((state != State::Open && state != State::ClosePendingWrite
-            ) ||
+        if ((state != State::Open &&
+             state != State::ClosePendingWrite) ||
             m_writing)
             return;
         if (state == State::ClosePendingWrite)
@@ -489,14 +492,16 @@ private:
         }
         auto self = shared_from_this();
         m_closeTimer.expires_after(kCloseTimeout);
-        m_closeTimer.async_wait(asio::bind_executor(
-            m_strand,
-            [self](Error error)
-            {
-                if (!error)
-                    self->abort();
-            }
-        ));
+        m_closeTimer.async_wait(
+            asio::bind_executor(
+                m_strand,
+                [self](Error error)
+                {
+                    if (!error)
+                        self->abort();
+                }
+            )
+        );
         if (!m_writing)
             performClose();
     }
@@ -601,10 +606,12 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
     {
         acceptor.open(Tcp::v4());
         acceptor.set_option(Tcp::acceptor::reuse_address(true));
-        acceptor.bind(Tcp::endpoint(
-            asio::ip::make_address_v4(address.ip()),
-            address.port()
-        ));
+        acceptor.bind(
+            Tcp::endpoint(
+                asio::ip::make_address_v4(address.ip()),
+                address.port()
+            )
+        );
         acceptor.listen();
         acceptNext();
     }
@@ -630,8 +637,8 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                     {
                         try
                         {
-                            const auto id = detail::nextConnectionId(
-                            );
+                            const auto
+                                id = detail::nextConnectionId();
                             const auto
                                 endpoint = socket.remote_endpoint();
                             auto contextInfo = std::make_shared<
@@ -651,8 +658,9 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                                 std::move(socket),
                                 id,
                                 self->allowedOrigin,
-                                [weak = self->weak_from_this(
-                                 )](std::uint64_t key)
+                                [weak = self->weak_from_this()](
+                                    std::uint64_t key
+                                )
                                 {
                                     if (auto owner = weak.lock())
                                         owner->connections.erase(key);
@@ -661,8 +669,9 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                             auto runtime = makeConnectionRuntime(
                                 session,
                                 contextInfo,
-                                connectionScheduler(session->executor(
-                                )),
+                                connectionScheduler(
+                                    session->executor()
+                                ),
                                 self->factory,
                                 self->features
                             );
@@ -737,13 +746,15 @@ WebSocketServer::WebSocketServer(
     std::size_t maxConnections,
     ConnectionFeatureFactory featureFactory
 )
-    : m_impl(std::make_shared<Impl>(
-          context,
-          std::move(allowedOrigin),
-          std::move(handlerFactory),
-          maxConnections,
-          std::move(featureFactory)
-      ))
+    : m_impl(
+          std::make_shared<Impl>(
+              context,
+              std::move(allowedOrigin),
+              std::move(handlerFactory),
+              maxConnections,
+              std::move(featureFactory)
+          )
+      )
 {
     m_impl->start(address);
 }

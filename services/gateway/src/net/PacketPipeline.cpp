@@ -58,15 +58,16 @@ EnvelopeDecodeHandler::handle(PacketContext& context)
     return PacketHandler::handle(context);
 }
 
-ConnectionMessageCallback
-makePacketHandler(
+ConnectionMessageCallback makePacketHandler(
     PacketPipeline pipeline,
     std::size_t maxBodySize,
     RejectionCounters::Ptr counters
 )
 {
     if (!counters)
-        throw std::invalid_argument("packet handler requires rejection counters");
+        throw std::invalid_argument(
+            "packet handler requires rejection counters"
+        );
     if (maxBodySize > kMaxPacketSize)
     {
         throw std::invalid_argument(
@@ -74,9 +75,12 @@ makePacketHandler(
         );
     }
     auto codec = std::make_shared<protocol::PacketCodec>(maxBodySize);
-    auto chain = std::make_shared<PacketPipeline>(std::move(pipeline)
+    auto chain = std::make_shared<PacketPipeline>(
+        std::move(pipeline)
     );
-    return [codec, chain = std::move(chain), counters = std::move(counters)](
+    return [codec,
+            chain = std::move(chain),
+            counters = std::move(counters)](
                IConnection& connection,
                std::span<const std::byte> bytes
            )
@@ -96,7 +100,8 @@ makePacketHandler(
                         const auto decision = features->inspectPacket(
                             PacketView{
                                 header.m_type,
-                                std::as_bytes(std::span(payload))}
+                                std::as_bytes(std::span(payload))
+                            }
                         );
                         if (decision == FeatureResult::Close)
                         {
@@ -109,7 +114,8 @@ makePacketHandler(
                     PacketContext context{
                         connection,
                         header,
-                        payload};
+                        payload
+                    };
                     if (chain->process(context) ==
                         PacketHandleResult::Reject)
                     {

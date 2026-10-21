@@ -74,9 +74,8 @@ bool EnvelopeCodec::decode(
     return true;
 }
 
-std::optional<std::string> EnvelopeCodec::encode(
-    const arena::protocol::Envelope& envelope
-)
+std::optional<std::string>
+EnvelopeCodec::encode(const arena::protocol::Envelope& envelope)
 {
     if (!validEnvelope(envelope) ||
         envelope.ByteSizeLong() > kMaxBytes)

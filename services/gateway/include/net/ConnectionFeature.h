@@ -19,7 +19,8 @@ namespace service::gateway
 using ConnectionClock = std::chrono::steady_clock;
 // Destroy/reset on the owner to cancel. The scheduler outlives
 // tokens.
-/** @brief Cancels an owner-thread timer when its token is reset or destroyed. */
+/** @brief Cancels an owner-thread timer when its token is reset or
+ * destroyed. */
 class ConnectionTimer
 {
 public:
@@ -35,7 +36,8 @@ private:
     /// Cancellation action for the scheduled timer.
     std::function<void()> m_cancel;
 };
-/** @brief Provides owner-thread callback and timer scheduling to features. */
+/** @brief Provides owner-thread callback and timer scheduling to
+ * features. */
 struct ConnectionScheduler
 {
     using Action = std::function<void()>;
@@ -54,7 +56,8 @@ enum class ReadPauseReason : std::uint32_t
     Authenticating = 4,
     Application = 8
 };
-/** @brief Borrows a decoded packet type and payload for one callback. */
+/** @brief Borrows a decoded packet type and payload for one callback.
+ */
 struct PacketView
 {
     /// Packet type from the decoded header.
@@ -69,7 +72,8 @@ enum class FeatureResult
     Drop,
     Close
 };
-/** @brief Exposes owner-thread connection controls to policy features. */
+/** @brief Exposes owner-thread connection controls to policy
+ * features. */
 class IConnectionControl
 {
 public:
@@ -83,8 +87,10 @@ public:
     /** @brief Returns the immutable connection context. */
     virtual const ConnectionContext& context() const noexcept = 0;
     // Callback runs on owner, only while the runtime remains open.
-    virtual ConnectionTimer
-        scheduleAt(ConnectionClock::time_point, std::function<void(IConnectionControl&)>) = 0;
+    virtual ConnectionTimer scheduleAt(
+        ConnectionClock::time_point,
+        std::function<void(IConnectionControl&)>
+    ) = 0;
 };
 /** @brief Receives connection lifecycle and packet policy hooks. */
 class IConnectionFeature

@@ -12,7 +12,9 @@ ThreadPool::ThreadPool(size_t threadCount, size_t queueSize)
 {
     if (threadCount == 0)
     {
-        throw std::invalid_argument("threadCount must be greater than 0");
+        throw std::invalid_argument(
+            "threadCount must be greater than 0"
+        );
     }
 
     _workers.reserve(threadCount);

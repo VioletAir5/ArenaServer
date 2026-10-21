@@ -575,31 +575,33 @@ void AsioConnect::notifyOutputChanged()
 void AsioConnect::armIdleTimer()
 {
     m_idleTimer.expires_at(m_lastActivity + m_idleTimeout);
-    m_idleTimer.async_wait(boost::asio::bind_executor(
-        m_strand,
-        [weak = weak_from_this()](auto error)
-        {
-            auto self = weak.lock();
-            if (error == boost::asio::error::operation_aborted)
+    m_idleTimer.async_wait(
+        boost::asio::bind_executor(
+            m_strand,
+            [weak = weak_from_this()](auto error)
             {
-                return;
+                auto self = weak.lock();
+                if (error == boost::asio::error::operation_aborted)
+                {
+                    return;
+                }
+                if (error || !self || self->m_state == State::Closed)
+                {
+                    return;
+                }
+                if (Clock::now() - self->m_lastActivity >=
+                    self->m_idleTimeout)
+                {
+                    std::cerr << "AsioConnect idle timeout\n";
+                    self->close();
+                }
+                else
+                {
+                    self->armIdleTimer();
+                }
             }
-            if (error || !self || self->m_state == State::Closed)
-            {
-                return;
-            }
-            if (Clock::now() - self->m_lastActivity >=
-                self->m_idleTimeout)
-            {
-                std::cerr << "AsioConnect idle timeout\n";
-                self->close();
-            }
-            else
-            {
-                self->armIdleTimer();
-            }
-        }
-    ));
+        )
+    );
 }
 
 void AsioConnect::ioError(const boost::system::error_code& error)

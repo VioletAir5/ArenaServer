@@ -28,7 +28,8 @@ enum class TcpServerState
     Stopped
 };
 
-/** @brief Accepts TCP clients and owns their event-loop connections. */
+/** @brief Accepts TCP clients and owns their event-loop connections.
+ */
 class TcpServer final : public ITcpServer
 {
 public:
@@ -36,13 +37,17 @@ public:
     // The base loop must outlive the server. Zero workers uses base
     // I/O.
     /** @brief Starts listening and prepares worker loops.
-     * @param[in] loop Base loop that owns server control and outlives this object.
+     * @param[in] loop Base loop that owns server control and outlives
+     * this object.
      * @param[in] listenAddress Local address to bind.
      * @param[in] maxConnections Maximum admitted connections.
      * @param[in] idleTimeout Idle time allowed for each connection.
-     * @param[in] workerCount Number of worker loops; zero uses the base loop.
-     * @param[in] handlerFactory Creates packet handlers for connections.
-     * @param[in] featureFactory Creates per-connection policy features.
+     * @param[in] workerCount Number of worker loops; zero uses the
+     * base loop.
+     * @param[in] handlerFactory Creates packet handlers for
+     * connections.
+     * @param[in] featureFactory Creates per-connection policy
+     * features.
      */
     TcpServer(
         EventLoop* loop,
@@ -65,8 +70,9 @@ public:
     // close stragglers at the deadline. Stopped includes worker
     // cleanup and join; it does not quit the externally owned base
     // loop.
-    void stop(std::chrono::milliseconds grace = kDefaultStopGrace)
-        override;
+    void stop(
+        std::chrono::milliseconds grace = kDefaultStopGrace
+    ) override;
     // Read only on the base EventLoop thread. Count includes accepted
     // sockets queued for worker registration until cleanup is
     // acknowledged.

@@ -1,7 +1,4 @@
-#include <gtest/gtest.h>
-
 #include "net/Socket.h"
-#include "net/InetAddress.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -12,6 +9,10 @@
 #include <cerrno>
 #include <cstring>
 #include <thread>
+
+#include <gtest/gtest.h>
+
+#include "net/InetAddress.h"
 
 using namespace service::gateway;
 
@@ -27,13 +28,7 @@ TEST(SocketTest, CreateTcpSocket)
     socklen_t len = sizeof(type);
 
     ASSERT_EQ(
-        ::getsockopt(
-            socket.get(),
-            SOL_SOCKET,
-            SO_TYPE,
-            &type,
-            &len
-        ),
+        ::getsockopt(socket.get(), SOL_SOCKET, SO_TYPE, &type, &len),
         0
     );
 
@@ -72,9 +67,7 @@ TEST(SocketTest, BindToLoopback)
 
     InetAddress address(0, true);
 
-    EXPECT_NO_THROW(
-        socket.bind(address)
-    );
+    EXPECT_NO_THROW(socket.bind(address));
 
     sockaddr_in actual{};
     socklen_t len = sizeof(actual);
@@ -102,9 +95,7 @@ TEST(SocketTest, Listen)
 
     socket.bind(address);
 
-    EXPECT_NO_THROW(
-        socket.listen(SOMAXCONN)
-    );
+    EXPECT_NO_THROW(socket.listen(SOMAXCONN));
 
     int acceptConn = 0;
     socklen_t len = sizeof(acceptConn);
@@ -147,39 +138,38 @@ TEST(SocketTest, AcceptConnection)
 
     const uint16_t port = ntohs(actual.sin_port);
 
-    std::thread clientThread([port]() {
-        int fd = ::socket(
-            AF_INET,
-            SOCK_STREAM | SOCK_CLOEXEC,
-            0
-        );
+    std::thread clientThread(
+        [port]()
+        {
+            int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 
-        ASSERT_GE(fd, 0);
+            ASSERT_GE(fd, 0);
 
-        sockaddr_in serverAddr{};
-        serverAddr.sin_family = AF_INET;
-        serverAddr.sin_port = htons(port);
+            sockaddr_in serverAddr{};
+            serverAddr.sin_family = AF_INET;
+            serverAddr.sin_port = htons(port);
 
-        ASSERT_EQ(
-            ::inet_pton(
-                AF_INET,
-                "127.0.0.1",
-                &serverAddr.sin_addr
-            ),
-            1
-        );
+            ASSERT_EQ(
+                ::inet_pton(
+                    AF_INET,
+                    "127.0.0.1",
+                    &serverAddr.sin_addr
+                ),
+                1
+            );
 
-        ASSERT_EQ(
-            ::connect(
-                fd,
-                reinterpret_cast<sockaddr*>(&serverAddr),
-                sizeof(serverAddr)
-            ),
-            0
-        );
+            ASSERT_EQ(
+                ::connect(
+                    fd,
+                    reinterpret_cast<sockaddr*>(&serverAddr),
+                    sizeof(serverAddr)
+                ),
+                0
+            );
 
-        ::close(fd);
-    });
+            ::close(fd);
+        }
+    );
 
     InetAddress peer;
 
@@ -204,10 +194,7 @@ TEST(SocketTest, DestructorClosesDescriptor)
         ASSERT_GE(fd, 0);
 
         // 此时 fd 应该有效
-        EXPECT_NE(
-            ::fcntl(fd, F_GETFD),
-            -1
-        );
+        EXPECT_NE(::fcntl(fd, F_GETFD), -1);
     }
 
     // Socket 析构
@@ -216,10 +203,7 @@ TEST(SocketTest, DestructorClosesDescriptor)
 
     errno = 0;
 
-    EXPECT_EQ(
-        ::fcntl(fd, F_GETFD),
-        -1
-    );
+    EXPECT_EQ(::fcntl(fd, F_GETFD), -1);
 
     EXPECT_EQ(errno, EBADF);
 }

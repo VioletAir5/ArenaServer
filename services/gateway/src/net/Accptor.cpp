@@ -6,7 +6,6 @@
 #include <unistd.h>
 
 #include <cerrno>
-
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -36,8 +35,11 @@ Acceptor::Acceptor(EventLoop* loop, const InetAddress& listenAddress)
     );
     if (!m_reserveFd.valid())
     {
-        throw std::system_error(errno, std::generic_category(),
-                                "accept reserve fd");
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "accept reserve fd"
+        );
     }
 
     m_listenSocket.setReuseAddr(true);
@@ -78,7 +80,8 @@ void Acceptor::stop()
     m_reserveFd = service::FileDescriptor();
 }
 
-void Acceptor::setNewConnectionCallback(NewConnectionCallback callback
+void Acceptor::setNewConnectionCallback(
+    NewConnectionCallback callback
 )
 {
     m_newConnectionCallback = std::move(callback);
@@ -103,8 +106,8 @@ void Acceptor::handleRead()
         {
             const int code = error.code().value();
             std::cerr << "accept failed: " << error.what() << '\n';
-            if (code == EMFILE || code == ENFILE ||
-                code == ENOBUFS || code == ENOMEM)
+            if (code == EMFILE || code == ENFILE || code == ENOBUFS ||
+                code == ENOMEM)
             {
                 suspendForResourceError();
             }
@@ -133,10 +136,13 @@ void Acceptor::suspendForResourceError()
     int rejected;
     do
     {
-        rejected = ::accept4(m_listenSocket.get(), nullptr, nullptr,
-                             SOCK_NONBLOCK | SOCK_CLOEXEC);
-    }
-    while (rejected < 0 && errno == EINTR);
+        rejected = ::accept4(
+            m_listenSocket.get(),
+            nullptr,
+            nullptr,
+            SOCK_NONBLOCK | SOCK_CLOEXEC
+        );
+    } while (rejected < 0 && errno == EINTR);
     {
         service::FileDescriptor rejectedPeer(rejected);
     }
@@ -151,7 +157,8 @@ void Acceptor::scheduleRetry()
     try
     {
         m_retryTimerId = m_loop->runAfter(
-            kRetryDelay, [this]() { retryListening(); }
+            kRetryDelay,
+            [this]() { retryListening(); }
         );
     }
     catch (...)

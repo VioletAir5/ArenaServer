@@ -1,5 +1,3 @@
-#include <gtest/gtest.h>
-
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -13,6 +11,8 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "net/EventLoop.h"
 #include "net/ITcpServer.h"
@@ -44,41 +44,57 @@ TcpPair connectPair()
     listener.listen();
     sockaddr_in address{};
     socklen_t length = sizeof(address);
-    if (::getsockname(listener.get(),
-                      reinterpret_cast<sockaddr*>(&address),
-                      &length) != 0)
+    if (::getsockname(
+            listener.get(),
+            reinterpret_cast<sockaddr*>(&address),
+            &length
+        ) != 0)
     {
-        throw std::system_error(errno, std::generic_category(),
-                                "getsockname");
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "getsockname"
+        );
     }
 
     Socket peer = Socket::createTcp();
-    if (::connect(peer.get(), reinterpret_cast<sockaddr*>(&address),
-                  length) != 0)
+    if (::connect(
+            peer.get(),
+            reinterpret_cast<sockaddr*>(&address),
+            length
+        ) != 0)
     {
-        throw std::system_error(errno, std::generic_category(),
-                                "connect");
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "connect"
+        );
     }
     auto accepted = listener.accept();
     if (!accepted)
     {
-        throw std::runtime_error("completed TCP handshake not accepted");
+        throw std::runtime_error(
+            "completed TCP handshake not accepted"
+        );
     }
     return {std::move(*accepted), std::move(peer)};
 }
 
-// Instrument ownership in the test; no production destructor hook is needed.
+// Instrument ownership in the test; no production destructor hook is
+// needed.
 struct TrackedConnection
 {
     TrackedConnection(EventLoop& eventLoop, Socket socket)
         : loop(eventLoop)
-        , owner(new TcpConnection(&loop, std::move(socket)),
-                [this](TcpConnection* connection)
-                {
-                    delete connection;
-                    ++destructions;
-                    events.emplace_back("destroy");
-                })
+        , owner(
+              new TcpConnection(&loop, std::move(socket)),
+              [this](TcpConnection* connection)
+              {
+                  delete connection;
+                  ++destructions;
+                  events.emplace_back("destroy");
+              }
+          )
         , weak(owner)
         , descriptor(owner->fd())
     {
@@ -102,7 +118,8 @@ struct TrackedConnection
                 EXPECT_EQ(closes, 1);
                 events.emplace_back("close-exit");
                 loop.quit();
-            });
+            }
+        );
     }
 
     ~TrackedConnection()
@@ -144,7 +161,13 @@ TEST_P(ConnectionOwnershipTest, CloseReleasesConnectionExactlyOnce)
     TrackedConnection tracked(loop, std::move(pair.connection));
     bool timedOut = false;
     const auto watchdog = loop.runAfter(
-        2s, [&]() { timedOut = true; loop.quit(); });
+        2s,
+        [&]()
+        {
+            timedOut = true;
+            loop.quit();
+        }
+    );
 
     switch (GetParam())
     {
@@ -154,8 +177,16 @@ TEST_P(ConnectionOwnershipTest, CloseReleasesConnectionExactlyOnce)
     case TerminalTrigger::PeerReset:
     {
         const linger reset{1, 0};
-        ASSERT_EQ(::setsockopt(pair.peer.get(), SOL_SOCKET, SO_LINGER,
-                               &reset, sizeof(reset)), 0);
+        ASSERT_EQ(
+            ::setsockopt(
+                pair.peer.get(),
+                SOL_SOCKET,
+                SO_LINGER,
+                &reset,
+                sizeof(reset)
+            ),
+            0
+        );
         pair.peer.close();
         break;
     }
@@ -163,8 +194,16 @@ TEST_P(ConnectionOwnershipTest, CloseReleasesConnectionExactlyOnce)
     {
         tracked.owner->shutdownWrite();
         const timeval timeout{1, 0};
-        ASSERT_EQ(::setsockopt(pair.peer.get(), SOL_SOCKET, SO_RCVTIMEO,
-                               &timeout, sizeof(timeout)), 0);
+        ASSERT_EQ(
+            ::setsockopt(
+                pair.peer.get(),
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &timeout,
+                sizeof(timeout)
+            ),
+            0
+        );
         char byte{};
         ASSERT_EQ(::recv(pair.peer.get(), &byte, 1, 0), 0);
         EXPECT_EQ(tracked.destructions, 0);
@@ -180,9 +219,14 @@ TEST_P(ConnectionOwnershipTest, CloseReleasesConnectionExactlyOnce)
     EXPECT_EQ(tracked.closes, 1);
     EXPECT_EQ(tracked.destructions, 1);
     EXPECT_TRUE(tracked.weak.expired());
-    EXPECT_EQ(tracked.events,
-              (std::vector<std::string>{
-                  "close-enter", "close-exit", "destroy"}));
+    EXPECT_EQ(
+        tracked.events,
+        (std::vector<std::string>{
+            "close-enter",
+            "close-exit",
+            "destroy"
+        })
+    );
     EXPECT_EQ(::fcntl(tracked.descriptor, F_GETFD), -1);
     EXPECT_EQ(errno, EBADF);
 }
@@ -190,9 +234,11 @@ TEST_P(ConnectionOwnershipTest, CloseReleasesConnectionExactlyOnce)
 INSTANTIATE_TEST_SUITE_P(
     TcpTermination,
     ConnectionOwnershipTest,
-    testing::Values(TerminalTrigger::PeerFin,
-                    TerminalTrigger::PeerReset,
-                    TerminalTrigger::LocalShutdown),
+    testing::Values(
+        TerminalTrigger::PeerFin,
+        TerminalTrigger::PeerReset,
+        TerminalTrigger::LocalShutdown
+    ),
     [](const testing::TestParamInfo<TerminalTrigger>& info)
     {
         switch (info.param)
@@ -205,7 +251,8 @@ INSTANTIATE_TEST_SUITE_P(
             return "LocalShutdown";
         }
         return "Unknown";
-    });
+    }
+);
 
 TEST(ConnectionCallbackTest, MessageFinishesAfterLastOwnerIsReleased)
 {
@@ -225,12 +272,22 @@ TEST(ConnectionCallbackTest, MessageFinishesAfterLastOwnerIsReleased)
             connection.send("ignored", 7);
             tracked.events.emplace_back("message-exit");
             messageReturned = true;
-        });
-    ASSERT_EQ(::send(pair.peer.get(), "last message", 12, MSG_NOSIGNAL), 12);
+        }
+    );
+    ASSERT_EQ(
+        ::send(pair.peer.get(), "last message", 12, MSG_NOSIGNAL),
+        12
+    );
     pair.peer.shutdownWrite();
     bool timedOut = false;
     const auto watchdog = loop.runAfter(
-        2s, [&]() { timedOut = true; loop.quit(); });
+        2s,
+        [&]()
+        {
+            timedOut = true;
+            loop.quit();
+        }
+    );
 
     EXPECT_NO_THROW(loop.loop());
     loop.cancelTimer(watchdog);
@@ -240,13 +297,22 @@ TEST(ConnectionCallbackTest, MessageFinishesAfterLastOwnerIsReleased)
     EXPECT_EQ(tracked.closes, 1);
     EXPECT_EQ(tracked.destructions, 1);
     EXPECT_TRUE(tracked.weak.expired());
-    EXPECT_EQ(tracked.events,
-              (std::vector<std::string>{
-                  "message-enter", "close-enter", "close-exit",
-                  "message-exit", "destroy"}));
+    EXPECT_EQ(
+        tracked.events,
+        (std::vector<std::string>{
+            "message-enter",
+            "close-enter",
+            "close-exit",
+            "message-exit",
+            "destroy"
+        })
+    );
 }
 
-TEST(ConnectionCallbackTest, ThrowingCallbackStillReleasesConnectionOnce)
+TEST(
+    ConnectionCallbackTest,
+    ThrowingCallbackStillReleasesConnectionOnce
+)
 {
     auto pair = connectPair();
     EventLoop loop;
@@ -257,7 +323,8 @@ TEST(ConnectionCallbackTest, ThrowingCallbackStillReleasesConnectionOnce)
             connection.handleClose();
             EXPECT_EQ(tracked.destructions, 0);
             throw std::runtime_error("callback failed");
-        });
+        }
+    );
     ASSERT_EQ(::send(pair.peer.get(), "x", 1, MSG_NOSIGNAL), 1);
     const auto watchdog = loop.runAfter(2s, [&]() { loop.quit(); });
 
@@ -269,29 +336,48 @@ TEST(ConnectionCallbackTest, ThrowingCallbackStillReleasesConnectionOnce)
     EXPECT_TRUE(tracked.weak.expired());
 }
 
-TEST(TcpServerOwnershipTest, QueuedRemovalIsSafeAfterServerDestruction)
+TEST(
+    TcpServerOwnershipTest, QueuedRemovalIsSafeAfterServerDestruction
+)
 {
     Socket reservation = Socket::createTcp();
     reservation.bind(InetAddress(0, true));
     sockaddr_in local{};
     socklen_t length = sizeof(local);
-    ASSERT_EQ(::getsockname(reservation.get(),
-                            reinterpret_cast<sockaddr*>(&local),
-                            &length), 0);
+    ASSERT_EQ(
+        ::getsockname(
+            reservation.get(),
+            reinterpret_cast<sockaddr*>(&local),
+            &length
+        ),
+        0
+    );
     const InetAddress address(local);
     reservation.close();
 
     EventLoop loop;
-    std::unique_ptr<service::gateway::ITcpServer> server =
-        std::make_unique<TcpServer>(&loop, address, 4);
+    std::unique_ptr<service::gateway::ITcpServer>
+        server = std::make_unique<TcpServer>(&loop, address, 4);
     Socket peer = Socket::createTcp();
-    ASSERT_EQ(::connect(peer.get(), address.sockaddrPtr(),
-                        address.length()), 0);
+    ASSERT_EQ(
+        ::connect(
+            peer.get(),
+            address.sockaddrPtr(),
+            address.length()
+        ),
+        0
+    );
 
     bool timedOut = false;
     bool returnedFromStaleTask = false;
     const auto watchdog = loop.runAfter(
-        2s, [&]() { timedOut = true; loop.quit(); });
+        2s,
+        [&]()
+        {
+            timedOut = true;
+            loop.quit();
+        }
+    );
     service::gateway::TimerId acceptanceCheck = 0;
     acceptanceCheck = loop.runEvery(
         1ms,
@@ -308,16 +394,19 @@ TEST(TcpServerOwnershipTest, QueuedRemovalIsSafeAfterServerDestruction)
                 {
                     server->stop(0ms); // Queues connection removal.
                     EXPECT_FALSE(server->stopped());
-                    server.reset();   // Invalidates that queued task.
+                    server.reset(); // Invalidates that queued task.
                     EXPECT_EQ(loop.pendingTimerCount(), 1U);
                     loop.queueInLoop(
                         [&]()
                         {
                             returnedFromStaleTask = true;
                             loop.quit();
-                        });
-                });
-        });
+                        }
+                    );
+                }
+            );
+        }
+    );
 
     EXPECT_NO_THROW(loop.loop());
     loop.cancelTimer(watchdog);

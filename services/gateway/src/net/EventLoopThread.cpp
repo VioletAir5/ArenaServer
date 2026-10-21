@@ -19,14 +19,16 @@ EventLoopThread::~EventLoopThread() noexcept
         if (isInWorkerThread())
         {
             // The worker still accesses this object after callbacks.
-            // Detaching or continuing destruction would leave it dangling.
+            // Detaching or continuing destruction would leave it
+            // dangling.
             std::terminate();
         }
         stopThread();
     }
     catch (...)
     {
-        // Destruction cannot recover from failed synchronization or I/O.
+        // Destruction cannot recover from failed synchronization or
+        // I/O.
         std::terminate();
     }
 }
@@ -46,7 +48,8 @@ void EventLoopThread::requestStop()
     }
 
     // A created worker may still be constructing its stack EventLoop.
-    // Both successful startup and construction failure notify this wait.
+    // Both successful startup and construction failure notify this
+    // wait.
     m_cv.wait(lock, [this] { return m_startComplete; });
     if (m_loop != nullptr)
     {
@@ -80,7 +83,8 @@ void EventLoopThread::stopThread()
 
 void EventLoopThread::stop()
 {
-    // Check before taking m_stopMutex: another caller may be joining us.
+    // Check before taking m_stopMutex: another caller may be joining
+    // us.
     if (isInWorkerThread())
     {
         throw std::logic_error(

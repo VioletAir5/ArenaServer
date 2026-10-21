@@ -1,4 +1,4 @@
-#include <gtest/gtest.h>
+#include "net/EventLoopThread.h"
 
 #include <sys/resource.h>
 #include <unistd.h>
@@ -10,12 +10,12 @@
 #include <future>
 #include <memory>
 #include <stdexcept>
-#include <thread>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
-#include "net/EventLoopThread.h"
+#include <gtest/gtest.h>
 
 using service::gateway::EventLoopThread;
 
@@ -41,8 +41,8 @@ public:
 
     static bool waitForStop(EventLoopThread& thread)
     {
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(3);
         while (std::chrono::steady_clock::now() < deadline)
         {
             if (!thread.m_stopMutex.try_lock())
@@ -96,12 +96,13 @@ TEST(EventLoopThreadTest, ReturnedLoopRunsTasksOnWorkerAndStopJoins)
     EXPECT_FALSE(loop->isInLoopThread());
     std::promise<bool> ranOnOwner;
     auto result = ranOnOwner.get_future();
-    loop->queueInLoop([&]
-    {
-        ranOnOwner.set_value(loop->isInLoopThread());
-    });
-    ASSERT_EQ(result.wait_for(std::chrono::seconds(3)),
-              std::future_status::ready);
+    loop->queueInLoop(
+        [&] { ranOnOwner.set_value(loop->isInLoopThread()); }
+    );
+    ASSERT_EQ(
+        result.wait_for(std::chrono::seconds(3)),
+        std::future_status::ready
+    );
     EXPECT_TRUE(result.get());
     thread.stop();
     EXPECT_NO_THROW(thread.stop());
@@ -116,13 +117,17 @@ TEST(EventLoopThreadTest, LoopCanExitBeforeWrapperDestruction)
         auto done = quitRequested.get_future();
         EventLoopThread thread;
         auto* loop = thread.startLoop();
-        loop->queueInLoop([&]
-        {
-            loop->quit();
-            quitRequested.set_value();
-        });
-        ASSERT_EQ(done.wait_for(std::chrono::seconds(3)),
-                  std::future_status::ready);
+        loop->queueInLoop(
+            [&]
+            {
+                loop->quit();
+                quitRequested.set_value();
+            }
+        );
+        ASSERT_EQ(
+            done.wait_for(std::chrono::seconds(3)),
+            std::future_status::ready
+        );
         // Destructor races the worker's loop exit but must never
         // call quit through a pointer whose stack owner has gone.
     }
@@ -134,13 +139,17 @@ TEST(EventLoopThreadTest, CallbackExceptionIsReportedByStop)
     auto* loop = thread.startLoop();
     std::promise<void> entered;
     auto started = entered.get_future();
-    loop->queueInLoop([&]
-    {
-        entered.set_value();
-        throw std::runtime_error("worker callback failed");
-    });
-    ASSERT_EQ(started.wait_for(std::chrono::seconds(3)),
-              std::future_status::ready);
+    loop->queueInLoop(
+        [&]
+        {
+            entered.set_value();
+            throw std::runtime_error("worker callback failed");
+        }
+    );
+    ASSERT_EQ(
+        started.wait_for(std::chrono::seconds(3)),
+        std::future_status::ready
+    );
     EXPECT_THROW(thread.stop(), std::runtime_error);
 }
 
@@ -151,13 +160,17 @@ TEST(EventLoopThreadTest, DestructorHandlesWorkerException)
     auto started = entered.get_future();
     EventLoopThread thread;
     auto* loop = thread.startLoop();
-    loop->queueInLoop([&]
-    {
-        entered.set_value();
-        throw std::runtime_error("worker callback failed");
-    });
-    ASSERT_EQ(started.wait_for(std::chrono::seconds(3)),
-              std::future_status::ready);
+    loop->queueInLoop(
+        [&]
+        {
+            entered.set_value();
+            throw std::runtime_error("worker callback failed");
+        }
+    );
+    ASSERT_EQ(
+        started.wait_for(std::chrono::seconds(3)),
+        std::future_status::ready
+    );
 }
 
 TEST(EventLoopThreadTest, StopWaitsForCurrentCallback)
@@ -169,19 +182,27 @@ TEST(EventLoopThreadTest, StopWaitsForCurrentCallback)
     std::promise<void> release;
     auto released = release.get_future();
     bool returned = false;
-    loop->queueInLoop([&]
-    {
-        entered.set_value();
-        released.wait();
-        returned = true;
-    });
-    ASSERT_EQ(started.wait_for(std::chrono::seconds(3)),
-              std::future_status::ready);
-    std::jthread releaser([&]
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        release.set_value();
-    });
+    loop->queueInLoop(
+        [&]
+        {
+            entered.set_value();
+            released.wait();
+            returned = true;
+        }
+    );
+    ASSERT_EQ(
+        started.wait_for(std::chrono::seconds(3)),
+        std::future_status::ready
+    );
+    std::jthread releaser(
+        [&]
+        {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(20)
+            );
+            release.set_value();
+        }
+    );
     thread.stop();
     EXPECT_TRUE(returned);
 }
@@ -192,25 +213,31 @@ TEST(EventLoopThreadTest, WorkerRejectsJoiningItself)
     auto result = rejected.get_future();
     EventLoopThread thread;
     auto* loop = thread.startLoop();
-    loop->queueInLoop([&]
-    {
-        try
+    loop->queueInLoop(
+        [&]
         {
-            thread.stop();
-            rejected.set_value(false);
+            try
+            {
+                thread.stop();
+                rejected.set_value(false);
+            }
+            catch (const std::logic_error&)
+            {
+                rejected.set_value(true);
+            }
         }
-        catch (const std::logic_error&)
-        {
-            rejected.set_value(true);
-        }
-    });
-    ASSERT_EQ(result.wait_for(std::chrono::seconds(3)),
-              std::future_status::ready);
+    );
+    ASSERT_EQ(
+        result.wait_for(std::chrono::seconds(3)),
+        std::future_status::ready
+    );
     EXPECT_TRUE(result.get());
     EXPECT_NO_THROW(thread.stop());
 }
 
-TEST(EventLoopThreadDeathTest, ConstructionFailureReachesStartingThread)
+TEST(
+    EventLoopThreadDeathTest, ConstructionFailureReachesStartingThread
+)
 {
     EXPECT_EXIT(
         {
@@ -232,7 +259,8 @@ TEST(EventLoopThreadDeathTest, ConstructionFailureReachesStartingThread)
             ::_exit(5);
         },
         testing::ExitedWithCode(0),
-        "");
+        ""
+    );
 }
 
 TEST(EventLoopThreadTest, StopWaitsForStartupBeforeJoining)
@@ -242,47 +270,56 @@ TEST(EventLoopThreadTest, StopWaitsForStartupBeforeJoining)
     EventLoopThread thread;
     std::promise<void> release;
     EventLoopThreadTestPeer::startPaused(
-        thread, release.get_future().share()
+        thread,
+        release.get_future().share()
     );
     std::promise<void> started;
     auto startup = started.get_future();
-    std::jthread starter([&]()
-    {
-        try
+    std::jthread starter(
+        [&]()
         {
-            // Only observe startup; stop may invalidate the returned borrow.
-            thread.startLoop();
-            started.set_value();
+            try
+            {
+                // Only observe startup; stop may invalidate the
+                // returned borrow.
+                thread.startLoop();
+                started.set_value();
+            }
+            catch (const std::logic_error&)
+            {
+                // The stop may finish before the starting waiter gets
+                // its lock.
+                started.set_value();
+            }
+            catch (...)
+            {
+                started.set_exception(std::current_exception());
+            }
         }
-        catch (const std::logic_error&)
+    );
+    std::jthread stopper(
+        [&]()
         {
-            // The stop may finish before the starting waiter gets its lock.
-            started.set_value();
+            try
+            {
+                thread.stop();
+                stopped.set_value();
+            }
+            catch (...)
+            {
+                stopped.set_exception(std::current_exception());
+            }
         }
-        catch (...)
-        {
-            started.set_exception(std::current_exception());
-        }
-    });
-    std::jthread stopper([&]()
-    {
-        try
-        {
-            thread.stop();
-            stopped.set_value();
-        }
-        catch (...)
-        {
-            stopped.set_exception(std::current_exception());
-        }
-    });
+    );
 
     EXPECT_TRUE(EventLoopThreadTestPeer::waitForStop(thread));
-    EXPECT_EQ(done.wait_for(std::chrono::milliseconds(50)),
-              std::future_status::timeout);
+    EXPECT_EQ(
+        done.wait_for(std::chrono::milliseconds(50)),
+        std::future_status::timeout
+    );
     release.set_value();
-    const bool finished =
-        done.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    const bool finished = done.wait_for(std::chrono::seconds(3)) ==
+                          std::future_status::ready;
     if (!finished)
     {
         EventLoopThreadTestPeer::quitPublishedLoop(thread);
@@ -306,18 +343,20 @@ TEST(EventLoopThreadTest, ConcurrentStopsJoinOnlyOnce)
         std::vector<std::jthread> stoppers;
         for (int caller = 0; caller < 4; ++caller)
         {
-            stoppers.emplace_back([&]()
-            {
-                ready.arrive_and_wait();
-                try
+            stoppers.emplace_back(
+                [&]()
                 {
-                    thread.stop();
+                    ready.arrive_and_wait();
+                    try
+                    {
+                        thread.stop();
+                    }
+                    catch (...)
+                    {
+                        failures.fetch_add(1);
+                    }
                 }
-                catch (...)
-                {
-                    failures.fetch_add(1);
-                }
-            });
+            );
         }
         ready.arrive_and_wait();
         stoppers.clear();
@@ -326,18 +365,24 @@ TEST(EventLoopThreadTest, ConcurrentStopsJoinOnlyOnce)
     }
 }
 
-TEST(EventLoopThreadDeathTest, WorkerDestructionTerminatesWithoutThrowing)
+TEST(
+    EventLoopThreadDeathTest,
+    WorkerDestructionTerminatesWithoutThrowing
+)
 {
     EXPECT_EXIT(
         {
             ::alarm(5);
-            std::set_terminate([]()
-            {
-                // The old noexcept destructor terminated while handling
-                // a thrown logic_error. Self-destruction must terminate
-                // directly, without introducing an active exception.
-                ::_exit(std::current_exception() ? 4 : 0);
-            });
+            std::set_terminate(
+                []()
+                {
+                    // The old noexcept destructor terminated while
+                    // handling a thrown logic_error. Self-destruction
+                    // must terminate directly, without introducing an
+                    // active exception.
+                    ::_exit(std::current_exception() ? 4 : 0);
+                }
+            );
             auto* thread = new EventLoopThread;
             auto* loop = thread->startLoop();
             loop->queueInLoop([thread]() { delete thread; });
@@ -347,10 +392,13 @@ TEST(EventLoopThreadDeathTest, WorkerDestructionTerminatesWithoutThrowing)
             }
         },
         testing::ExitedWithCode(0),
-        "");
+        ""
+    );
 }
 
-TEST(EventLoopThreadDeathTest, WorkerStopRejectsWhileAnotherCallerJoins)
+TEST(
+    EventLoopThreadDeathTest, WorkerStopRejectsWhileAnotherCallerJoins
+)
 {
     EXPECT_EXIT(
         {
@@ -362,19 +410,21 @@ TEST(EventLoopThreadDeathTest, WorkerStopRejectsWhileAnotherCallerJoins)
             bool rejected = false;
             EventLoopThread thread;
             auto* loop = thread.startLoop();
-            loop->queueInLoop([&]()
-            {
-                entered.set_value();
-                released.wait();
-                try
+            loop->queueInLoop(
+                [&]()
                 {
-                    thread.stop();
+                    entered.set_value();
+                    released.wait();
+                    try
+                    {
+                        thread.stop();
+                    }
+                    catch (const std::logic_error&)
+                    {
+                        rejected = true;
+                    }
                 }
-                catch (const std::logic_error&)
-                {
-                    rejected = true;
-                }
-            });
+            );
             started.wait();
             std::jthread stopper([&]() { thread.stop(); });
             if (!EventLoopThreadTestPeer::waitForStop(thread))
@@ -386,7 +436,8 @@ TEST(EventLoopThreadDeathTest, WorkerStopRejectsWhileAnotherCallerJoins)
             ::_exit(rejected ? 0 : 4);
         },
         testing::ExitedWithCode(0),
-        "");
+        ""
+    );
 }
 
 TEST(EventLoopThreadTest, WorkerCanRequestStopWithoutJoining)
@@ -395,13 +446,17 @@ TEST(EventLoopThreadTest, WorkerCanRequestStopWithoutJoining)
     auto done = stopped.get_future();
     EventLoopThread thread;
     auto* loop = thread.startLoop();
-    loop->queueInLoop([&]()
-    {
-        thread.requestStop();
-        stopped.set_value();
-    });
-    ASSERT_EQ(done.wait_for(std::chrono::seconds(3)),
-              std::future_status::ready);
+    loop->queueInLoop(
+        [&]()
+        {
+            thread.requestStop();
+            stopped.set_value();
+        }
+    );
+    ASSERT_EQ(
+        done.wait_for(std::chrono::seconds(3)),
+        std::future_status::ready
+    );
     EXPECT_NO_THROW(thread.stop());
     EXPECT_NO_THROW(thread.requestStop());
 }

@@ -1,5 +1,6 @@
 /** @file
- * @brief Coordinates transport, context, features, and packet dispatch.
+ * @brief Coordinates transport, context, features, and packet
+ * dispatch.
  */
 #pragma once
 #include <atomic>
@@ -14,7 +15,8 @@ namespace service::gateway
 // features. Transport callbacks capture weak Runtime. All
 // events/control/final release belong to owner; send() alone may
 // delegate from foreign callers.
-/** @brief Coordinates transport, context, features, and packet dispatch. */
+/** @brief Coordinates transport, context, features, and packet
+ * dispatch. */
 class ConnectionRuntime final
     : public IConnection,
       public IConnectionControl,
@@ -56,9 +58,10 @@ public:
     void requestClose() override;
     /** @brief Returns the immutable connection context. */
     const ConnectionContext& context() const noexcept override;
-    ConnectionTimer
-        scheduleAt(ConnectionClock::time_point, std::function<void(IConnectionControl&)>)
-            override;
+    ConnectionTimer scheduleAt(
+        ConnectionClock::time_point,
+        std::function<void(IConnectionControl&)>
+    ) override;
     /** @brief Inspects packet. */
     FeatureResult inspectPacket(PacketView) override;
 

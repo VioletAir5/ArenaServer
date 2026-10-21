@@ -1,5 +1,6 @@
 /** @file
- * @brief Associates a file descriptor with event callbacks and epoll interest.
+ * @brief Associates a file descriptor with event callbacks and epoll
+ * interest.
  */
 #pragma once
 
@@ -14,7 +15,8 @@
 namespace service::gateway
 {
 
-/** @brief Associates a file descriptor with event callbacks and epoll interest. */
+/** @brief Associates a file descriptor with event callbacks and epoll
+ * interest. */
 class Channel
 {
     using EventCallback = std::function<void()>;

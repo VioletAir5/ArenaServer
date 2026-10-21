@@ -26,7 +26,8 @@ namespace service::gateway
 // copies and queues bytes from any thread; foreign callers need
 // shared ownership. id() is also cross-thread safe. start() follows
 // callback setup and requires shared ownership.
-/** @brief Owns one Boost.Asio TCP connection and its asynchronous I/O. */
+/** @brief Owns one Boost.Asio TCP connection and its asynchronous
+ * I/O. */
 class AsioConnect final
     : public IConnection,
       public std::enable_shared_from_this<AsioConnect>
@@ -149,7 +150,8 @@ private:
 
     /// Buffer kept alive while an asynchronous read is in flight.
     std::shared_ptr<ReadBuffer> m_input{
-        std::make_shared<ReadBuffer>()};
+        std::make_shared<ReadBuffer>()
+    };
     // Concurrent callers enter here; the owner drains into m_output.
     mutable std::mutex m_sendMutex;
     /// Bytes waiting to be transferred to the owner thread.

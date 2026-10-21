@@ -86,25 +86,40 @@ private:
     // =======================
 public:
     template <class F, class... Args>
-    auto submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>
+    auto submit(F&& f, Args&&... args)
+        -> std::future<std::invoke_result_t<F, Args...>>
     {
         using ReturnType = std::invoke_result_t<F, Args...>;
 
-        auto task = std::make_shared<std::packaged_task<ReturnType()>>(
-            [func = std::forward<F>(f),
-             arguments = std::make_tuple(std::forward<Args>(args)...)]() mutable
-            {
-                return std::apply(
-                    [&func](auto&&... unpacked) -> ReturnType
-                    { return std::invoke(func, std::forward<decltype(unpacked)>(unpacked)...); },
-                    std::move(arguments));
-            });
+        auto
+            task = std::make_shared<std::packaged_task<ReturnType()>>(
+                [func = std::forward<F>(f),
+                 arguments = std::make_tuple(
+                     std::forward<Args>(args)...
+                 )]() mutable
+                {
+                    return std::apply(
+                        [&func](auto&&... unpacked) -> ReturnType
+                        {
+                            return std::invoke(
+                                func,
+                                std::forward<decltype(unpacked)>(
+                                    unpacked
+                                )...
+                            );
+                        },
+                        std::move(arguments)
+                    );
+                }
+            );
 
         std::future<ReturnType> future = task->get_future();
 
         if (_state.load() != State::Running)
         {
-            throw std::runtime_error("thread pool is not accepting tasks");
+            throw std::runtime_error(
+                "thread pool is not accepting tasks"
+            );
         }
 
         if (!_tasks.push([task] { (*task)(); }))

@@ -1,5 +1,6 @@
 /** @file
- * @brief Coordinates transport, context, features, and packet dispatch.
+ * @brief Coordinates transport, context, features, and packet
+ * dispatch.
  */
 #include "net/ConnectionRuntime.h"
 
@@ -21,8 +22,8 @@ ConnectionTimer::ConnectionTimer(ConnectionTimer&& other) noexcept
     : m_cancel(std::exchange(other.m_cancel, {}))
 {
 }
-ConnectionTimer& ConnectionTimer::operator=(ConnectionTimer&& other
-) noexcept
+ConnectionTimer&
+ConnectionTimer::operator=(ConnectionTimer&& other) noexcept
 {
     if (this != &other)
     {
@@ -92,12 +93,15 @@ void ConnectionRuntime::start()
     m_context->session->setCloseRequest(
         [weak = weak_from_this(), defer = m_scheduler.defer]
         {
-            defer([weak]
-            {
-                if (auto self = weak.lock())
-                    self->requestClose();
-            });
-        });
+            defer(
+                [weak]
+                {
+                    if (auto self = weak.lock())
+                        self->requestClose();
+                }
+            );
+        }
+    );
     m_started = true;
     m_features.m_sealed = true;
     ++m_eventDepth;
@@ -112,7 +116,9 @@ void ConnectionRuntime::start()
     }
     catch (...)
     {
-        m_context->rejections->record(RejectionReason::CallbackFailure);
+        m_context->rejections->record(
+            RejectionReason::CallbackFailure
+        );
         requestClose();
     }
     finishEvent();
@@ -131,7 +137,9 @@ void ConnectionRuntime::received(std::span<const std::byte> data)
     }
     catch (...)
     {
-        m_context->rejections->record(RejectionReason::CallbackFailure);
+        m_context->rejections->record(
+            RejectionReason::CallbackFailure
+        );
         requestClose();
     }
     finishEvent();
@@ -162,7 +170,9 @@ void ConnectionRuntime::outputChanged(std::size_t bytes)
     }
     catch (...)
     {
-        m_context->rejections->record(RejectionReason::CallbackFailure);
+        m_context->rejections->record(
+            RejectionReason::CallbackFailure
+        );
         requestClose();
     }
     m_notifyingOutput = false;
@@ -296,7 +306,9 @@ ConnectionTimer ConnectionRuntime::scheduleAt(
                 }
                 catch (...)
                 {
-                    self->m_context->rejections->record(RejectionReason::CallbackFailure);
+                    self->m_context->rejections->record(
+                        RejectionReason::CallbackFailure
+                    );
                     self->requestClose();
                 }
                 self->finishEvent();
@@ -325,7 +337,9 @@ FeatureResult ConnectionRuntime::inspectPacket(PacketView packet)
     }
     catch (...)
     {
-        m_context->rejections->record(RejectionReason::CallbackFailure);
+        m_context->rejections->record(
+            RejectionReason::CallbackFailure
+        );
         result = FeatureResult::Close;
     }
     if (result == FeatureResult::Close)

@@ -26,9 +26,11 @@ PacketHandleResult EchoHandler::handle(PacketContext& context)
     {
         return PacketHandleResult::Reject;
     }
-    context.connection.send(std::as_bytes(
-        std::span(response->peek(), response->readableBytes())
-    ));
+    context.connection.send(
+        std::as_bytes(
+            std::span(response->peek(), response->readableBytes())
+        )
+    );
     return context.connection.connected()
                ? PacketHandleResult::Handled
                : PacketHandleResult::Reject;

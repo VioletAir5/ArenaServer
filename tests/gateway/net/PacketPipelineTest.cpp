@@ -150,13 +150,15 @@ TEST(PacketPipelineTest, ForwardsInOrderAndStopsWhenHandled)
             return PacketHandleResult::Handled;
         }
     );
-    second->setNext(std::make_unique<RecordingHandler>(
-        [&](PacketContext&)
-        {
-            order.push_back(3);
-            return std::nullopt;
-        }
-    ));
+    second->setNext(
+        std::make_unique<RecordingHandler>(
+            [&](PacketContext&)
+            {
+                order.push_back(3);
+                return std::nullopt;
+            }
+        )
+    );
     first->setNext(std::move(second));
     PacketPipeline pipeline(std::move(first));
 
@@ -173,13 +175,15 @@ TEST(PacketPipelineTest, RejectStopsBeforeDownstreamHandler)
         [](PacketContext&) { return PacketHandleResult::Reject; }
     );
     int downstream = 0;
-    rejecting->setNext(std::make_unique<RecordingHandler>(
-        [&](PacketContext&)
-        {
-            ++downstream;
-            return PacketHandleResult::Handled;
-        }
-    ));
+    rejecting->setNext(
+        std::make_unique<RecordingHandler>(
+            [&](PacketContext&)
+            {
+                ++downstream;
+                return PacketHandleResult::Handled;
+            }
+        )
+    );
     PacketPipeline pipeline(std::move(rejecting));
 
     EXPECT_EQ(pipeline.process(context), PacketHandleResult::Reject);
@@ -218,15 +222,17 @@ TEST(
     service::protocol::PacketHeader header;
     auto decoder = std::make_unique<EnvelopeDecodeHandler>();
     int routed = 0;
-    decoder->setNext(std::make_unique<RecordingHandler>(
-        [&](PacketContext& packet)
-        {
-            EXPECT_TRUE(packet.envelope.has_value());
-            EXPECT_EQ(packet.envelope->ping().nonce(), 123);
-            ++routed;
-            return PacketHandleResult::Handled;
-        }
-    ));
+    decoder->setNext(
+        std::make_unique<RecordingHandler>(
+            [&](PacketContext& packet)
+            {
+                EXPECT_TRUE(packet.envelope.has_value());
+                EXPECT_EQ(packet.envelope->ping().nonce(), 123);
+                ++routed;
+                return PacketHandleResult::Handled;
+            }
+        )
+    );
     PacketPipeline pipeline(std::move(decoder));
     PacketContext valid{connection, header, *wire};
     EXPECT_EQ(pipeline.process(valid), PacketHandleResult::Handled);
@@ -234,7 +240,8 @@ TEST(
     PacketContext malformed{
         connection,
         header,
-        std::string_view("\x62\x80", 2)};
+        std::string_view("\x62\x80", 2)
+    };
     EXPECT_EQ(
         pipeline.process(malformed),
         PacketHandleResult::Reject
@@ -348,14 +355,16 @@ TEST(
     auto decoder = std::make_unique<EnvelopeDecodeHandler>();
     auto ping = std::make_unique<PingHandler>();
     int routed = 0;
-    ping->setNext(std::make_unique<RecordingHandler>(
-        [&](PacketContext& context)
-        {
-            EXPECT_TRUE(context.envelope->has_login_request());
-            ++routed;
-            return PacketHandleResult::Handled;
-        }
-    ));
+    ping->setNext(
+        std::make_unique<RecordingHandler>(
+            [&](PacketContext& context)
+            {
+                EXPECT_TRUE(context.envelope->has_login_request());
+                ++routed;
+                return PacketHandleResult::Handled;
+            }
+        )
+    );
     decoder->setNext(std::move(ping));
     auto callback = makePacketHandler(
         PacketPipeline(std::move(decoder)),

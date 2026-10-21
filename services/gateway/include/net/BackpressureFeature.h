@@ -7,14 +7,16 @@ namespace service::gateway
 {
 // Policy only: transport always enforces its 1 MiB ceiling before
 // copying.
-/** @brief Pauses reads while queued output exceeds configured limits. */
+/** @brief Pauses reads while queued output exceeds configured limits.
+ */
 class BackpressureFeature final : public IConnectionFeature
 {
 public:
     static constexpr std::size_t kLowWaterMark = 256 * 1024;
     static constexpr std::size_t kHighWaterMark = 512 * 1024;
     static constexpr std::size_t kHardOutputLimit = 1024 * 1024;
-    static constexpr auto kSlowClientTimeout = std::chrono::seconds(5
+    static constexpr auto kSlowClientTimeout = std::chrono::seconds(
+        5
     );
     explicit BackpressureFeature(
         std::size_t low = kLowWaterMark,

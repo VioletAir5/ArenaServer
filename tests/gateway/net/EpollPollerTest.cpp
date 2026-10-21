@@ -19,9 +19,9 @@
 #include "net/Channel.h"
 #include "os/FileDescriptor.h"
 
+using service::FileDescriptor;
 using service::gateway::Channel;
 using service::gateway::EpollPoller;
-using service::FileDescriptor;
 
 namespace
 {
@@ -49,9 +49,7 @@ public:
     explicit ScopedSignalHandler(int signal)
         : signal_(signal)
     {
-        struct sigaction action
-        {
-        };
+        struct sigaction action{};
         action.sa_handler = emptySignalHandler;
         sigemptyset(&action.sa_mask);
         if (::sigaction(signal_, &action, &previous_) < 0)
@@ -71,9 +69,7 @@ public:
 
 private:
     int signal_;
-    struct sigaction previous_
-    {
-    };
+    struct sigaction previous_{};
 };
 } // namespace
 
@@ -217,7 +213,8 @@ TEST(EpollPollerTest, InterruptedWaitClearsPreviousResults)
     std::thread interrupter(
         [waitingThread]
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20)
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(20)
             );
             ::pthread_kill(waitingThread, SIGUSR1);
         }

@@ -36,8 +36,8 @@ public:
     // Finish producers and tear down worker-owned channels on their
     // owner loops before stop(). Requests all workers to quit, joins
     // all, then rethrows the first worker error. Repeated stop() is
-    // harmless. This is not a pending-task drain: await task completion
-    // before requesting shutdown.
+    // harmless. This is not a pending-task drain: await task
+    // completion before requesting shutdown.
     void stop();
 
     // Non-owning pointers: queue work through

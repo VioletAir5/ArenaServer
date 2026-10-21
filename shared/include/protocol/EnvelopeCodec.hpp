@@ -12,8 +12,9 @@
 
 namespace service::protocol
 {
-// Bounds apply to the serialized protobuf payload inside PacketCodec's
-// existing frame. A failed decode leaves the output message unchanged.
+// Bounds apply to the serialized protobuf payload inside
+// PacketCodec's existing frame. A failed decode leaves the output
+// message unchanged.
 /** @brief Encodes and decodes protocol envelope messages. */
 class EnvelopeCodec
 {
@@ -25,8 +26,7 @@ public:
         std::span<const std::byte> bytes,
         arena::protocol::Envelope& output
     );
-    static std::optional<std::string> encode(
-        const arena::protocol::Envelope& envelope
-    );
+    static std::optional<std::string>
+    encode(const arena::protocol::Envelope& envelope);
 };
 } // namespace service::protocol

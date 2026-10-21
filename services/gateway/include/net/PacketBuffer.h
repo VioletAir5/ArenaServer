@@ -15,7 +15,8 @@ static constexpr std::size_t kMaxPacketSize = 256 * 1024;   // 256 KB
 
 // Gateway capacity policy and legacy names over the shared buffer
 // storage.
-/** @brief Provides the bounded byte buffer used by gateway transports. */
+/** @brief Provides the bounded byte buffer used by gateway
+ * transports. */
 class PacketBuffer final : public service::protocol::Buffer
 {
 public:

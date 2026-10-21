@@ -37,7 +37,8 @@ ConnectionScheduler connectionScheduler(EventLoop& loop)
                     loop.cancelTimer(id);
                 }
             );
-        }};
+        }
+    };
 }
 ConnectionScheduler
 connectionScheduler(boost::asio::any_io_executor executor)
@@ -67,6 +68,7 @@ connectionScheduler(boost::asio::any_io_executor executor)
                     timer->cancel(ignored);
                 }
             );
-        }};
+        }
+    };
 }
 } // namespace service::gateway

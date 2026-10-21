@@ -28,8 +28,13 @@ public:
 
 private:
     friend class AccountSessions;
-    SessionLease(SessionBinding, std::int64_t, std::function<std::int64_t()>,
-                 std::function<void()>, std::weak_ptr<AccountSessions>);
+    SessionLease(
+        SessionBinding,
+        std::int64_t,
+        std::function<std::int64_t()>,
+        std::function<void()>,
+        std::weak_ptr<AccountSessions>
+    );
     const std::int64_t m_expiresAt;
     const std::function<std::int64_t()> m_now;
     const std::function<void()> m_kick;
@@ -42,20 +47,26 @@ struct SessionGrant
     std::string token;
 };
 
-// Shared by every listener/worker in one gateway process. Only the short
-// replacement/conditional-release transaction holds m_mutex; kick runs after it.
-// A disconnected record retains epoch until its JWT expires, permitting resume.
-class AccountSessions final : public std::enable_shared_from_this<AccountSessions>
+// Shared by every listener/worker in one gateway process. Only the
+// short replacement/conditional-release transaction holds m_mutex;
+// kick runs after it. A disconnected record retains epoch until its
+// JWT expires, permitting resume.
+class AccountSessions final
+    : public std::enable_shared_from_this<AccountSessions>
 {
 public:
     explicit AccountSessions(std::size_t maxAccounts = 100000);
     std::expected<SessionGrant, service::auth::AuthError> install(
-        arena::domain::PlayerId, std::uint64_t connectionId,
+        arena::domain::PlayerId,
+        std::uint64_t connectionId,
         std::optional<service::auth::TokenClaims> resume,
-        const service::auth::JwtTokens&, std::function<void()> kick);
+        const service::auth::JwtTokens&,
+        std::function<void()> kick
+    );
     void detach(SessionBinding) noexcept;
     std::size_t activeCount() const;
-    std::optional<std::uint64_t> currentEpoch(arena::domain::PlayerId) const;
+    std::optional<std::uint64_t>
+        currentEpoch(arena::domain::PlayerId) const;
 
 private:
     struct Entry
@@ -67,8 +78,9 @@ private:
     const std::size_t m_maxAccounts;
     mutable std::mutex m_mutex;
     std::unordered_map<std::uint64_t, Entry> m_accounts;
-    // Random boot seed, then process-wide monotonic epoch. Erasing/recreating an
-    // account never resets it; separate processes still require a shared authority.
+    // Random boot seed, then process-wide monotonic epoch.
+    // Erasing/recreating an account never resets it; separate
+    // processes still require a shared authority.
     std::uint64_t m_epoch{0};
 };
 } // namespace service::gateway

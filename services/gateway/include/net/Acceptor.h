@@ -31,7 +31,8 @@ public:
     void setNewConnectionCallback(NewConnectionCallback cb);
 
 private:
-    /** @brief Accepts ready client sockets until the queue is drained. */
+    /** @brief Accepts ready client sockets until the queue is
+     * drained. */
     void handleRead();
     void suspendForResourceError();
     /** @brief Schedules retry. */
@@ -46,7 +47,8 @@ private:
     Socket m_listenSocket;
     /// Stores the listen channel.
     Channel m_listenChannel;
-    // Reserved descriptor lets EMFILE still accept and reject one peer.
+    // Reserved descriptor lets EMFILE still accept and reject one
+    // peer.
     service::FileDescriptor m_reserveFd;
     /// Stores the retry timer id.
     TimerId m_retryTimerId{0};

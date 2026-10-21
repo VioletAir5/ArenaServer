@@ -95,7 +95,8 @@ FrameDecodeStatus PacketCodec::feed(
                     }
                     target = size < PacketHeader::kHeaderSize
                                  ? PacketHeader::kHeaderSize
-                                 : PacketHeader::kPrefixSize + bodyLength;
+                                 : PacketHeader::kPrefixSize +
+                                       bodyLength;
                 }
                 if (size == target &&
                     status == HeaderDecodeStatus::Complete)

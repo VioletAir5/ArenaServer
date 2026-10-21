@@ -1,5 +1,6 @@
 /** @file
- * @brief Runs channel callbacks, timers, and queued work on one thread.
+ * @brief Runs channel callbacks, timers, and queued work on one
+ * thread.
  */
 #pragma once
 
@@ -18,7 +19,8 @@
 
 namespace service::gateway
 {
-/** @brief Runs channel callbacks, timers, and queued work on one thread. */
+/** @brief Runs channel callbacks, timers, and queued work on one
+ * thread. */
 class EventLoop
 {
 public:
@@ -37,7 +39,8 @@ public:
     /** @brief Reports whether the caller owns this event loop. */
     bool isInLoopThread() const noexcept;
 
-    /** @brief Runs a callback now on the owner, or queues it from another thread.
+    /** @brief Runs a callback now on the owner, or queues it from
+     * another thread.
      * @param[in] cb Callback to run on the loop thread.
      */
     void runInLoop(Functor cb);

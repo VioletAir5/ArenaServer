@@ -49,7 +49,8 @@ public:
 
 private:
     friend class ConnectionRuntime;
-    void disconnect() noexcept; // Runtime lifecycle only; never a foreign control API.
+    void disconnect() noexcept; // Runtime lifecycle only; never a
+                                // foreign control API.
     void requireOwner() const;
 
     /// Thread that owns mutable connection state.
@@ -65,7 +66,8 @@ private:
 // values captured by accept. acceptedAt precedes worker handoff and
 // WS upgrade. IPv4 peer is taken from the socket, never HTTP/client
 // input.
-/** @brief Carries immutable connection identity and session context. */
+/** @brief Carries immutable connection identity and session context.
+ */
 struct ConnectionContext final
 {
     using Clock = std::chrono::steady_clock;
@@ -86,7 +88,8 @@ struct ConnectionContext final
     const Clock::time_point acceptedAt;
     /// Owner-thread authentication state shared with handlers.
     const std::shared_ptr<ConnectionSession> session;
-    // Shared atomic counters may be read from monitoring/other workers.
+    // Shared atomic counters may be read from monitoring/other
+    // workers.
     const RejectionCounters::Ptr rejections;
 };
 } // namespace service::gateway

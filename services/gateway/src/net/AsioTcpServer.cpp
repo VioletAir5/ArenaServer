@@ -405,10 +405,12 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
     {
         acceptor.open(Tcp::v4());
         acceptor.set_option(Tcp::acceptor::reuse_address(true));
-        acceptor.bind(Tcp::endpoint(
-            boost::asio::ip::make_address_v4(address.ip()),
-            address.port()
-        ));
+        acceptor.bind(
+            Tcp::endpoint(
+                boost::asio::ip::make_address_v4(address.ip()),
+                address.port()
+            )
+        );
         acceptor.listen();
         acceptor.non_blocking(true);
         const int flags = ::fcntl(acceptor.native_handle(), F_GETFD);
@@ -483,7 +485,9 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
         acceptor.async_accept(
             *socket,
             *peerEndpoint,
-            [weak = weak_from_this(), socket, peerEndpoint](Error error)
+            [weak = weak_from_this(),
+             socket,
+             peerEndpoint](Error error)
             {
                 auto self = weak.lock();
                 if (!self)
@@ -500,8 +504,8 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                     self->acceptError(error);
                     return;
                 }
-                const auto acceptedAt = ConnectionContext::Clock::now(
-                );
+                const auto
+                    acceptedAt = ConnectionContext::Clock::now();
                 if (self->admissions.size() >= self->capacity)
                 {
                     std::cerr
@@ -511,8 +515,9 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                 }
                 else
                 {
-                    // accept(2) returned the address while the peer still
-                    // existed; getpeername after completion can lose it to RST.
+                    // accept(2) returned the address while the peer
+                    // still existed; getpeername after completion can
+                    // lose it to RST.
                     const auto& endpoint = *peerEndpoint;
                     const InetAddress peer(
                         endpoint.address().to_v4().to_string(),
@@ -562,7 +567,8 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                              accepted,
                              ticket,
                              peer,
-                             acceptedAt] {
+                             acceptedAt]
+                            {
                                 worker->add(
                                     ticket,
                                     accepted,
@@ -771,14 +777,16 @@ AsioTcpServer::AsioTcpServer(
     ConnectionHandlerFactory handlerFactory,
     ConnectionFeatureFactory featureFactory
 )
-    : m_impl(std::make_shared<Impl>(
-          context,
-          max,
-          idle,
-          workers,
-          std::move(handlerFactory),
-          std::move(featureFactory)
-      ))
+    : m_impl(
+          std::make_shared<Impl>(
+              context,
+              max,
+              idle,
+              workers,
+              std::move(handlerFactory),
+              std::move(featureFactory)
+          )
+      )
 {
     try
     {

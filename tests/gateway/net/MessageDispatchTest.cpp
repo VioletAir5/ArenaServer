@@ -77,11 +77,13 @@ struct MessageDispatchTest : testing::Test
     {
         registry->seal();
         auto decoder = std::make_unique<EnvelopeDecodeHandler>();
-        decoder->setNext(std::make_unique<MessageRouter>(
-            context,
-            std::move(registry),
-            std::move(logger)
-        ));
+        decoder->setNext(
+            std::make_unique<MessageRouter>(
+                context,
+                std::move(registry),
+                std::move(logger)
+            )
+        );
         runtime = std::make_shared<ConnectionRuntime>(
             transport,
             context,
@@ -91,7 +93,8 @@ struct MessageDispatchTest : testing::Test
                 {
                     deadlines.push_back(std::move(task));
                     return ConnectionTimer([&] { ++cancellations; });
-                }},
+                }
+            },
             makePacketHandler(
                 PacketPipeline(std::move(decoder)),
                 1024,
@@ -112,9 +115,11 @@ struct MessageDispatchTest : testing::Test
             std::as_bytes(std::span(*payload))
         );
         ASSERT_TRUE(frame);
-        runtime->received(std::as_bytes(
-            std::span(frame->peek(), frame->readableBytes())
-        ));
+        runtime->received(
+            std::as_bytes(
+                std::span(frame->peek(), frame->readableBytes())
+            )
+        );
     }
     wire::Envelope response()
     {
@@ -127,10 +132,12 @@ struct MessageDispatchTest : testing::Test
             {
                 EXPECT_EQ(header.m_type, 2);
                 EXPECT_EQ(header.m_requestId, 7);
-                EXPECT_TRUE(service::protocol::EnvelopeCodec::decode(
-                    std::as_bytes(std::span(payload)),
-                    result
-                ));
+                EXPECT_TRUE(
+                    service::protocol::EnvelopeCodec::decode(
+                        std::as_bytes(std::span(payload)),
+                        result
+                    )
+                );
                 ++responses;
                 return true;
             }
@@ -293,7 +300,8 @@ TEST_F(
             wire::Envelope reply;
             reply.mutable_login_response()->set_accepted(true);
             complete(reply);
-            complete(std::move(reply)
+            complete(
+                std::move(reply)
             ); // A copied completion still replies once.
         },
         MessageRouteOptions{false}
@@ -312,18 +320,24 @@ TEST_F(
     EXPECT_EQ(cancellations, 1);
     const auto logs = output.str();
     EXPECT_NE(
-        logs.find("event=request_start connection_id=1 request_id=7 "
-                  "msg_id=10"),
+        logs.find(
+            "event=request_start connection_id=1 request_id=7 "
+            "msg_id=10"
+        ),
         std::string::npos
     );
     EXPECT_NE(
-        logs.find("event=request_handler connection_id=1 "
-                  "request_id=7 msg_id=10"),
+        logs.find(
+            "event=request_handler connection_id=1 "
+            "request_id=7 msg_id=10"
+        ),
         std::string::npos
     );
     EXPECT_NE(
-        logs.find("event=request_end connection_id=1 request_id=7 "
-                  "msg_id=10 code=0"),
+        logs.find(
+            "event=request_end connection_id=1 request_id=7 "
+            "msg_id=10 code=0"
+        ),
         std::string::npos
     );
     EXPECT_EQ(logs.find("never-log-this-secret"), std::string::npos);
@@ -507,7 +521,8 @@ TEST_F(
     auto registry = std::make_shared<MessageRegistry>();
     registry->registerHandler(
         wire::MSG_LOGIN_REQUEST,
-        [](auto, auto) {
+        [](auto, auto)
+        {
             throw std::runtime_error("private implementation detail");
         },
         MessageRouteOptions{false}

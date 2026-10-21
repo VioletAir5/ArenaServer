@@ -167,8 +167,8 @@ TEST(
         makeConnectionHandler(invalid, context),
         std::invalid_argument
     );
-    ConnectionHandlerFactory throwing = [](ConnectionContext::Ptr
-                                        ) -> ConnectionMessageCallback
+    ConnectionHandlerFactory throwing =
+        [](ConnectionContext::Ptr) -> ConnectionMessageCallback
     { throw std::runtime_error("factory failed"); };
     EXPECT_THROW(
         makeConnectionHandler(throwing, context),

@@ -40,7 +40,8 @@ using MessageReply = std::
 using RequestCompletion = std::function<void(MessageReply)>;
 using MessageHandler = std::function<
     void(std::shared_ptr<const RequestMessage>, RequestCompletion)>;
-/** @brief Sets admission and timeout policy for a registered route. */
+/** @brief Sets admission and timeout policy for a registered route.
+ */
 struct MessageRouteOptions
 {
     /// Whether the connection must be authenticated first.
@@ -48,7 +49,8 @@ struct MessageRouteOptions
     /// Maximum time allowed for handler completion.
     std::chrono::milliseconds timeout{std::chrono::seconds(5)};
 };
-/** @brief Carries an application error code through handler failures. */
+/** @brief Carries an application error code through handler failures.
+ */
 class BusinessError final : public std::runtime_error
 {
 public:

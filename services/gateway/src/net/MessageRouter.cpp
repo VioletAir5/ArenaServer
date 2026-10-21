@@ -105,7 +105,8 @@ struct MessageRouter::State : std::enable_shared_from_this<State>
         bool explicitMsgId;
         std::uint64_t generation;
         ConnectionClock::time_point deadline{
-            ConnectionClock::time_point::max()};
+            ConnectionClock::time_point::max()
+        };
         ConnectionTimer timer;
     };
     ConnectionContext::Ptr context;
@@ -162,7 +163,8 @@ struct MessageRouter::State : std::enable_shared_from_this<State>
     }
     void respond(const Pending& entry, MessageReply result)
     {
-        if (!connection->connected() || context->session->superseded())
+        if (!connection->connected() ||
+            context->session->superseded())
         {
             log("request_end",
                 *entry.request,
@@ -241,9 +243,11 @@ struct MessageRouter::State : std::enable_shared_from_this<State>
                     ? RejectionReason::Unauthenticated
                     : RejectionReason::HandlerRejected
             );
-        connection->send(std::as_bytes(
-            std::span(frame->peek(), frame->readableBytes())
-        ));
+        connection->send(
+            std::as_bytes(
+                std::span(frame->peek(), frame->readableBytes())
+            )
+        );
         log("request_end", *entry.request, code);
     }
     void finish(
@@ -308,7 +312,8 @@ PacketHandleResult MessageRouter::handle(PacketContext& packet)
             envelope.msg_id() ? envelope.msg_id()
                               : payloadMsgId(envelope),
             envelope,
-            m_state->context}
+            m_state->context
+        }
     );
     State::Pending entry{
         request,
@@ -316,7 +321,8 @@ PacketHandleResult MessageRouter::handle(PacketContext& packet)
         envelope.msg_id() != 0,
         ++m_state->generation,
         ConnectionClock::time_point::max(),
-        ConnectionTimer{}};
+        ConnectionTimer{}
+    };
     if (auto found = m_state->pending.find(request->requestId);
         found != m_state->pending.end())
     {
@@ -328,7 +334,8 @@ PacketHandleResult MessageRouter::handle(PacketContext& packet)
         return PacketHandleResult::Handled;
     }
     m_state->log("request_start", *request, arena::protocol::ERR_OK);
-    const auto route = m_state->registry->m_routes.find(request->msgId
+    const auto route = m_state->registry->m_routes.find(
+        request->msgId
     );
     const auto reject = [&](ErrorCode code)
     {

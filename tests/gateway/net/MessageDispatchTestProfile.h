@@ -58,8 +58,9 @@ inline std::shared_ptr<const MessageRegistry> rpcTestRegistry()
             }
         );
         routes->seal();
-        return std::shared_ptr<const MessageRegistry>(std::move(routes
-        ));
+        return std::shared_ptr<const MessageRegistry>(
+            std::move(routes)
+        );
     }();
     return registry;
 }

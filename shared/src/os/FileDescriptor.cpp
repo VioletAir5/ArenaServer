@@ -18,7 +18,8 @@ FileDescriptor::~FileDescriptor()
     reset();
 }
 
-FileDescriptor& FileDescriptor::operator=(FileDescriptor&& other) noexcept
+FileDescriptor&
+FileDescriptor::operator=(FileDescriptor&& other) noexcept
 {
     if (&other == this)
     {

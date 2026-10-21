@@ -32,9 +32,11 @@ inline PacketHandleResult sendSecurityTestEnvelope(
     );
     if (!frame)
         return PacketHandleResult::Reject;
-    context.connection.send(std::as_bytes(
-        std::span(frame->peek(), frame->readableBytes())
-    ));
+    context.connection.send(
+        std::as_bytes(
+            std::span(frame->peek(), frame->readableBytes())
+        )
+    );
     return context.connection.connected()
                ? PacketHandleResult::Handled
                : PacketHandleResult::Reject;
@@ -93,7 +95,8 @@ inline ConnectionHandlerFactory makeSecurityTestFactory()
         auto login = std::make_unique<SecurityTestLoginHandler>(
             context->session
         );
-        login->setNext(std::make_unique<SecurityTestBusinessHandler>()
+        login->setNext(
+            std::make_unique<SecurityTestBusinessHandler>()
         );
         ping->setNext(std::move(login));
         gate->setNext(std::move(ping));
