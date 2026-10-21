@@ -1,0 +1,6 @@
+{
+    "clangd.path": "/usr/bin/clangd-21",
+    "clangd.arguments": [
+        "--query-driver=/usr/bin/g++-15"
+    ]
+}
