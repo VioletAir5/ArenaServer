@@ -7,14 +7,15 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 
 #include "net/InetAddress.h"
+#include "net/OnlineRegistry.h"
 #include "net/RejectionCounters.h"
 
 namespace service::gateway
 {
-class SessionLease;
 // Authentication state belongs to the connection owner. Shared
 // ownership extends lifetime; it does not permit access from a
 // different thread. This passive object owns no socket, timer, or
@@ -32,7 +33,11 @@ public:
     };
 
     ConnectionSession();
-    ~ConnectionSession();
+    /** @brief Releases passive metadata after its final shared owner.
+     * Final release may occur on a business thread after protocol
+     * shutdown.
+     */
+    ~ConnectionSession() noexcept;
     ConnectionSession(const ConnectionSession&) = delete;
     ConnectionSession& operator=(const ConnectionSession&) = delete;
 
@@ -42,16 +47,31 @@ public:
     // authentication.
     bool markAuthenticated();
     bool expireLogin();
+    /** @brief Installs a durable, thread-safe mailbox posting handle.
+     * The callback may outlive disconnect and must safely reject late
+     * work.
+     */
     void setCloseRequest(std::function<void()>);
     std::function<void()> closeRequest() const;
     bool bind(std::shared_ptr<SessionLease>);
     bool superseded() const;
+    /** @brief Returns the current authenticated binding on its
+     * connection owner. Returns empty when no authoritative lease is
+     * bound or it was superseded.
+     */
+    std::optional<SessionBinding> binding() const;
+    /** @brief Releases the session binding on its connection owner.
+     * @throws std::logic_error When called from a foreign thread.
+     */
+    void disconnect();
 
 private:
-    friend class ConnectionRuntime;
-    void disconnect() noexcept; // Runtime lifecycle only; never a
-                                // foreign control API.
     void requireOwner() const;
+    // Used on the owner during disconnect and by the final
+    // destructor. No live session accessor remains when foreign final
+    // release occurs; endpoint and account-directory handoff are
+    // independently synchronized.
+    void cleanup() noexcept;
 
     /// Thread that owns mutable connection state.
     const std::thread::id m_owner;

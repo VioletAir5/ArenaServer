@@ -13,7 +13,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "net/ConnectionRuntime.h"
+#include "net/ConnectionHost.h"
 #include "net/ConnectionSchedulers.h"
 #include "net/TcpConnection.h"
 
@@ -21,6 +21,12 @@ namespace service::gateway
 {
 namespace
 {
+struct AcceptedSocket
+{
+    std::shared_ptr<AdmissionController::Lease> admission;
+    Socket socket;
+};
+
 EventLoop* requireLoop(EventLoop* loop)
 {
     if (loop == nullptr)
@@ -66,7 +72,8 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
         Id id,
         Socket socket,
         InetAddress peer,
-        ConnectionContext::Clock::time_point acceptedAt
+        ConnectionContext::Clock::time_point acceptedAt,
+        std::shared_ptr<AdmissionController::Lease> admission
     )
     {
         std::shared_ptr<TcpConnection> connection;
@@ -82,34 +89,33 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
                 std::move(peer),
                 acceptedAt
             );
-            auto runtime = makeConnectionRuntime(
+            auto host = makeConnectionHost(
                 connection,
                 context,
                 connectionScheduler(*loop),
                 handlerFactory,
                 featureFactory
             );
-            const std::weak_ptr<ConnectionRuntime>
-                runtimeWeak = runtime;
+            const std::weak_ptr<ConnectionHost> hostWeak = host;
             connection->setMessageCallback(
-                [runtimeWeak](TcpConnection&, std::string_view bytes)
+                [hostWeak](TcpConnection&, std::string_view bytes)
                 {
-                    if (auto r = runtimeWeak.lock())
+                    if (auto r = hostWeak.lock())
                         r->received(std::as_bytes(std::span(bytes)));
                 }
             );
             connection->setOutputCallback(
-                [runtimeWeak](std::size_t bytes)
+                [hostWeak](std::size_t bytes)
                 {
-                    if (auto r = runtimeWeak.lock())
+                    if (auto r = hostWeak.lock())
                         r->outputChanged(bytes);
                 }
             );
             const auto weak = weak_from_this();
             connection->setCloseCallback(
-                [weak, runtimeWeak, id](TcpConnection*)
+                [weak, hostWeak, id](TcpConnection*)
                 {
-                    if (auto r = runtimeWeak.lock())
+                    if (auto r = hostWeak.lock())
                         r->transportClosed();
                     if (auto worker = weak.lock())
                     {
@@ -117,8 +123,11 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
                     }
                 }
             );
-            connections.emplace(id, Entry{runtime, connection.get()});
-            runtime->start();
+            connections.emplace(
+                id,
+                Entry{std::move(admission), host, connection.get()}
+            );
+            host->start();
             auto [timer, inserted] = idleTimers.emplace(id, 0);
             (void)inserted;
             timer->second = loop->runAfter(
@@ -132,10 +141,8 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
                 }
             );
         }
-        catch (const std::exception& error)
+        catch (...)
         {
-            std::cerr << "connection setup failed: " << error.what()
-                      << '\n';
             cancelIdleTimer(id);
             if (connection)
             {
@@ -145,6 +152,21 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
             }
             socket.close();
             onRemoved(id);
+            try
+            {
+                throw;
+            }
+            catch (const std::exception& error)
+            {
+                std::cerr
+                    << "connection setup failed: " << error.what()
+                    << '\n';
+            }
+            catch (...)
+            {
+                std::cerr
+                    << "connection setup failed: unknown exception\n";
+            }
         }
     }
 
@@ -231,7 +253,7 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     {
         for (auto& [id, connection] : connections)
         {
-            connection->shutdownWrite();
+            connection.host->shutdown();
         }
     }
 
@@ -271,8 +293,10 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     const RemovedCallback onRemoved;
     struct Entry
     {
-        std::shared_ptr<ConnectionRuntime> runtime;
-        TcpConnection* transport; // Owned by runtime.
+        // Destroy host/transport before returning the shared slot.
+        std::shared_ptr<AdmissionController::Lease> admission;
+        std::shared_ptr<ConnectionHost> host;
+        TcpConnection* transport; // Owned by host.
         TcpConnection* operator->() const noexcept
         {
             return transport;
@@ -291,13 +315,22 @@ TcpServer::TcpServer(
     std::chrono::milliseconds idleTimeout,
     std::size_t workerCount,
     ConnectionHandlerFactory handlerFactory,
-    ConnectionFeatureFactory featureFactory
+    ConnectionFeatureFactory featureFactory,
+    std::shared_ptr<AdmissionController> admission
 )
     : m_loop(requireLoop(loop))
     , m_threadPool(m_loop, workerCount)
     , m_acceptor(m_loop, listenAddress)
     , m_maxConnections(maxConnections)
     , m_workerCount(workerCount)
+    , m_admission(
+          admission ? std::move(admission)
+                    : std::make_shared<AdmissionController>(
+                          AdmissionController::Limits{
+                              maxConnections, maxConnections
+                          }
+                      )
+      )
 {
     if (idleTimeout <= std::chrono::milliseconds::zero())
     {
@@ -532,8 +565,14 @@ void TcpServer::handleNewConnection(
     }
     if (m_admissions.size() >= m_maxConnections)
     {
+        m_admission->recordLocalRejection();
         std::cerr << "connection limit reached, peer="
                   << peer.toString() << '\n';
+        return;
+    }
+    auto admission = m_admission->tryAcquire(peer);
+    if (!admission)
+    {
         return;
     }
     if (m_nextConnectionId == 0)
@@ -556,7 +595,9 @@ void TcpServer::handleNewConnection(
     // std::function requires a copyable capture; the Socket remains
     // uniquely owned and is moved into TcpConnection on its selected
     // worker.
-    auto accepted = std::make_shared<Socket>(std::move(socket));
+    auto accepted = std::make_shared<AcceptedSocket>(
+        AcceptedSocket{std::move(admission), std::move(socket)}
+    );
     m_admissions.insert(id);
     try
     {
@@ -565,9 +606,10 @@ void TcpServer::handleNewConnection(
             {
                 selected->addConnection(
                     id,
-                    std::move(*accepted),
+                    std::move(accepted->socket),
                     peer,
-                    acceptedAt
+                    acceptedAt,
+                    accepted->admission
                 );
             }
         );

@@ -2,6 +2,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -12,17 +13,14 @@
 
 #include "net/AsioTcpServer.h"
 #include "net/ConnectionHandler.h"
+#include "net/ConnectionSchedulers.h"
 #include "net/InetAddress.h"
+#include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
 #include "net/PreLoginHandshake.h"
 #include "net/WebSocketServer.h"
 
-#include "AuthTestProfile.h"
-#include "ChaosTestProfile.h"
-#include "ConnectionContextTestHandler.h"
-#include "ConnectionFeatureTestProfile.h"
-#include "MessageDispatchTestProfile.h"
-#include "SecurityPolicyTestProfile.h"
+#include "TransportTestProfile.h"
 
 using namespace service::gateway;
 
@@ -39,34 +37,23 @@ int main(int argc, char** argv)
     const std::string origin = argv[3];
     const std::string mode = argv[4];
     boost::asio::io_context context;
-    ConnectionHandlerFactory handshake =
-        [](ConnectionContext::Ptr connection)
-    { return makePreLoginHandshakeHandler(std::move(connection)); };
-    ConnectionFeatureFactory features;
-    if (mode == "features")
-    {
-        features = makeFeatureTestProfile();
-        handshake = [](ConnectionContext::Ptr)
-        { return makePacketEchoHandler(); };
-    }
-    if (mode == "chaos" || mode == "chaos_packet")
-    {
-        features = makeChaosTestFeatures();
-        if (mode == "chaos_packet")
-            handshake = [](ConnectionContext::Ptr)
-            { return makePacketEchoHandler(); };
-    }
-    if (mode == "auth")
-        handshake = makeAuthTestFactory();
-    if (mode == "rpc")
-        handshake = makeRpcTestFactory();
-    if (mode == "security")
-    {
-        handshake = makeSecurityTestFactory();
-        features = makeSecurityTestFeatures();
-    }
-    if (mode == "context")
-        handshake = makeContextTestFactory();
+    const bool lifecycle = mode == "drain" || mode == "stop_drain" ||
+                           mode == "deadline" ||
+                           mode == "destroy_drain";
+    std::shared_ptr<OnlineRegistry> online;
+    ConnectionHandlerFactory handshake = transportTestProfile(
+        mode == "flood" || lifecycle ? "handshake" : mode,
+        &online
+    );
+    std::unique_ptr<OnlineRegistryMaintenance> upkeep;
+    if (online)
+        upkeep = std::make_unique<OnlineRegistryMaintenance>(
+            online,
+            connectionScheduler(context.get_executor())
+        );
+    auto admission = std::make_shared<AdmissionController>(
+        AdmissionController::Limits{100, 100}
+    );
     AsioTcpServer tcp(
         context,
         InetAddress("127.0.0.1", tcpPort),
@@ -74,14 +61,16 @@ int main(int argc, char** argv)
         std::chrono::seconds(60),
         0,
         handshake,
-        features
+        {},
+        admission
     );
     ConnectionHandlerFactory wsFactory = handshake;
+    auto requestStop = std::make_shared<std::function<void()>>();
     if (mode == "flood")
     {
         wsFactory = [](ConnectionContext::Ptr)
         {
-            return [](IConnection& connection,
+            return [](ConnectionChannel& connection,
                       std::span<const std::byte>)
             {
                 const std::string chunk(128 * 1024, 'x');
@@ -90,27 +79,84 @@ int main(int argc, char** argv)
             };
         };
     }
-    WebSocketServer ws(
+    if (lifecycle)
+    {
+        wsFactory = [mode, requestStop](ConnectionContext::Ptr)
+        {
+            return [mode, requestStop](
+                       ConnectionChannel& channel,
+                       std::span<const std::byte>
+                   )
+            {
+                if (mode != "drain" && mode != "stop_drain")
+                    return;
+                for (int i = 0; i != 6; ++i)
+                {
+                    const std::string chunk(
+                        96 * 1024,
+                        static_cast<char>('a' + i)
+                    );
+                    channel.send(std::as_bytes(std::span(chunk)));
+                }
+                if (mode == "drain")
+                {
+                    channel.shutdown();
+                    const std::string ignored = "after shutdown";
+                    channel.send(std::as_bytes(std::span(ignored)));
+                }
+                else
+                    (*requestStop)();
+            };
+        };
+    }
+    auto ws = std::make_unique<WebSocketServer>(
         context,
         InetAddress("127.0.0.1", wsPort),
         origin,
         wsFactory,
         100,
-        features
+        ConnectionFeatureFactory{},
+        admission
     );
+    *requestStop = [&] { ws->stop(std::chrono::seconds(2)); };
     boost::asio::signal_set signals(context, SIGUSR1, SIGTERM);
     signals.async_wait(
         [&](auto error, int)
         {
             if (!error)
             {
-                ws.stop();
-                tcp.stop(std::chrono::milliseconds(0));
+                if (upkeep)
+                    upkeep->stop();
+                const auto
+                    grace = mode == "rpc"
+                                ? std::chrono::milliseconds(300)
+                                : std::chrono::milliseconds::zero();
+                if (mode == "deadline")
+                    ws->stop(std::chrono::milliseconds(250));
+                else if (mode == "destroy_drain")
+                {
+                    ws->stop(std::chrono::seconds(5));
+                    ws.reset();
+                }
+                else
+                    ws->stop(grace);
+                tcp.stop(grace);
             }
         }
     );
     std::cout << "WS_TEST_READY" << std::endl;
     context.run();
+    if (upkeep)
+        upkeep->shutdown();
+    if (online)
+        printOnlineTestCounts(*online);
+    if (lifecycle)
+        std::cout << "WS_TEST_STOPPED connections="
+                  << (ws ? ws->connectionCount() : 0)
+                  << " active=" << admission->snapshot().active
+                  << std::endl;
+    if (mode == "features")
+        printPacketPolicyTestCounters();
     if (mode == "chaos" || mode == "chaos_packet")
         printChaosTestCounters();
     if (mode == "security")

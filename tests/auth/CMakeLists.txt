@@ -1,4 +1,5 @@
-add_executable(arena_auth_tests AuthSessionTest.cpp)
+add_executable(arena_auth_tests AuthSessionTest.cpp
+    OnlineRegistryTest.cpp OnlineRegistryMaintenanceTest.cpp OnlineProtocolTest.cpp)
 target_link_libraries(arena_auth_tests PRIVATE arena_gateway GTest::gtest_main)
 target_compile_options(arena_auth_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
@@ -24,6 +25,12 @@ foreach(backend epoll asio)
                 "$<TARGET_FILE:${auth_host}>" tcp ${workers})
         set_tests_properties(AccountLoginTransport_${backend}_${workers} PROPERTIES
             TIMEOUT 40 RUN_SERIAL TRUE LABELS "integration;network;authentication")
+        add_test(NAME OnlinePresenceTransport_${backend}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/OnlinePresenceIntegrationTest.py"
+                "$<TARGET_FILE:${auth_host}>" tcp ${workers})
+        set_tests_properties(OnlinePresenceTransport_${backend}_${workers} PROPERTIES
+            TIMEOUT 35 RUN_SERIAL TRUE LABELS "integration;network;authentication;presence")
     endforeach()
 endforeach()
 add_test(NAME AccountLoginTransport_ws
@@ -32,3 +39,9 @@ add_test(NAME AccountLoginTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(AccountLoginTransport_ws PROPERTIES
     TIMEOUT 40 RUN_SERIAL TRUE LABELS "integration;network;authentication;websocket")
+add_test(NAME OnlinePresenceTransport_ws
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/OnlinePresenceIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
+set_tests_properties(OnlinePresenceTransport_ws PROPERTIES
+    TIMEOUT 35 RUN_SERIAL TRUE LABELS "integration;network;authentication;presence;websocket")

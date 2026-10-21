@@ -24,7 +24,7 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/AsioConnect.h"
-#include "net/ConnectionRuntime.h"
+#include "net/ConnectionHost.h"
 #include "net/ConnectionSchedulers.h"
 
 namespace service::gateway
@@ -58,6 +58,9 @@ struct AcceptedFd
     {
         return std::exchange(fd, -1);
     }
+    // Descriptor destruction precedes the reservation's release even
+    // when a queued handoff is discarded before worker registration.
+    std::shared_ptr<AdmissionController::Lease> admission;
     int fd;
 };
 
@@ -79,7 +82,9 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
     std::function<void(std::uint64_t)> onRemoved;
     struct Entry
     {
-        std::shared_ptr<ConnectionRuntime> runtime;
+        // Release admission only after host/transport retirement.
+        std::shared_ptr<AdmissionController::Lease> admission;
+        std::shared_ptr<ConnectionHost> host;
         AsioConnect* transport;
         AsioConnect* operator->() const noexcept
         {
@@ -198,35 +203,34 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
                 std::move(peer),
                 acceptedAt
             );
-            auto runtime = makeConnectionRuntime(
+            auto host = makeConnectionHost(
                 connection,
                 contextInfo,
                 connectionScheduler(connection->executor()),
                 handlerFactory,
                 featureFactory
             );
-            const std::weak_ptr<ConnectionRuntime>
-                runtimeWeak = runtime;
+            const std::weak_ptr<ConnectionHost> hostWeak = host;
             connection->setMessageCallback(
-                [runtimeWeak](IConnection&, auto bytes)
+                [hostWeak](ITransport&, auto bytes)
                 {
-                    if (auto r = runtimeWeak.lock())
+                    if (auto r = hostWeak.lock())
                         r->received(bytes);
                 }
             );
             connection->setOutputCallback(
-                [runtimeWeak](std::size_t bytes)
+                [hostWeak](std::size_t bytes)
                 {
-                    if (auto r = runtimeWeak.lock())
+                    if (auto r = hostWeak.lock())
                         r->outputChanged(bytes);
                 }
             );
             connection->setCloseCallback(
                 [weak = weak_from_this(),
-                 runtimeWeak,
+                 hostWeak,
                  ticket](AsioConnect*)
                 {
-                    if (auto r = runtimeWeak.lock())
+                    if (auto r = hostWeak.lock())
                         r->transportClosed();
                     if (auto worker = weak.lock())
                     {
@@ -236,19 +240,17 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
             );
             connections.emplace(
                 ticket,
-                Entry{runtime, connection.get()}
+                Entry{accepted->admission, host, connection.get()}
             );
-            runtime->start();
+            host->start();
             connection->start();
             if (draining)
             {
-                connection->shutdown();
+                host->shutdown();
             }
         }
-        catch (const std::exception& e)
+        catch (...)
         {
-            std::cerr << "Asio connection setup failed: " << e.what()
-                      << '\n';
             auto it = connections.find(ticket);
             if (it != connections.end())
             {
@@ -257,6 +259,20 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
                 connections.erase(it);
             }
             onRemoved(ticket);
+            try
+            {
+                throw;
+            }
+            catch (const std::exception& error)
+            {
+                std::cerr << "Asio connection setup failed: "
+                          << error.what() << '\n';
+            }
+            catch (...)
+            {
+                std::cerr << "Asio connection setup failed: unknown "
+                             "exception\n";
+            }
         }
     }
 
@@ -301,7 +317,7 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
         for (const auto& [ticket, connection] : connections)
         {
             (void)ticket;
-            connection->shutdown();
+            connection.host->shutdown();
         }
     }
 
@@ -354,6 +370,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
     const std::size_t configuredWorkers;
     const ConnectionHandlerFactory handlerFactory;
     const ConnectionFeatureFactory featureFactory;
+    const std::shared_ptr<AdmissionController> admission;
     std::vector<std::shared_ptr<AsioWorker>> workers;
     std::shared_ptr<Tcp::socket> pendingAccept;
     std::unordered_set<std::uint64_t> admissions;
@@ -369,7 +386,8 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
         std::chrono::milliseconds idle,
         std::size_t count,
         ConnectionHandlerFactory factory,
-        ConnectionFeatureFactory features
+        ConnectionFeatureFactory features,
+        std::shared_ptr<AdmissionController> admissionController
     )
         : base(context)
         , acceptor(context)
@@ -381,6 +399,13 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
         , configuredWorkers(count)
         , handlerFactory(std::move(factory))
         , featureFactory(std::move(features))
+        , admission(
+              admissionController
+                  ? std::move(admissionController)
+                  : std::make_shared<AdmissionController>(
+                        AdmissionController::Limits{max, max}
+                    )
+          )
     {
         if (max == 0 || idle <= std::chrono::milliseconds::zero())
         {
@@ -508,6 +533,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                     acceptedAt = ConnectionContext::Clock::now();
                 if (self->admissions.size() >= self->capacity)
                 {
+                    self->admission->recordLocalRejection();
                     std::cerr
                         << "AsioTcpServer connection limit reached\n";
                     Error ignored;
@@ -523,6 +549,16 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                         endpoint.address().to_v4().to_string(),
                         endpoint.port()
                     );
+                    auto admission = self->admission->tryAcquire(
+                        peer
+                    );
+                    if (!admission)
+                    {
+                        Error ignored;
+                        socket->close(ignored);
+                        self->acceptNext();
+                        return;
+                    }
                     const int flags = ::fcntl(
                         socket->native_handle(),
                         F_GETFD
@@ -550,6 +586,7 @@ struct AsioTcpServer::Impl : std::enable_shared_from_this<Impl>
                     // allocation failure leaves the socket's RAII
                     // ownership intact.
                     auto accepted = std::make_shared<AcceptedFd>(-1);
+                    accepted->admission = std::move(admission);
                     accepted->fd = socket->release(error);
                     if (error)
                     {
@@ -775,7 +812,8 @@ AsioTcpServer::AsioTcpServer(
     std::chrono::milliseconds idle,
     std::size_t workers,
     ConnectionHandlerFactory handlerFactory,
-    ConnectionFeatureFactory featureFactory
+    ConnectionFeatureFactory featureFactory,
+    std::shared_ptr<AdmissionController> admission
 )
     : m_impl(
           std::make_shared<Impl>(
@@ -784,7 +822,8 @@ AsioTcpServer::AsioTcpServer(
               idle,
               workers,
               std::move(handlerFactory),
-              std::move(featureFactory)
+              std::move(featureFactory),
+              std::move(admission)
           )
       )
 {

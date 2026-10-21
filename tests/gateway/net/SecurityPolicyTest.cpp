@@ -1,350 +1,260 @@
-#include <memory>
-#include <span>
-#include <stdexcept>
-#include <string>
 #include <thread>
-#include <vector>
 
-#include <gtest/gtest.h>
-
-#include "net/ConnectionRuntime.h"
-#include "net/PacketPipeline.h"
-#include "net/PacketWhitelistFeature.h"
+#include "net/ArenaProtocol.h"
+#include "net/PacketRatePolicy.h"
+#include "net/PacketTypePolicy.h"
 #include "net/PreLoginHandshake.h"
-#include "net/TokenBucketFeature.h"
 #include "protocol/EnvelopeCodec.hpp"
-#include "protocol/PacketCodec.hpp"
+
+#include "ProtocolTestHarness.h"
 
 namespace
 {
 using namespace service::gateway;
-struct Transport final : IConnection
-{
-    bool open = true;
-    int closes = 0;
-    std::uint64_t id() const noexcept override
-    {
-        return 1;
-    }
-    void send(std::span<const std::byte>) override
-    {
-    }
-    void shutdown() override
-    {
-    }
-    void close() override
-    {
-        open = false;
-        ++closes;
-    }
-    bool connected() const noexcept override
-    {
-        return open;
-    }
-    void pauseRead() override
-    {
-    }
-    void resumeRead() override
-    {
-    }
-    std::size_t pendingBytes() const noexcept override
-    {
-        return 0;
-    }
-};
-struct Router final : PacketHandler
-{
-    explicit Router(int& calls)
-        : calls(calls)
-    {
-    }
-    PacketHandleResult handle(PacketContext&) override
-    {
-        ++calls;
-        return PacketHandleResult::Handled;
-    }
-    int& calls;
-};
-struct SecurityPolicyTest : testing::Test
-{
-    RejectionCounters::Ptr
-        counters = std::make_shared<RejectionCounters>();
-    ConnectionContext::Ptr
-        context = std::make_shared<ConnectionContext>(
-            1,
-            InetAddress("127.0.0.1", 1),
-            ConnectionClock::now(),
-            counters
-        );
-    std::shared_ptr<Transport>
-        transport = std::make_shared<Transport>();
-    int routed = 0;
-    std::vector<std::function<void()>> posted;
+namespace protocol = service::protocol;
+namespace wire = arena::protocol;
 
-    std::shared_ptr<ConnectionRuntime> make()
+struct SecurityPolicyTest : test::ProtocolTest
+{
+    int routed{0};
+    void make(PacketPolicyFactory policies = {})
     {
-        auto decoder = std::make_unique<EnvelopeDecodeHandler>();
-        auto gate = std::make_unique<AuthenticationGateHandler>(
-            context->session
-        );
-        gate->setNext(std::make_unique<Router>(routed));
-        decoder->setNext(std::move(gate));
-        return std::make_shared<ConnectionRuntime>(
-            transport,
-            context,
-            ConnectionScheduler{
-                [&](auto task) { posted.push_back(std::move(task)); },
-                [](auto, auto) { return ConnectionTimer{}; }
+        auto registry = std::make_shared<MessageRegistry>();
+        registry->registerHandler(
+            wire::MSG_PING,
+            [this](auto request, auto complete)
+            {
+                ++routed;
+                wire::Envelope response;
+                response.mutable_pong()->set_nonce(
+                    request->envelope.ping().nonce()
+                );
+                complete(std::move(response));
             },
-            makePacketHandler(
-                PacketPipeline(std::move(decoder)),
-                256,
-                counters
-            )
+            {false}
         );
-    }
-    std::string
-    frame(std::string_view payload, std::uint16_t type = 1)
-    {
-        auto result = service::protocol::PacketCodec::encode(
-            type,
-            7,
-            std::as_bytes(std::span(payload))
+        registry->registerHandler(
+            wire::MSG_LOGIN_REQUEST,
+            [this](auto, auto complete)
+            {
+                ++routed;
+                wire::Envelope response;
+                response.mutable_login_response()->set_accepted(true);
+                complete(std::move(response));
+            },
+            {false}
         );
-        return {result->peek(), result->readableBytes()};
-    }
-    std::string ping(std::uint16_t type = 1)
-    {
-        arena::protocol::Envelope value;
-        value.mutable_ping()->set_nonce(42);
-        return frame(
-            *service::protocol::EnvelopeCodec::encode(value),
-            type
+        registry->registerHandler(
+            static_cast<MsgId>(100),
+            [this](auto, auto complete)
+            {
+                ++routed;
+                wire::Envelope response;
+                response.mutable_pong();
+                complete(std::move(response));
+            }
         );
+        registry->seal();
+        start(makeArenaProtocolHandler(
+            context,
+            registry,
+            std::move(policies)
+        ));
     }
-    std::string business()
+    static std::string ping(std::uint16_t type = 1)
     {
-        // Error is a valid non-handshake envelope; the test router
-        // accepts it only after authentication. No new production
-        // message type is added.
-        arena::protocol::Envelope value;
-        value.mutable_error()->set_code(42);
-        return frame(
-            *service::protocol::EnvelopeCodec::encode(value)
-        );
+        wire::Envelope request;
+        request.mutable_ping()->set_nonce(42);
+        return frame(*protocol::EnvelopeCodec::encode(request), type);
     }
-    void receive(
-        const std::shared_ptr<ConnectionRuntime>& runtime,
-        std::string_view bytes
-    )
+    static std::string business()
     {
-        runtime->received(std::as_bytes(std::span(bytes)));
+        wire::Envelope request;
+        request.set_msg_id(100);
+        request.mutable_error()->set_code(42);
+        return frame(*protocol::EnvelopeCodec::encode(request));
     }
 };
+
 TEST_F(
     SecurityPolicyTest,
-    BurstStopsBeforeDecodeRouteAndRemainingCoalescedFrames
+    BurstStopsBeforeDecodeAndFollowingCoalescedFrames
 )
 {
-    auto runtime = make();
-    runtime->features().add<TokenBucketFeature>(
-        2,
-        0.1,
-        FeatureResult::Close,
-        [] { return ConnectionClock::time_point{}; }
+    make(
+        [](auto& policies, const auto&)
+        {
+            policies.template add<PacketRatePolicy>(
+                2,
+                0.1,
+                PacketDecision::Close,
+                [] { return PacketRatePolicy::Clock::time_point{}; }
+            );
+        }
     );
-    runtime->start();
-    receive(runtime, ping() + ping() + frame("\x62\x80") + ping());
+    receive(ping() + ping() + frame("\x62\x80") + ping());
     EXPECT_EQ(routed, 2);
-    EXPECT_FALSE(runtime->connected());
+    EXPECT_FALSE(host->connected());
     EXPECT_EQ(
         counters->count(RejectionReason::PacketRateExceeded),
         1
     );
     EXPECT_EQ(counters->count(RejectionReason::InvalidEnvelope), 0);
-    EXPECT_EQ(posted.size(), 1);
-    receive(runtime, ping());
-    runtime->close();
-    EXPECT_EQ(
-        counters->count(RejectionReason::PacketRateExceeded),
-        1
-    );
-    posted.front()();
-    runtime->transportClosed();
-    EXPECT_EQ(transport->closes, 1);
 }
-TEST_F(
-    SecurityPolicyTest, DropCountsEachRejectedPacketWithoutRoutingIt
-)
+
+TEST_F(SecurityPolicyTest, DropCountsEachRejectedPacketWithoutRouting)
 {
-    auto runtime = make();
-    runtime->features().add<TokenBucketFeature>(
-        1,
-        0.1,
-        FeatureResult::Drop,
-        [] { return ConnectionClock::time_point{}; }
+    make(
+        [](auto& policies, const auto&)
+        {
+            policies.template add<PacketRatePolicy>(
+                1,
+                0.1,
+                PacketDecision::Drop,
+                [] { return PacketRatePolicy::Clock::time_point{}; }
+            );
+        }
     );
-    runtime->start();
-    receive(runtime, ping() + ping() + ping());
+    receive(ping() + ping() + ping());
     EXPECT_EQ(routed, 1);
-    EXPECT_TRUE(runtime->connected());
+    EXPECT_TRUE(host->connected());
     EXPECT_EQ(
         counters->count(RejectionReason::PacketRateExceeded),
         2
     );
 }
-TEST_F(SecurityPolicyTest, PendingBusinessCannotReachRouter)
+
+TEST_F(
+    SecurityPolicyTest,
+    PendingBusinessIsRejectedByDispatcherBeforeHandler
+)
 {
-    auto runtime = make();
-    runtime->start();
-    receive(runtime, business() + ping());
+    make();
+    receive(business());
     EXPECT_EQ(routed, 0);
-    EXPECT_FALSE(runtime->connected());
+    EXPECT_TRUE(host->connected());
     EXPECT_EQ(counters->count(RejectionReason::Unauthenticated), 1);
     EXPECT_EQ(counters->count(RejectionReason::HandlerRejected), 0);
 }
-TEST_F(SecurityPolicyTest, PendingPingAndLoginDoNotAuthenticate)
+
+TEST_F(
+    SecurityPolicyTest,
+    PublicPingAndLoginNeverAuthenticateByThemselves
+)
 {
-    auto runtime = make();
-    runtime->start();
-    arena::protocol::Envelope login;
-    login.mutable_login_request()->set_account("alice");
+    make();
+    wire::Envelope request;
+    request.mutable_login_request()->set_account("alice");
     receive(
-        runtime,
-        ping() +
-            frame(*service::protocol::EnvelopeCodec::encode(login))
+        ping() + frame(*protocol::EnvelopeCodec::encode(request))
     );
     EXPECT_EQ(routed, 2);
     EXPECT_EQ(
         context->session->loginState(),
         ConnectionSession::LoginState::Pending
     );
-    receive(runtime, business());
+    receive(business());
     EXPECT_EQ(routed, 2);
     EXPECT_EQ(counters->count(RejectionReason::Unauthenticated), 1);
 }
+
 TEST_F(
     SecurityPolicyTest,
-    HandshakePayloadCannotBypassGateWithBusinessOuterType
+    ResponseOuterTypeCannotEnterPublicRequestHandler
 )
 {
-    auto runtime = make();
-    runtime->start();
-    receive(runtime, ping(2));
+    make();
+    receive(ping(2));
     EXPECT_EQ(routed, 0);
-    EXPECT_EQ(counters->count(RejectionReason::Unauthenticated), 1);
+    EXPECT_EQ(counters->count(RejectionReason::HandlerRejected), 1);
 }
-TEST_F(SecurityPolicyTest, AuthenticatedBusinessReachesRouter)
+
+TEST_F(SecurityPolicyTest, AuthenticatedBusinessReachesHandler)
 {
-    auto runtime = make();
-    runtime->start();
+    make();
     ASSERT_TRUE(context->session->markAuthenticated());
-    receive(runtime, business());
+    receive(business());
     EXPECT_EQ(routed, 1);
-    EXPECT_TRUE(runtime->connected());
+    EXPECT_TRUE(host->connected());
     EXPECT_EQ(counters->snapshot(), RejectionCounters::Snapshot{});
 }
-TEST_F(SecurityPolicyTest, ExpiredSessionCannotRestartLoginOrPing)
+
+TEST_F(
+    SecurityPolicyTest, ExpiredSessionCannotRestartPublicLoginOrPing
+)
 {
-    auto runtime = make();
-    runtime->start();
+    make();
     ASSERT_TRUE(context->session->expireLogin());
     EXPECT_FALSE(context->session->markAuthenticated());
-    receive(runtime, ping());
+    receive(ping());
     EXPECT_EQ(routed, 0);
     EXPECT_EQ(counters->count(RejectionReason::Unauthenticated), 1);
 }
-TEST_F(
-    SecurityPolicyTest, WhitelistRejectionIsCountedOnceBeforeDecode
-)
+
+TEST_F(SecurityPolicyTest, PacketTypeRejectionPrecedesProtobufDecode)
 {
-    auto runtime = make();
-    runtime->features().add<PacketWhitelistFeature>(
-        std::vector<std::uint16_t>{1}
+    make(
+        [](auto& policies, const auto&)
+        {
+            policies.template add<PacketTypePolicy>(
+                std::vector<std::uint16_t>{1}
+            );
+        }
     );
-    runtime->start();
-    receive(runtime, ping(2));
-    runtime->close();
+    receive(frame("\x62\x80", 2));
     EXPECT_EQ(routed, 0);
+    EXPECT_FALSE(host->connected());
     EXPECT_EQ(
         counters->count(RejectionReason::PacketTypeNotAllowed),
         1
     );
-    EXPECT_EQ(counters->count(RejectionReason::Unauthenticated), 0);
+    EXPECT_EQ(counters->count(RejectionReason::InvalidEnvelope), 0);
 }
-TEST_F(SecurityPolicyTest, MalformedEnvelopeCountsDecodeReasonOnly)
+
+TEST_F(SecurityPolicyTest, MalformedEnvelopeStopsFollowingFrames)
 {
-    auto runtime = make();
-    runtime->start();
-    receive(runtime, frame("\x62\x80") + ping());
+    make();
+    receive(frame("\x62\x80") + ping());
     EXPECT_EQ(routed, 0);
+    EXPECT_FALSE(host->connected());
     EXPECT_EQ(counters->count(RejectionReason::InvalidEnvelope), 1);
-    EXPECT_EQ(counters->count(RejectionReason::Unauthenticated), 0);
     EXPECT_EQ(counters->count(RejectionReason::HandlerRejected), 0);
 }
-TEST_F(SecurityPolicyTest, MalformedFrameCountsFrameReasonOnly)
+
+TEST_F(SecurityPolicyTest, MalformedFrameCountsOnlyFrameReason)
 {
-    auto runtime = make();
-    runtime->start();
+    make();
     auto bytes = ping();
     bytes[0] = 'X';
-    receive(runtime, bytes);
+    receive(bytes);
     EXPECT_EQ(routed, 0);
     EXPECT_EQ(counters->count(RejectionReason::InvalidFrame), 1);
     EXPECT_EQ(counters->count(RejectionReason::InvalidEnvelope), 0);
 }
-TEST_F(
-    SecurityPolicyTest,
-    TailRejectAndCallbackFailureHaveDistinctReasons
-)
-{
-    auto callback = makePacketHandler(
-        PacketPipeline(std::make_unique<PacketHandler>()),
-        256,
-        counters
-    );
-    const auto bytes = ping();
-    callback(*transport, std::as_bytes(std::span(bytes)));
-    EXPECT_EQ(counters->count(RejectionReason::HandlerRejected), 1);
 
-    struct Throwing : PacketHandler
-    {
-        PacketHandleResult handle(PacketContext&) override
-        {
-            throw std::runtime_error("business failure");
-        }
-    };
-    transport->open = true;
-    auto throwing = makePacketHandler(
-        PacketPipeline(std::make_unique<Throwing>()),
-        256,
-        counters
-    );
-    auto runtime = std::make_shared<ConnectionRuntime>(
-        transport,
-        context,
-        ConnectionScheduler{
-            [](auto) {},
-            [](auto, auto) { return ConnectionTimer{}; }
-        },
-        std::move(throwing)
-    );
-    runtime->start();
-    receive(runtime, ping());
-    EXPECT_EQ(counters->count(RejectionReason::CallbackFailure), 1);
-    EXPECT_EQ(counters->count(RejectionReason::HandlerRejected), 1);
-}
 TEST(
     SecurityPolicyConfigurationTest,
-    GateAndCountersFailClosedOnMissingDependencies
+    MissingContextRegistryAndCountersFailClosed
 )
 {
     EXPECT_THROW(
-        AuthenticationGateHandler(nullptr),
+        makePreLoginHandshakeHandler(nullptr),
+        std::invalid_argument
+    );
+    auto context = std::make_shared<ConnectionContext>(
+        1,
+        InetAddress("127.0.0.1", 1),
+        ConnectionClock::now()
+    );
+    EXPECT_THROW(
+        makeArenaProtocolHandler(context, nullptr),
         std::invalid_argument
     );
     EXPECT_THROW(
-        makePreLoginHandshakeHandler(nullptr),
+        makeArenaProtocolHandler(
+            context,
+            std::make_shared<MessageRegistry>()
+        ),
         std::invalid_argument
     );
     EXPECT_THROW(
@@ -356,23 +266,14 @@ TEST(
         )),
         std::invalid_argument
     );
-    auto session = std::make_shared<ConnectionSession>();
-    AuthenticationGateHandler gate(session);
-    Transport transport;
-    service::protocol::PacketHeader header;
-    PacketContext packet{transport, header, {}};
-    EXPECT_EQ(gate.handle(packet), PacketHandleResult::Reject);
-    EXPECT_EQ(
-        packet.rejectionReason,
-        RejectionReason::InvalidEnvelope
-    );
 }
+
 TEST(
     RejectionCountersTest,
     SharedWorkersDoNotLoseCountsAndCountsOutliveConnection
 )
 {
-    auto counters = std::make_shared<RejectionCounters>();
+    const auto counters = std::make_shared<RejectionCounters>();
     std::vector<std::thread> workers;
     for (int i = 0; i < 4; ++i)
         workers.emplace_back(
@@ -386,27 +287,14 @@ TEST(
         );
     for (auto& worker : workers)
         worker.join();
-    {
-        ConnectionContext context(
-            1,
-            InetAddress("127.0.0.1", 1),
-            ConnectionClock::now(),
-            counters
-        );
-        context.rejections->record(
-            RejectionReason::PacketRateExceeded
-        );
-    }
     EXPECT_EQ(
         counters->count(RejectionReason::Unauthenticated),
         40000
     );
-    EXPECT_EQ(counters->snapshot()[0], 1);
     for (std::size_t i = 0; i < RejectionCounters::kReasons; ++i)
         EXPECT_NE(
             RejectionCounters::name(static_cast<RejectionReason>(i)),
             "unknown"
         );
-    EXPECT_EQ(defaultRejectionCounters(), defaultRejectionCounters());
 }
 } // namespace

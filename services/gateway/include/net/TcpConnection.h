@@ -15,7 +15,7 @@
 
 #include "net/Channel.h"
 #include "net/EventLoop.h"
-#include "net/IConnection.h"
+#include "net/ITransport.h"
 #include "net/PacketBuffer.h"
 #include "net/Socket.h"
 
@@ -34,7 +34,7 @@ enum struct TcpConnectionState
 
 /** @brief Owns a nonblocking TCP socket and its buffered I/O. */
 class TcpConnection final
-    : public IConnection,
+    : public ITransport,
       public std::enable_shared_from_this<TcpConnection>
 {
 public:

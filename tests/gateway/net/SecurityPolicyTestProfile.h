@@ -2,123 +2,119 @@
 
 #include <atomic>
 #include <iostream>
-#include <memory>
 
-#include "net/BackpressureFeature.h"
+#include "net/FrameProtocol.h"
 #include "net/PacketBuffer.h"
-#include "net/PacketPipeline.h"
-#include "net/PacketWhitelistFeature.h"
-#include "net/PreLoginHandshake.h"
-#include "net/TokenBucketFeature.h"
+#include "net/PacketRatePolicy.h"
+#include "net/PacketTypePolicy.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
 
 namespace service::gateway
 {
-// Test-only authentication and router; never linked into the
-// application.
+// Synthetic credentials and business payloads never enter production
+// routes.
 inline std::atomic<unsigned> securityTestRoutes{0};
-inline PacketHandleResult sendSecurityTestEnvelope(
-    PacketContext& context, const arena::protocol::Envelope& envelope
+
+inline FrameResult sendSecurityTestEnvelope(
+    FrameContext& frame, const arena::protocol::Envelope& envelope
 )
 {
     const auto payload = protocol::EnvelopeCodec::encode(envelope);
     if (!payload)
-        return PacketHandleResult::Reject;
-    const auto frame = protocol::PacketCodec::encode(
+        return FrameResult::Reject;
+    const auto output = protocol::PacketCodec::encode(
         protocol::PacketHeader::kEchoResponse,
-        context.header.m_requestId,
+        frame.header.m_requestId,
         std::as_bytes(std::span(*payload))
     );
-    if (!frame)
-        return PacketHandleResult::Reject;
-    context.connection.send(
+    if (!output)
+        return FrameResult::Reject;
+    frame.connection.send(
         std::as_bytes(
-            std::span(frame->peek(), frame->readableBytes())
+            std::span(output->peek(), output->readableBytes())
         )
     );
-    return context.connection.connected()
-               ? PacketHandleResult::Handled
-               : PacketHandleResult::Reject;
+    return frame.connection.connected() ? FrameResult::Handled
+                                        : FrameResult::Reject;
 }
-class SecurityTestLoginHandler final : public PacketHandler
-{
-public:
-    explicit SecurityTestLoginHandler(
-        std::shared_ptr<ConnectionSession> session
-    )
-        : m_session(std::move(session))
-    {
-    }
-    PacketHandleResult handle(PacketContext& context) override
-    {
-        if (!context.envelope->has_login_request())
-            return PacketHandler::handle(context);
-        const auto& login = context.envelope->login_request();
-        if (login.account() != "test-user" ||
-            login.credential() != "test-only")
-        {
-            context
-                .rejectionReason = RejectionReason::Unauthenticated;
-            return PacketHandleResult::Reject;
-        }
-        if (!m_session->markAuthenticated())
-            return PacketHandleResult::Reject;
-        arena::protocol::Envelope response;
-        response.mutable_login_response()->set_accepted(true);
-        return sendSecurityTestEnvelope(context, response);
-    }
 
-private:
-    std::shared_ptr<ConnectionSession> m_session;
-};
-class SecurityTestBusinessHandler final : public PacketHandler
-{
-public:
-    PacketHandleResult handle(PacketContext& context) override
-    {
-        if (!context.envelope->has_error())
-            return PacketHandler::handle(context);
-        securityTestRoutes.fetch_add(1, std::memory_order_relaxed);
-        return sendSecurityTestEnvelope(context, *context.envelope);
-    }
-};
 inline ConnectionHandlerFactory makeSecurityTestFactory()
 {
     return [](ConnectionContext::Ptr context)
     {
-        auto decoder = std::make_unique<EnvelopeDecodeHandler>();
-        auto gate = std::make_unique<AuthenticationGateHandler>(
-            context->session
-        );
-        auto ping = std::make_unique<PingHandler>();
-        auto login = std::make_unique<SecurityTestLoginHandler>(
-            context->session
-        );
-        login->setNext(
-            std::make_unique<SecurityTestBusinessHandler>()
-        );
-        ping->setNext(std::move(login));
-        gate->setNext(std::move(ping));
-        decoder->setNext(std::move(gate));
-        return makePacketHandler(
-            PacketPipeline(std::move(decoder)),
+        PacketPolicyChain policies;
+        policies.add<PacketRatePolicy>(2.0, 0.1);
+        policies.add<PacketTypePolicy>(std::vector<std::uint16_t>{1});
+        ConnectionHandler result = makeFrameProtocolHandler(
+            [context](FrameContext& frame)
+            {
+                arena::protocol::Envelope envelope;
+                if (!protocol::EnvelopeCodec::decode(
+                        std::as_bytes(std::span(frame.payload)),
+                        envelope
+                    ))
+                {
+                    frame.rejectionReason = RejectionReason::
+                        InvalidEnvelope;
+                    return FrameResult::Reject;
+                }
+                const auto rejectAuthentication = [&]
+                {
+                    frame.rejectionReason = RejectionReason::
+                        Unauthenticated;
+                    return FrameResult::Reject;
+                };
+                const auto state = context->session->loginState();
+                if (state == ConnectionSession::LoginState::Expired ||
+                    (state ==
+                         ConnectionSession::LoginState::Pending &&
+                     !envelope.has_ping() &&
+                     !envelope.has_login_request()))
+                    return rejectAuthentication();
+                if (envelope.has_ping())
+                {
+                    arena::protocol::Envelope reply;
+                    reply.set_request_id(envelope.request_id());
+                    reply.mutable_pong()->set_nonce(
+                        envelope.ping().nonce()
+                    );
+                    return sendSecurityTestEnvelope(frame, reply);
+                }
+                if (envelope.has_login_request())
+                {
+                    const auto& login = envelope.login_request();
+                    if (login.account() != "test-user" ||
+                        login.credential() != "test-only")
+                        return rejectAuthentication();
+                    if (!context->session->markAuthenticated())
+                        return FrameResult::Reject;
+                    arena::protocol::Envelope reply;
+                    reply.mutable_login_response()->set_accepted(
+                        true
+                    );
+                    return sendSecurityTestEnvelope(frame, reply);
+                }
+                if (envelope.has_error())
+                {
+                    securityTestRoutes.fetch_add(
+                        1,
+                        std::memory_order_relaxed
+                    );
+                    return sendSecurityTestEnvelope(frame, envelope);
+                }
+                return FrameResult::Reject;
+            },
             kMaxPacketSize,
-            context->rejections
+            context->rejections,
+            std::move(policies)
         );
+        result.onClosed = [context]
+        { context->session->disconnect(); };
+        return result;
     };
 }
-inline ConnectionFeatureFactory makeSecurityTestFeatures()
-{
-    return [](ConnectionPipeline& pipeline, const ConnectionContext&)
-    {
-        pipeline.add<BackpressureFeature>();
-        pipeline.add<TokenBucketFeature>(2.0, 0.1);
-        pipeline.add<PacketWhitelistFeature>(
-            std::vector<std::uint16_t>{1}
-        );
-    };
-}
+
 inline void printSecurityTestCounters()
 {
     const auto counts = defaultRejectionCounters()->snapshot();

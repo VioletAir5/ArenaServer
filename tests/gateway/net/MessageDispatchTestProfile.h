@@ -1,5 +1,7 @@
 #pragma once
 
+#include <thread>
+
 #include "net/PreLoginHandshake.h"
 
 namespace service::gateway
@@ -38,6 +40,24 @@ inline std::shared_ptr<const MessageRegistry> rpcTestRegistry()
                     throw std::runtime_error(
                         "do-not-log-private-business-data"
                     );
+                if (action == "foreign")
+                {
+                    // Joining keeps this test worker owned.
+                    // Completion itself must still travel through the
+                    // real transport owner queue.
+                    std::thread worker(
+                        [complete]
+                        {
+                            arena::protocol::Envelope reply;
+                            reply.mutable_login_response()
+                                ->set_accepted(true);
+                            complete(reply);
+                            complete(std::move(reply));
+                        }
+                    );
+                    worker.join();
+                    return;
+                }
                 if (action == "auth")
                     request->context->session->markAuthenticated();
                 arena::protocol::Envelope reply;

@@ -17,6 +17,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -27,9 +28,9 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 
-#include "net/ConnectionRuntime.h"
+#include "net/ConnectionHost.h"
 #include "net/ConnectionSchedulers.h"
-#include "net/IConnection.h"
+#include "net/ITransport.h"
 
 #include "ConnectionId.h"
 
@@ -49,7 +50,7 @@ constexpr std::size_t kMaxQueuedBytes = 1024 * 1024;
 constexpr auto kCloseTimeout = std::chrono::seconds(5);
 
 class WebSocketConnection final
-    : public IConnection,
+    : public ITransport,
       public std::enable_shared_from_this<WebSocketConnection>
 {
     enum class State
@@ -57,6 +58,7 @@ class WebSocketConnection final
         ReadingHttp,
         Upgrading,
         Open,
+        Draining,
         ClosePendingWrite,
         CloseHandshake,
         Closed
@@ -92,7 +94,8 @@ public:
     }
     bool connected() const noexcept override
     {
-        return m_state.load() == State::Open;
+        const auto state = m_state.load();
+        return state == State::Open || state == State::Draining;
     }
     std::size_t pendingBytes() const noexcept override
     {
@@ -142,7 +145,8 @@ public:
                     self->m_sendDrainPosted = false;
                     overflow = self->m_outputOverflow;
                 }
-                if (self->m_state.load() != State::Open)
+                const auto state = self->m_state.load();
+                if (state != State::Open && state != State::Draining)
                     return;
                 if (overflow)
                 {
@@ -165,7 +169,33 @@ public:
     }
     void shutdown() override
     {
-        startClose(websocket::close_code::normal, "shutdown");
+        const auto state = m_state.load();
+        if (state == State::Draining ||
+            state == State::ClosePendingWrite ||
+            state == State::CloseHandshake || state == State::Closed)
+            return;
+        if (state != State::Open)
+        {
+            abort();
+            return;
+        }
+        m_state = State::Draining;
+        m_closeCode = websocket::close_code::normal;
+        m_closeReason = "shutdown";
+        {
+            std::lock_guard lock(m_sendMutex);
+            m_acceptingSends = false;
+        }
+        // Discard only input waiting behind read backpressure.
+        // Accepted output, including sends whose drain callback is
+        // still queued, remains in order until its write completion.
+        if (m_readReady)
+        {
+            m_readReady = false;
+            m_input.consume(m_input.size());
+        }
+        armCloseTimeout();
+        writeNext();
     }
     void close() override
     {
@@ -187,7 +217,8 @@ public:
     }
 
     void setCallbacks(
-        ConnectionMessageCallback handler,
+        std::function<void(ITransport&, std::span<const std::byte>)>
+            handler,
         std::function<void()> opened,
         std::function<void(std::size_t)> output,
         std::function<void()> closed
@@ -321,8 +352,10 @@ private:
 
     void readNext()
     {
-        if (m_state.load() != State::Open || m_readPaused ||
-            m_reading || m_readReady || m_delivering)
+        const auto state = m_state.load();
+        if ((state != State::Open && state != State::Draining) ||
+            (state == State::Open && m_readPaused) || m_reading ||
+            m_readReady || m_delivering)
             return;
         m_reading = true;
         auto self = shared_from_this();
@@ -360,6 +393,15 @@ private:
         if (error)
         {
             abort();
+            return;
+        }
+        if (m_state.load() != State::Open)
+        {
+            // Reads continue only to process WebSocket control/close
+            // frames; graceful drain admits no further application
+            // data.
+            m_input.consume(m_input.size());
+            readNext();
             return;
         }
         if (!m_ws.got_binary())
@@ -413,7 +455,7 @@ private:
     void writeNext()
     {
         const auto state = m_state.load();
-        if ((state != State::Open &&
+        if ((state != State::Open && state != State::Draining &&
              state != State::ClosePendingWrite) ||
             m_writing)
             return;
@@ -425,9 +467,17 @@ private:
         std::shared_ptr<std::string> front;
         {
             std::lock_guard lock(m_sendMutex);
-            if (m_output.empty())
-                return;
-            front = m_output.front();
+            if (!m_output.empty())
+                front = m_output.front();
+        }
+        if (!front)
+        {
+            if (state == State::Draining)
+            {
+                m_state = State::ClosePendingWrite;
+                performClose();
+            }
+            return;
         }
         m_writing = true;
         auto self = shared_from_this();
@@ -470,7 +520,7 @@ private:
             state == State::ClosePendingWrite ||
             state == State::CloseHandshake)
             return;
-        if (state != State::Open)
+        if (state != State::Open && state != State::Draining)
         {
             abort();
             return;
@@ -490,6 +540,13 @@ private:
                 m_output.pop_back();
             }
         }
+        armCloseTimeout();
+        if (!m_writing)
+            performClose();
+    }
+
+    void armCloseTimeout()
+    {
         auto self = shared_from_this();
         m_closeTimer.expires_after(kCloseTimeout);
         m_closeTimer.async_wait(
@@ -502,8 +559,6 @@ private:
                 }
             )
         );
-        if (!m_writing)
-            performClose();
     }
 
     void performClose()
@@ -540,7 +595,8 @@ private:
     beast::flat_buffer m_input;
     http::request_parser<http::empty_body> m_request;
     const std::string m_allowedOrigin;
-    ConnectionMessageCallback m_handler;
+    std::function<void(ITransport&, std::span<const std::byte>)>
+        m_handler;
     std::function<void()> m_opened, m_closed;
     std::function<void(std::size_t)> m_outputChanged;
     std::function<void(std::uint64_t)> m_removed;
@@ -566,13 +622,18 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
 {
     asio::io_context& context;
     Tcp::acceptor acceptor;
+    asio::steady_timer stopTimer;
     const std::string allowedOrigin;
     const ConnectionHandlerFactory factory;
     const ConnectionFeatureFactory features;
     const std::size_t capacity;
+    const std::shared_ptr<AdmissionController> admission;
     struct Entry
     {
-        std::shared_ptr<ConnectionRuntime> runtime;
+        // The transport must close before its reservation is
+        // returned.
+        std::shared_ptr<AdmissionController::Lease> admission;
+        std::shared_ptr<ConnectionHost> host;
         WebSocketConnection* transport;
         WebSocketConnection* operator->() const noexcept
         {
@@ -587,14 +648,23 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
         std::string origin,
         ConnectionHandlerFactory handlerFactory,
         std::size_t max,
-        ConnectionFeatureFactory featureFactory
+        ConnectionFeatureFactory featureFactory,
+        std::shared_ptr<AdmissionController> admissionController
     )
         : context(io)
         , acceptor(io)
+        , stopTimer(io)
         , allowedOrigin(std::move(origin))
         , factory(std::move(handlerFactory))
         , features(std::move(featureFactory))
         , capacity(max)
+        , admission(
+              admissionController
+                  ? std::move(admissionController)
+                  : std::make_shared<AdmissionController>(
+                        AdmissionController::Limits{max, max}
+                    )
+          )
     {
         if (allowedOrigin.empty() || !factory || capacity == 0)
             throw std::invalid_argument(
@@ -630,26 +700,40 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                         acceptedAt = ConnectionContext::Clock::now();
                     if (self->connections.size() >= self->capacity)
                     {
+                        self->admission->recordLocalRejection();
                         Error ignored;
                         socket.close(ignored);
                     }
                     else
                     {
+                        std::uint64_t id = 0;
+                        std::shared_ptr<AdmissionController::Lease>
+                            admission;
                         try
                         {
-                            const auto
-                                id = detail::nextConnectionId();
+                            id = detail::nextConnectionId();
                             const auto
                                 endpoint = socket.remote_endpoint();
+                            const InetAddress peer(
+                                endpoint.address()
+                                    .to_v4()
+                                    .to_string(),
+                                endpoint.port()
+                            );
+                            admission = self->admission->tryAcquire(
+                                peer
+                            );
+                            if (!admission)
+                            {
+                                Error ignored;
+                                socket.close(ignored);
+                                self->acceptNext();
+                                return;
+                            }
                             auto contextInfo = std::make_shared<
                                 ConnectionContext>(
                                 id,
-                                InetAddress(
-                                    endpoint.address()
-                                        .to_v4()
-                                        .to_string(),
-                                    endpoint.port()
-                                ),
+                                peer,
                                 acceptedAt
                             );
                             auto session = std::make_shared<
@@ -663,10 +747,10 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                                 )
                                 {
                                     if (auto owner = weak.lock())
-                                        owner->connections.erase(key);
+                                        owner->removeConnection(key);
                                 }
                             );
-                            auto runtime = makeConnectionRuntime(
+                            auto host = makeConnectionHost(
                                 session,
                                 contextInfo,
                                 connectionScheduler(
@@ -675,43 +759,70 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                                 self->factory,
                                 self->features
                             );
-                            const std::weak_ptr<ConnectionRuntime>
-                                weakRuntime = runtime;
+                            const std::weak_ptr<ConnectionHost>
+                                weakHost = host;
                             session->setCallbacks(
-                                [weakRuntime](
-                                    IConnection&,
-                                    auto bytes
-                                )
+                                [weakHost](ITransport&, auto bytes)
                                 {
-                                    if (auto r = weakRuntime.lock())
+                                    if (auto r = weakHost.lock())
                                         r->received(bytes);
                                 },
-                                [weakRuntime]
+                                [weakHost]
                                 {
-                                    if (auto r = weakRuntime.lock())
+                                    if (auto r = weakHost.lock())
                                         r->start();
                                 },
-                                [weakRuntime](auto bytes)
+                                [weakHost](auto bytes)
                                 {
-                                    if (auto r = weakRuntime.lock())
+                                    if (auto r = weakHost.lock())
                                         r->outputChanged(bytes);
                                 },
-                                [weakRuntime]
+                                [weakHost]
                                 {
-                                    if (auto r = weakRuntime.lock())
+                                    if (auto r = weakHost.lock())
                                         r->transportClosed();
                                 }
                             );
                             self->connections.emplace(
                                 id,
-                                Entry{runtime, session.get()}
+                                Entry{
+                                    std::move(admission),
+                                    host,
+                                    session.get()
+                                }
                             );
                             session->start();
                         }
-                        catch (const std::exception& exception)
+                        catch (...)
                         {
-                            std::cerr << "WebSocket setup: "
-                                      << exception.what() << '\n';
+                            const auto found = self->connections.find(
+                                id
+                            );
+                            if (found != self->connections.end())
+                            {
+                                // Keep the host alive while abort
+                                // removes its registry entry through
+                                // the callback.
+                                const auto host = found->second.host;
+                                found->second->abort();
+                                self->connections.erase(id);
+                            }
+                            Error ignored;
+                            socket.close(ignored);
+                            try
+                            {
+                                throw;
+                            }
+                            catch (const std::exception& error)
+                            {
+                                std::cerr << "WebSocket setup: "
+                                          << error.what() << '\n';
+                            }
+                            catch (...)
+                            {
+                                std::cerr << "WebSocket setup: "
+                                             "unknown exception\n";
+                            }
                         }
                     }
                 }
@@ -721,19 +832,72 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
         );
     }
 
-    void stop() noexcept
+    void removeConnection(std::uint64_t id)
     {
-        if (stopping)
-            return;
+        connections.erase(id);
+        if (stopping && connections.empty())
+        {
+            Error ignored;
+            stopTimer.cancel(ignored);
+        }
+    }
+
+    void abortAll() noexcept
+    {
         stopping = true;
         Error ignored;
         acceptor.close(ignored);
+        stopTimer.cancel(ignored);
         auto pending = std::move(connections);
         connections.clear();
         for (auto& [id, session] : pending)
         {
             (void)id;
             session->abort();
+        }
+    }
+
+    void stop(std::chrono::milliseconds grace) noexcept
+    {
+        if (grace <= std::chrono::milliseconds::zero())
+        {
+            abortAll();
+            return;
+        }
+        if (stopping)
+            return;
+        stopping = true;
+        Error ignored;
+        acceptor.close(ignored);
+        if (connections.empty())
+            return;
+        try
+        {
+            stopTimer.expires_after(grace);
+            stopTimer.async_wait(
+                [weak = weak_from_this()](Error error)
+                {
+                    if (!error)
+                        if (auto self = weak.lock())
+                            self->abortAll();
+                }
+            );
+            // Shutdown may synchronously abort an incomplete upgrade
+            // and erase its registry entry. Snapshot hosts before
+            // callbacks.
+            std::vector<std::shared_ptr<ConnectionHost>> active;
+            active.reserve(connections.size());
+            for (const auto& [id, connection] : connections)
+            {
+                (void)id;
+                active.push_back(connection.host);
+            }
+            for (const auto& host : active)
+                host->shutdown();
+        }
+        catch (...)
+        {
+            abortAll();
         }
     }
 };
@@ -744,7 +908,8 @@ WebSocketServer::WebSocketServer(
     std::string allowedOrigin,
     ConnectionHandlerFactory handlerFactory,
     std::size_t maxConnections,
-    ConnectionFeatureFactory featureFactory
+    ConnectionFeatureFactory featureFactory,
+    std::shared_ptr<AdmissionController> admission
 )
     : m_impl(
           std::make_shared<Impl>(
@@ -752,7 +917,8 @@ WebSocketServer::WebSocketServer(
               std::move(allowedOrigin),
               std::move(handlerFactory),
               maxConnections,
-              std::move(featureFactory)
+              std::move(featureFactory),
+              std::move(admission)
           )
       )
 {
@@ -760,11 +926,11 @@ WebSocketServer::WebSocketServer(
 }
 WebSocketServer::~WebSocketServer() noexcept
 {
-    m_impl->stop();
+    m_impl->abortAll();
 }
-void WebSocketServer::stop() noexcept
+void WebSocketServer::stop(std::chrono::milliseconds grace) noexcept
 {
-    m_impl->stop();
+    m_impl->stop(grace);
 }
 std::size_t WebSocketServer::connectionCount() const noexcept
 {

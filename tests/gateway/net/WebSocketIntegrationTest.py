@@ -91,7 +91,7 @@ def send_frame(peer, opcode, payload):
                                  for i, value in enumerate(payload)))
 
 
-def read_frame(peer):
+def read_frame(peer, include_fin=False):
     first, second = exact(peer, 2)
     length = second & 127
     if length == 126:
@@ -100,7 +100,21 @@ def read_frame(peer):
         length = struct.unpack("!Q", exact(peer, 8))[0]
     assert not second & 0x80, "server frame must be unmasked"
     assert length <= 1024 * 1024
-    return first & 15, exact(peer, length)
+    result = first & 15, exact(peer, length)
+    return (*result, bool(first & 0x80)) if include_fin else result
+
+
+def read_message(peer):
+    opcode, payload, final = read_frame(peer, include_fin=True)
+    chunks = [payload]
+    total = len(payload)
+    while not final:
+        continuation, payload, final = read_frame(peer, include_fin=True)
+        assert continuation == 0, "fragmented message requires continuation frames"
+        chunks.append(payload)
+        total += len(payload)
+        assert total <= 1024 * 1024
+    return opcode, b"".join(chunks)
 
 
 def close_code(peer):
@@ -126,7 +140,8 @@ def run_host(binary, mode):
                                stdin=subprocess.DEVNULL, stdout=log,
                                stderr=log)
     def content():
-        log.flush()
+        if not log.closed:
+            log.flush()
         with open(log.name, errors="replace") as stream:
             return stream.read()
     deadline = time.monotonic() + 8
@@ -147,6 +162,56 @@ def stop_host(process, log):
             process.wait()
             raise
     log.close()
+
+
+def graceful_lifecycle(binary):
+    for mode in ("drain", "stop_drain"):
+        process, log, content, _, ws_port = run_host(binary, mode)
+        try:
+            peer, response = upgrade(ws_port)
+            with peer:
+                assert response.startswith(b"HTTP/1.1 101")
+                send_frame(peer, 2, b"go")
+                for index in range(6):
+                    expected = bytes([ord("a") + index]) * (96 * 1024)
+                    assert read_message(peer) == (2, expected), (mode, index, content())
+                assert close_code(peer) == 1000, content()
+        finally:
+            stop_host(process, log)
+            assert "WS_TEST_STOPPED connections=0 active=0" in content(), content()
+            os.unlink(log.name)
+
+    process, log, content, _, ws_port = run_host(binary, "deadline")
+    try:
+        peer, response = upgrade(ws_port)
+        with peer:
+            assert response.startswith(b"HTTP/1.1 101")
+            started = time.monotonic()
+            process.send_signal(signal.SIGUSR1)
+            # Read the server Close, but intentionally never acknowledge it.
+            opcode, payload = read_frame(peer)
+            assert opcode == 8 and struct.unpack("!H", payload[:2])[0] == 1000
+            assert process.wait(timeout=3) == 0, content()
+            elapsed = time.monotonic() - started
+            assert .15 <= elapsed < 3, (elapsed, content())
+        assert "WS_TEST_STOPPED connections=0 active=0" in content(), content()
+    finally:
+        stop_host(process, log)
+        os.unlink(log.name)
+
+    process, log, content, _, ws_port = run_host(binary, "destroy_drain")
+    try:
+        peer, response = upgrade(ws_port)
+        with peer:
+            assert response.startswith(b"HTTP/1.1 101")
+            started = time.monotonic()
+            process.send_signal(signal.SIGUSR1)
+            assert process.wait(timeout=2) == 0, content()
+            assert time.monotonic() - started < 2
+        assert "WS_TEST_STOPPED connections=0 active=0" in content(), content()
+    finally:
+        stop_host(process, log)
+        os.unlink(log.name)
 
 
 def run(binary):
@@ -204,7 +269,8 @@ def run(binary):
     finally:
         stop_host(process, log)
         os.unlink(log.name)
-    print("TCP/WS pre-login, origin, size, close-code and queue limits passed")
+    graceful_lifecycle(binary)
+    print("TCP/WS pre-login, limits, output drain, close deadline and destructor cleanup passed")
 
 
 if __name__ == "__main__":

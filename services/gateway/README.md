@@ -1,74 +1,176 @@
-# Gateway service
+# Gateway
 
-This is the current executable service. Its existing networking code lives under include/net and src/net; app/main.cpp is the current entry point. Future protocol and gateway-routing code belongs in this service.
+The gateway is the implemented Linux networking service. CMake builds
+`arena_gateway` and the `ArenaServer` executable. Source is under `include/net`,
+`src/net` and `app`; other service scopes must not be inferred from target-design
+documents.
 
-CMake builds arena_gateway as a library and ArenaServer as the executable. The low-level FileDescriptor, BlockingQueue, and ThreadPool live in shared.
-## TCP and WebSocket pre-login handshake
+## Current modules
 
-`ArenaServer asio handshake [ws-origin]` listens on TCP `127.0.0.1:8888` and WebSocket `127.0.0.1:8889/ws`. The default allowed Origin is `http://localhost:3000`; a different or missing Origin receives HTTP 403. Existing `raw` and `packet` modes retain their behavior. The `handshake` mode is available with the Asio backend.
+| Module | Responsibility |
+| --- | --- |
+| `TcpServer`, `AsioTcpServer`, `WebSocketServer` | Listening, accepted descriptor handoff, owner registries and stop completion |
+| `AdmissionController` | Shared process-local total/IP admission leases and bounded-cardinality counters |
+| `ITransport` | Concrete byte I/O, buffers, partial reads/writes, half-close and physical close |
+| `ConnectionHost` | One connection's lifetime, read pause composition, transport pressure and bounded owner mailbox |
+| `ConnectionChannel` | Explicit owner-thread interface provided to protocol handlers, separate from concrete transport |
+| `FrameProtocol` | Bounded framing and complete-frame packet policy checks |
+| `ArenaProtocol` | Envelope decoding, request conversion and reply encoding |
+| `RequestDispatcher` | Request admission, authentication requirements, 64 pending requests, deadlines and once-only completion |
+| `MessageRegistry` | A sealed route table shared by connection owners |
+| `OnlineRegistry` | Stable logical sessions, current auth leases, presence and bounded room rosters in one synchronized authority |
+| `OnlineRegistryMaintenance` | Management-owner sweeps and shutdown, independent of a disconnected transport |
 
-Both transports carry the same binary PacketCodec frame (magic, length, type, request ID, version, payload). A pre-login request uses type 1 and a protobuf Envelope containing Ping; the server returns type 2 with Envelope Pong and the same nonce. This verifies transport and protocol readiness before login. Authentication and LoginRequest handling are not implemented yet.
+The input path is transport -> Host -> per-connection protocol -> packet
+policies -> Envelope -> Dispatcher -> registered handler. The reply path runs
+through protocol encoding and the same channel back to the transport. There
+are no RTTI capability casts between these modules.
 
-WebSocket requires binary messages, limits each message to 256 KiB plus the 8-byte PacketCodec prefix, and caps queued outbound bytes at 1 MiB per connection. Invalid application packets close with code 1008; text messages close with 1003; oversized messages close with 1009. Local and peer close codes are written to the server log. Output overflow closes the connection, with a five-second fallback if the peer does not finish the close handshake.
+`ConnectionContext` retains immutable connection ID, trusted socket peer and
+steady-clock acceptance time, plus owner-thread `ConnectionSession`
+authentication state and shared rejection counters. That authentication state
+is distinct from the domain's recoverable `Session` model. The old unused
+network `Session`/`SessionManager` and generic `PacketHandler` chain are removed.
 
-## Packet handler chain
+## Application profiles
 
-PacketCodec delivers complete frames to PacketPipeline. Each connection gets a
-fresh chain of PacketHandler objects. Override handle(PacketContext&): a passing
-filter or an unmatched router returns PacketHandler::handle(context) to forward;
-a successful response returns PacketHandleResult::Handled; a denied request
-returns PacketHandleResult::Reject. The chain tail rejects an unhandled frame,
-and makePacketHandler closes the connection on rejection or an exception.
-
-EnvelopeDecodeHandler, PingHandler (PreLoginHandshake.h), and EchoHandler
-(PacketEcho.h) are public nodes. The default pre-login chain is assembled as:
-
-```cpp
-auto decoder = std::make_unique<EnvelopeDecodeHandler>();
-decoder->setNext(std::make_unique<PingHandler>());
-auto callback = makePacketHandler(
-    PacketPipeline(std::move(decoder)), kMaxPacketSize);
+```bash
+ArenaServer epoll raw
+ArenaServer asio packet
+ArenaServer asio handshake http://localhost:3000
 ```
 
-Use setNext(std::unique_ptr<PacketHandler>) to assemble new policy and routing
-nodes before installing the callback. Nodes own their successors, and the
-connection callback owns the chain. Links and node state are used on the
-connection owner; callback copies retain the same decoder and chain, so create
-a fresh callback for each connection through ConnectionHandlerFactory.
+`raw` echoes bytes. `packet` echoes binary request frames. `handshake` uses the
+Arena request protocol and remains available in main with the Asio backend.
+TCP listens on `127.0.0.1:8888`; handshake additionally listens on
+`127.0.0.1:8889/ws`. Both carry the existing PacketCodec binary frame. WebSocket
+requires binary messages and the exact configured Origin (default
+`http://localhost:3000`). Missing/different Origin is rejected before upgrade.
 
-Connection policies receive trusted peer metadata through ConnectionContext,
-passed to ConnectionHandlerFactory on each connection owner. IConnection
-continues to provide transport operations.
+The default route table handles Ping and returns unavailable for Login. With
+`ARENA_JWT_KEY`, main installs JWT/account-session login routes. Password
+account/digest adapters in main remain unavailable; this is not a configured
+password database or KDF. Online/session authority is process-local.
 
-## Connection context
+## Online sessions and reconnect
 
-ConnectionHandlerFactory now accepts ConnectionContext::Ptr, a shared pointer
-to immutable metadata: the process-wide connection ID, socket peer IPv4 address
-and port, and steady_clock acceptance time. Acceptance time is recorded in the
-successful accept path before worker handoff and, for WS, before HTTP Upgrade.
-The context and a fresh ConnectionSession are created on the target owner.
+The authenticated registry exposes SessionState (20/21), RoomJoin (30/31) and
+RoomLeave (32/33) request/response routes. A nonzero room ID creates a bounded
+gateway roster on first join. This is the current membership store; battle
+RoomActor lifecycle, invitations and game admission rules remain planned.
+The defaults are 100000 retained players, 10000 rooms and 64 members per room.
+Room moves, leaving, session replacement and expiry update both indexes in
+one mutex transaction; snapshots own their data and include Online/Detached
+member presence. The owner-affine domain Session/Room models are not shared
+across worker threads.
 
-For example:
+LoginResponse adds `session_id`, `room_id` (zero if unbound) and `resumed`.
+The logical SessionId stays stable across authorized JWT recovery; the
+connection ID, epoch and token change. Password login starts a fresh logical
+session and removes previous room membership. Existing JWT LoginRequest
+(`credential_kind=CREDENTIAL_JWT`, empty account) is the reconnect entry.
+Its signed token must still match the current registry epoch/expiry.
 
-~~~cpp
-ConnectionHandlerFactory factory = [](ConnectionContext::Ptr context) {
-    std::cout << context->connectionId << " peer="
-              << context->peer.toString() << '\n';
-    return makePacketEchoHandler();
+The first matching disconnect changes presence to Detached and keeps the
+logical session and room slot for grace. It retains no Host or socket.
+Repeated or old disconnects cannot extend grace or remove a replacement.
+Recovery at or after the monotonic deadline is rejected, even before the
+next maintenance tick. A management timer sweeps every 100 ms without login
+traffic, removing expired sessions/members and pruning empty rooms. JWT expiry
+also reclaims records. Application shutdown stops maintenance before draining
+owners, then clears registry state after their retirement. Reconnect restores
+session/room state; it does not replay requests cancelled by the old connection.
+
+Handshake packet policy is a 200-packet burst, replenished at 100 packets/s,
+and an outer request-type allowlist `{1}`. It applies once per complete frame
+before protobuf decoding. Malformed framing/payload closes the connection;
+typed request errors are encoded as replies.
+
+## Capacity and shutdown
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `ARENA_MAX_CONNECTIONS` | `1000` | Shared total TCP/WS admitted connections |
+| `ARENA_MAX_CONNECTIONS_PER_IP` | `100` | Shared reservations for a real peer IPv4, excluding source port |
+| `ARENA_TCP_PORT` | `8888` | TCP port, 1..65535 |
+| `ARENA_WS_PORT` | `8889` | WebSocket port, 1..65535 |
+| `ARENA_DISCONNECT_GRACE_MS` | `30000` | Detached session retention, 1..3600000 milliseconds |
+
+Limits must be positive representable integers. Listener constructors still
+accept an optional shared controller; omitting it creates a listener-local
+controller with the old max/max limits. Application assembly explicitly shares
+one controller. Reservations include pending worker handoff and incomplete WS
+upgrades, and retire after setup failure or connection cleanup. Shutdown prints
+active/peak/global/IP/local admission counters without per-peer metric labels.
+
+SIGINT/SIGTERM initiate owner-thread shutdown. Host first quiesces input,
+including later frames in a coalesced batch. ArenaProtocol waits for accepted
+requests to complete or time out, enqueues their replies, then allows transport
+write shutdown. TCP drains queued bytes, half-closes and waits for peer EOF.
+WS drains queued binary messages before normal Close. The server grace deadline
+bounds the whole sequence and forces retirement if necessary. Native reads
+continue during drain to observe EOF; application bytes are discarded. An
+immediate/policy close may discard pending output and requests. Stop completion
+and owner I/O retirement precede executor destruction.
+
+Gateway frame bodies are limited to 256 KiB; transport output has a 1 MiB hard
+limit. Host backpressure pauses at the high watermark and resumes only after
+all read pause reasons clear. Hard transport bounds remain active regardless
+of optional policies.
+
+Successful maintenance reclamation logs `event=online_sweep` with active,
+retained and room counts. These are process-local counts, without token or
+credential values.
+
+## Extending a protocol or route
+
+`ConnectionHandlerFactory` runs once per accepted connection on its owner and
+returns fresh `ConnectionHandler` state: `onMessage`, optional `onStarted`,
+`onDraining` and `onClosed`. A drain hook calls its supplied owner-thread
+completion once accepted protocol work has finished; protocols without that
+hook proceed directly to transport drain. Input spans are borrowed for the callback. Lifecycle hooks are
+retired once, after active callbacks unwind. Register transport policies before
+Host start, and packet policies before framing begins.
+
+```cpp
+PacketPolicyFactory policies = [](PacketPolicyChain& chain,
+                                 const ConnectionContext&) {
+    chain.add<PacketRatePolicy>(200.0, 100.0);
+    chain.add<PacketTypePolicy>(std::vector<std::uint16_t>{1});
 };
-~~~
+ConnectionHandlerFactory handlers = [routes, policies](auto context) {
+    return makeArenaProtocolHandler(std::move(context), routes, policies);
+};
+```
 
-makeConnectionHandler retains the context for the callback lifetime even if
-the factory ignores it. Factories may retain the context or its session in
-Handler nodes; create a fresh callback per connection.
+Register messages with `MessageRegistry::registerHandler` and then `seal()`.
+Handlers run synchronously on the connection owner; a slow handler must submit
+its own work to an appropriate executor. `RequestMessage` owns its Envelope.
+Completion may run on any thread and posts through a weak, bounded owner
+mailbox. Repeated, stale-generation and closed-connection results have no
+effect. If the mailbox's 256 outstanding-action capacity is full, a reply
+cannot enqueue and the existing request deadline remains responsible for its
+terminal response. The count bound does not constrain arbitrary allocations
+made by business code.
 
-ConnectionSession starts Pending. markAuthenticated() changes Pending to
-Authenticated; expireLogin() changes Pending to Expired. Both return false
-after either terminal transition. Every session read and mutation requires
-the owner thread and throws logic_error otherwise; shared_ptr only extends
-lifetime. The context/session own no connection, socket, or timer.
+`ConnectionChannel` operations require the owner except immutable `id()` and
+thread-safe `post()`/`poster()`. Retain `poster()` for foreign work, never a raw
+channel reference. Concrete transport cross-thread send capabilities do not
+change this protocol-facing contract. Final Host/transport release occurs on
+owner; shared pointers alone do not make connection methods thread-safe.
 
-Authentication, login deadline checks/timers, token buckets, IP connection
-limits, and packet whitelist policies remain subsequent steps. Ping does not
-change login state. The session transition methods alone enforce no deadline
-and do not close the transport.
+## Verification
+
+`cmake --build build -j4` builds all migrated targets. `ctest --preset gcc15`
+runs the normal matrix excluding performance suites. Gateway tests include
+transport lifecycle, all real TCP/WS policy/request profiles, shared admission,
+factory exception isolation, foreign replies, stale posters and bounded queues.
+`ApplicationLifecycleIntegrationTest.py` exercises real executable configuration
+and signals. ASan/UBSan are separate build checks; two legacy epoll FD-exhaustion
+cases can conflict with the installed UBSan runtime's own pipe allocation and
+must be reported separately from a passing non-UBSan verification.
+
+Multi-instance session authority, load-balancer readiness integration, a
+connection login deadline and distributed business idempotency remain planned.
+This architecture supports their placement but does not claim deployed high
+availability or automatic recovery of in-flight business operations.

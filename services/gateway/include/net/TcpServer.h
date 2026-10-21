@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "net/Acceptor.h"
+#include "net/AdmissionController.h"
 #include "net/ConnectionFeature.h"
 #include "net/ConnectionHandler.h"
 #include "net/EventLoopThreadPool.h"
@@ -48,6 +49,8 @@ public:
      * connections.
      * @param[in] featureFactory Creates per-connection policy
      * features.
+     * @param[in] admission Shared TCP/WS admission limits; null uses
+     * this listener's capacity for both total and per-IP limits.
      */
     TcpServer(
         EventLoop* loop,
@@ -57,7 +60,8 @@ public:
             std::chrono::seconds(60),
         std::size_t workerCount = 0,
         ConnectionHandlerFactory handlerFactory = {},
-        ConnectionFeatureFactory featureFactory = {}
+        ConnectionFeatureFactory featureFactory = {},
+        std::shared_ptr<AdmissionController> admission = {}
     );
     /** @brief Releases owned resources. */
     ~TcpServer() noexcept override;
@@ -104,6 +108,8 @@ private:
     const std::size_t m_maxConnections;
     /// Stores the worker count.
     const std::size_t m_workerCount;
+    /// Shared reservations cover queued handoffs and live transports.
+    std::shared_ptr<AdmissionController> m_admission;
     /// Stores the stop timer id.
     TimerId m_stopTimerId{0};
     /// Current lifecycle state.

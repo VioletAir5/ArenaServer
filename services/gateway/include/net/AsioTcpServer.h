@@ -7,6 +7,7 @@
 
 #include <boost/asio/io_context.hpp>
 
+#include "net/AdmissionController.h"
 #include "net/ConnectionFeature.h"
 #include "net/ConnectionHandler.h"
 #include "net/ITcpServer.h"
@@ -31,7 +32,8 @@ public:
             std::chrono::seconds(60),
         std::size_t workerCount = 0,
         ConnectionHandlerFactory handlerFactory = {},
-        ConnectionFeatureFactory featureFactory = {}
+        ConnectionFeatureFactory featureFactory = {},
+        std::shared_ptr<AdmissionController> admission = {}
     );
     /** @brief Releases owned resources. */
     ~AsioTcpServer() noexcept override;

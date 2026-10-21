@@ -17,7 +17,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 
-#include "net/IConnection.h"
+#include "net/ITransport.h"
 
 namespace service::gateway
 {
@@ -29,12 +29,12 @@ namespace service::gateway
 /** @brief Owns one Boost.Asio TCP connection and its asynchronous
  * I/O. */
 class AsioConnect final
-    : public IConnection,
+    : public ITransport,
       public std::enable_shared_from_this<AsioConnect>
 {
 public:
     using MessageCallback = std::function<
-        void(IConnection&, std::span<const std::byte>)>;
+        void(ITransport&, std::span<const std::byte>)>;
     using OutputCallback = std::function<void(std::size_t)>;
     using CloseCallback = std::function<void(AsioConnect*)>;
 

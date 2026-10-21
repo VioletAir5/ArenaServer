@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -41,6 +40,9 @@ private:
 struct ConnectionScheduler
 {
     using Action = std::function<void()>;
+    // Thread-safe; always enqueue on owner, never invoke inline. If
+    // enqueue throws it must not retain the action. The host closes
+    // admission before releasing its owner executor.
     /// Defers an action to the connection owner.
     std::function<void(Action)> defer;
     /// Schedules an action for a monotonic deadline.
@@ -52,25 +54,7 @@ struct ConnectionScheduler
 enum class ReadPauseReason : std::uint32_t
 {
     Backpressure = 1,
-    RateLimit = 2,
-    Authenticating = 4,
-    Application = 8
-};
-/** @brief Borrows a decoded packet type and payload for one callback.
- */
-struct PacketView
-{
-    /// Packet type from the decoded header.
-    std::uint16_t type;
-    /// Borrowed payload valid for the current callback.
-    std::span<const std::byte> payload;
-};
-/** @brief Controls packet policy processing. */
-enum class FeatureResult
-{
-    Continue,
-    Drop,
-    Close
+    Application = 2
 };
 /** @brief Exposes owner-thread connection controls to policy
  * features. */
@@ -86,23 +70,19 @@ public:
     virtual void requestClose() = 0;
     /** @brief Returns the immutable connection context. */
     virtual const ConnectionContext& context() const noexcept = 0;
-    // Callback runs on owner, only while the runtime remains open.
+    // Callback runs on owner, only while the host remains open.
     virtual ConnectionTimer scheduleAt(
         ConnectionClock::time_point,
         std::function<void(IConnectionControl&)>
     ) = 0;
 };
-/** @brief Receives connection lifecycle and packet policy hooks. */
+/** @brief Receives transport lifecycle and output pressure hooks. */
 class IConnectionFeature
 {
 public:
     virtual ~IConnectionFeature() = default;
     virtual void onConnected(IConnectionControl&)
     {
-    }
-    virtual FeatureResult onPacket(IConnectionControl&, PacketView)
-    {
-        return FeatureResult::Continue;
     }
     virtual void onOutputBufferChanged(
         IConnectionControl&, std::size_t, std::size_t
@@ -113,8 +93,8 @@ public:
     {
     }
 };
-// Build before Runtime::start(). Nodes are per connection; no hot
-// removal.
+// Build before ConnectionHost::start(). Nodes are per connection; no
+// hot removal.
 /** @brief Owns the ordered policy features for one connection. */
 class ConnectionPipeline
 {
@@ -135,7 +115,7 @@ public:
     }
 
 private:
-    friend class ConnectionRuntime;
+    friend class ConnectionHost;
     /// Whether feature registration has ended.
     bool m_sealed{false};
     /// Policies applied to connection events.
@@ -146,14 +126,4 @@ private:
 // Empty server factory selects default BackpressureFeature.
 using ConnectionFeatureFactory = std::function<
     void(ConnectionPipeline&, const ConnectionContext&)>;
-// PacketCodec calls this after framing, before protobuf/business
-// handlers.
-/** @brief Allows the packet decoder to apply connection policies. */
-class PacketFeatureHost
-{
-public:
-    virtual ~PacketFeatureHost() = default;
-    /** @brief Inspects packet. */
-    virtual FeatureResult inspectPacket(PacketView) = 0;
-};
 } // namespace service::gateway

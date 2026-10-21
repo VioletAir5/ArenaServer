@@ -204,19 +204,19 @@ foreach(backend epoll asio)
         set(feature_host arena_asio_tcp_server_test_host)
     endif()
     foreach(workers 0 4)
-        add_test(NAME ConnectionFeatureTransport_${backend}_${workers}
+        add_test(NAME PacketPolicyTransport_${backend}_${workers}
             COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/ConnectionFeatureIntegrationTest.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/PacketPolicyIntegrationTest.py"
                 "$<TARGET_FILE:${feature_host}>" tcp ${workers})
-        set_tests_properties(ConnectionFeatureTransport_${backend}_${workers}
+        set_tests_properties(PacketPolicyTransport_${backend}_${workers}
             PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;features")
     endforeach()
 endforeach()
-add_test(NAME ConnectionFeatureTransport_ws
+add_test(NAME PacketPolicyTransport_ws
     COMMAND "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/ConnectionFeatureIntegrationTest.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PacketPolicyIntegrationTest.py"
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
-set_tests_properties(ConnectionFeatureTransport_ws PROPERTIES
+set_tests_properties(PacketPolicyTransport_ws PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;features;websocket")
 
 # Authentication and exact reason counts cross all actual transport owners.
@@ -262,6 +262,12 @@ foreach(backend epoll asio)
                 "$<TARGET_FILE:${rpc_host}>" tcp ${workers})
         set_tests_properties(MessageDispatchTransport_${backend}_${workers}
             PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc")
+        add_test(NAME MessageDrainTransport_${backend}_${workers}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/MessageDispatchIntegrationTest.py"
+                "$<TARGET_FILE:${rpc_host}>" tcp ${workers} drain)
+        set_tests_properties(MessageDrainTransport_${backend}_${workers}
+            PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc;drain")
     endforeach()
 endforeach()
 add_test(NAME MessageDispatchTransport_ws
@@ -270,6 +276,12 @@ add_test(NAME MessageDispatchTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(MessageDispatchTransport_ws PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc;websocket")
+add_test(NAME MessageDrainTransport_ws
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/MessageDispatchIntegrationTest.py"
+        "$<TARGET_FILE:arena_websocket_test_host>" ws 0 drain)
+set_tests_properties(MessageDrainTransport_ws PROPERTIES
+    TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;rpc;drain;websocket")
 
 # A short framing regression; the 30-minute chaos run stays opt-in.
 add_test(NAME ChaosRun_WebSocketFraming
@@ -278,3 +290,14 @@ add_test(NAME ChaosRun_WebSocketFraming
         "$<TARGET_FILE:arena_websocket_test_host>")
 set_tests_properties(ChaosRun_WebSocketFraming PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;chaos;websocket")
+
+# Exercise actual application assembly, signals and shared listener budgets.
+add_dependencies(arena_tests ArenaServer)
+foreach(scenario epoll asio invalid shared_ws authenticated_shutdown)
+    add_test(NAME ApplicationLifecycle_${scenario}
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ApplicationLifecycleIntegrationTest.py"
+            "$<TARGET_FILE:ArenaServer>" ${scenario})
+    set_tests_properties(ApplicationLifecycle_${scenario} PROPERTIES
+        TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;application")
+endforeach()

@@ -253,6 +253,9 @@ TEST(
     );
     response.mutable_login_response()->set_player_id(42);
     response.mutable_login_response()->set_session_epoch(123);
+    response.mutable_login_response()->set_session_id(456);
+    response.mutable_login_response()->set_room_id(7);
+    response.mutable_login_response()->set_resumed(true);
     ASSERT_TRUE(response.SerializeToString(&bytes));
     Old older;
     ASSERT_TRUE(older.ParseFromString(bytes));
@@ -263,6 +266,9 @@ TEST(
     ASSERT_TRUE(decode(bytes, forwarded));
     EXPECT_EQ(forwarded.login_response().player_id(), 42u);
     EXPECT_EQ(forwarded.login_response().session_epoch(), 123u);
+    EXPECT_EQ(forwarded.login_response().session_id(), 456u);
+    EXPECT_EQ(forwarded.login_response().room_id(), 7u);
+    EXPECT_TRUE(forwarded.login_response().resumed());
     EXPECT_EQ(
         arena::protocol::LoginRequest::descriptor()
             ->FindFieldByName("credential_kind")
@@ -281,4 +287,157 @@ TEST(
             ->number(),
         5
     );
+    EXPECT_EQ(
+        arena::protocol::LoginResponse::descriptor()
+            ->FindFieldByName("session_id")
+            ->number(),
+        6
+    );
+    EXPECT_EQ(
+        arena::protocol::LoginResponse::descriptor()
+            ->FindFieldByName("room_id")
+            ->number(),
+        7
+    );
+    EXPECT_EQ(
+        arena::protocol::LoginResponse::descriptor()
+            ->FindFieldByName("resumed")
+            ->number(),
+        8
+    );
+}
+
+TEST(
+    EnvelopeCodecTest,
+    OnlineStateAndRoomMessagesRoundTripWithStableAdditiveTags
+)
+{
+    namespace wire = arena::protocol;
+    New stateRequest;
+    stateRequest.set_msg_id(wire::MSG_SESSION_STATE_REQUEST);
+    stateRequest.mutable_session_state_request();
+    New stateResponse;
+    stateResponse.set_msg_id(wire::MSG_SESSION_STATE_RESPONSE);
+    auto* state = stateResponse.mutable_session_state_response();
+    state->set_session_id(101);
+    state->set_player_id(42);
+    state->set_room_id(7);
+    state->set_presence(wire::PRESENCE_ONLINE);
+    auto* member = state->add_members();
+    member->set_session_id(202);
+    member->set_player_id(43);
+    member->set_presence(wire::PRESENCE_DETACHED);
+    New joinRequest;
+    joinRequest.set_msg_id(wire::MSG_ROOM_JOIN_REQUEST);
+    joinRequest.mutable_room_join_request()->set_room_id(7);
+    New joinResponse;
+    joinResponse.set_msg_id(wire::MSG_ROOM_JOIN_RESPONSE);
+    *joinResponse.mutable_room_join_response()
+         ->mutable_state() = *state;
+    New leaveRequest;
+    leaveRequest.set_msg_id(wire::MSG_ROOM_LEAVE_REQUEST);
+    leaveRequest.mutable_room_leave_request();
+    New leaveResponse;
+    leaveResponse.set_msg_id(wire::MSG_ROOM_LEAVE_RESPONSE);
+    leaveResponse.mutable_room_leave_response()
+        ->mutable_state()
+        ->set_session_id(101);
+    for (const auto& request :
+         {stateRequest,
+          stateResponse,
+          joinRequest,
+          joinResponse,
+          leaveRequest,
+          leaveResponse})
+    {
+        const auto encoded = EnvelopeCodec::encode(request);
+        ASSERT_TRUE(encoded);
+        New decoded;
+        ASSERT_TRUE(decode(*encoded, decoded));
+        EXPECT_EQ(decoded.msg_id(), request.msg_id());
+        EXPECT_EQ(decoded.payload_case(), request.payload_case());
+        EXPECT_EQ(
+            decoded.SerializeAsString(),
+            request.SerializeAsString()
+        );
+    }
+    EXPECT_EQ(
+        New::descriptor()
+            ->FindFieldByName("session_state_request")
+            ->number(),
+        20
+    );
+    EXPECT_EQ(
+        New::descriptor()
+            ->FindFieldByName("session_state_response")
+            ->number(),
+        21
+    );
+    EXPECT_EQ(
+        New::descriptor()
+            ->FindFieldByName("room_join_request")
+            ->number(),
+        30
+    );
+    EXPECT_EQ(
+        New::descriptor()
+            ->FindFieldByName("room_join_response")
+            ->number(),
+        31
+    );
+    EXPECT_EQ(
+        New::descriptor()
+            ->FindFieldByName("room_leave_request")
+            ->number(),
+        32
+    );
+    EXPECT_EQ(
+        New::descriptor()
+            ->FindFieldByName("room_leave_response")
+            ->number(),
+        33
+    );
+    EXPECT_EQ(
+        wire::SessionStateResponse::descriptor()
+            ->FindFieldByName("members")
+            ->number(),
+        5
+    );
+    EXPECT_EQ(
+        wire::RoomMember::descriptor()
+            ->FindFieldByName("presence")
+            ->number(),
+        3
+    );
+}
+
+TEST(
+    EnvelopeCodecTest,
+    LegacyForwarderPreservesNewRoomPayloadWithoutUnderstandingIt
+)
+{
+    New request;
+    request.set_msg_id(arena::protocol::MSG_ROOM_JOIN_REQUEST);
+    request.set_request_id(1234567890123ULL);
+    request.mutable_room_join_request()->set_room_id(77);
+    const auto encoded = EnvelopeCodec::encode(request);
+    ASSERT_TRUE(encoded);
+    Old legacy;
+    ASSERT_TRUE(legacy.ParseFromString(*encoded));
+    EXPECT_GT(
+        legacy.GetReflection()
+            ->GetUnknownFields(legacy)
+            .field_count(),
+        0
+    );
+    std::string forwarded;
+    ASSERT_TRUE(legacy.SerializeToString(&forwarded));
+    New restored;
+    ASSERT_TRUE(decode(forwarded, restored));
+    EXPECT_EQ(restored.request_id(), request.request_id());
+    EXPECT_EQ(
+        restored.msg_id(),
+        arena::protocol::MSG_ROOM_JOIN_REQUEST
+    );
+    EXPECT_EQ(restored.room_join_request().room_id(), 77);
 }

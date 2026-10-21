@@ -1,140 +1,127 @@
-# Gateway 请求协议表
+# Gateway 请求协议
 
-当前实现：2026-10-10。TCP 与二进制 WebSocket 消息共用 PacketCodec/Envelope。
-入口：`ArenaServer asio handshake [ws-origin]`。默认注册 Ping 和 LoginRequest；
-真实凭据认证仍待接入，LoginRequest 当前返回 ServiceUnavailable。
+当前实现：2026-10-21。TCP 与二进制 WebSocket 共用 PacketCodec/Envelope。
+入口为 ArenaServer asio handshake [ws-origin]。默认路由有 Ping 和返回不可用的 Login；
+ARENA_JWT_KEY 选择认证/在线注册表。密码账户/KDF 适配器仍需应用提供，main 中为
+Unavailable；测试宿主的固定账户只用于验收。
 
-## Packet 帧
+## Packet 与 Envelope
 
-所有多字节头字段采用大端；TCP read 和 WS message 边界都不等于 Packet 边界。
+Packet 头为15字节，所有多字节整数为大端：magic4=0x4152454E、body length4、
+type2（请求1/响应2）、request id4、version1=1；body length 含7字节元数据和
+protobuf payload。body 上限256KiB。TCP read/WS message 边界不替代 Packet framing。
+畸形 magic/长度/版本/不可解析 protobuf 会关闭连接，不尝试猜测请求ID。
 
-| 字段 | 字节数 | 语义 |
+Envelope 保持 request_id=1、reserved2/legacy_client_tag、sent_at_unix_ms=3、msg_id=4。
+规范请求ID优先采用非零 Envelope.request_id，否则回退 Packet request id；两者均0
+返回1002。响应的 Packet id 原样保留，Envelope id 由协议统一赋值。
+msg_id=0 时由已知 oneof 推导，响应仍省略 msg_id；显式 msg_id 的响应带对应响应ID。
+未知显式ID允许未知payload并返回1001；已知ID/payload不匹配返回1002。
+
+## 消息表
+
+MsgId 与对应 Envelope oneof 字段号相同，已有10–14和reserved2不得重用。
+
+| 请求 / 响应 | payload | 认证要求 | 行为 |
+| --- | --- | --- | --- |
+| 10 / 11 | LoginRequest / LoginResponse | Pending连接 | 密码新建逻辑会话，或JWT恢复 |
+| 12 / 13 | Ping / Pong | 公开；失效旧绑定仍拒绝 | 回传nonce |
+| — / 14 | Error | — | 固定typed错误 |
+| 20 / 21 | SessionStateRequest / SessionStateResponse | 当前已认证绑定 | 查询自身及当前房间成员 |
+| 30 / 31 | RoomJoinRequest / RoomJoinResponse | 当前已认证绑定 | 原子加入/移动到房间 |
+| 32 / 33 | RoomLeaveRequest / RoomLeaveResponse | 当前已认证绑定 | 解除房间关系，保留会话 |
+
+20/30/32 在 makeLoginMessageRegistry 认证 profile 注册；默认未配置认证的 profile
+没有这些路由。新内置响应ID不可注册为请求。每个新请求都支持显式或推导ID模式。
+MessageRegistry 发布前 seal；默认路由期限5秒、每连接最多64 pending。
+
+## 登录与重连入口
+
+LoginRequest：account1、credential2(bytes)、client_version3、credential_kind4。
+kind0=CREDENTIAL_PASSWORD，kind1=CREDENTIAL_JWT。JWT模式 account 必须为空；
+主体身份来自验证后的JWT，客户端不能替换 PlayerId。
+
+LoginResponse 兼容保留 accepted1、session_token2、error3、player_id4、session_epoch5，
+追加 session_id6、room_id7、resumed8。room_id=0 表示未绑定；密码登录 resumed=false，
+JWT恢复=true。SessionId 是稳定逻辑身份，session_epoch 是当前连接权限栅栏，不能互用。
+JWT profile 的7项claims、签名/issuer/audience/expiry校验及精确epoch/expiry匹配不变。
+
+恢复步骤：
+
+1. 初次密码登录，保存session_token及session_id，按需调用RoomJoin。
+2. 断线后服务端保留同一个逻辑会话/room slot，presence变为Detached。
+3. 新连接发送LoginRequest(kind=JWT, credential=旧token, account空)。
+4. grace内验证成功，返回相同session_id/room_id、更新epoch/token；旧token及旧连接失效。
+5. 到达或超过grace deadline，旧token即使签名/有效期仍正确，也不能恢复该记录。
+   此时可重新验证密码建立新逻辑会话，原房间不自动带入。
+
+密码登录会替换旧逻辑会话并移除其原房间成员；它不等同于JWT恢复。
+恢复不重放旧连接已取消的RPC，不保证恢复之前业务副作用的幂等。
+
+## Presence 与房间 roster
+
+Presence：UNSPECIFIED0、ONLINE1、DETACHED2。
+SessionStateRequest为空；SessionStateResponse字段为：
+
+| 字段 | 号 | 含义 |
 | --- | ---: | --- |
-| magic | 4 | `0x4152454E`（AREN） |
-| body length | 4 | 7 字节元数据加 protobuf payload，不包含 magic/length |
-| type | 2 | 1=request，2=response |
-| request id | 4 | 旧传输层请求标识；响应原样回传 |
-| version | 1 | 当前 1 |
-| payload | 可变 | Envelope；gateway body 上限 256 KiB |
+| session_id | 1 | 当前稳定SessionId |
+| player_id | 2 | 已认证PlayerId |
+| room_id | 3 | 当前房间，0表示无 |
+| presence | 4 | 当前连接正常查询时为ONLINE |
+| members | 5 | repeated RoomMember，同一事务快照 |
 
-完整头为 15 字节。非法 magic、长度、version/type 或 malformed protobuf 走既有拒绝关闭；
-无法可靠识别的畸形字节不尝试构造带请求 id 的业务 Error。
+RoomMember：player_id1、session_id2、presence3。房间成员可为ONLINE或DETACHED；
+无房间时members为空。查询入口只返回调用者自身和所属房间，不支持任意玩家枚举。
+RoomJoinRequest含room_id1，必须非零；RoomJoinResponse、RoomLeaveResponse都以
+state1 包含 SessionStateResponse。RoomLeaveRequest为空；重复leave和同房间join幂等。
 
-## Envelope 字段
+首次join可按ID创建受限gateway roster，默认10000房间、每房64成员、100000保留玩家。
+这不是战斗RoomActor、邀请系统或房间访问权限策略。加入/移动、leave、会话替换及
+到期删除同时维护player→room和room→members，失败不能破坏原有绑定。
+Detached成员在grace内仍占房间slot；到期移除，空房间回收。
 
-| 字段 | protobuf 字段号 | 类型 | 语义 |
-| --- | ---: | --- | --- |
-| request_id | 1 | uint64 | 当前调用的关联 id；非零时优先于包头 id |
-| retired tag | 2 | reserved | 原 legacy_client_tag；禁止复用 |
-| sent_at_unix_ms | 3 | uint64 | 客户端时间元数据，不用于服务端超时计算 |
-| msg_id | 4 | uint32 | 新消息的 MsgId；0 表示旧客户端，从已知 oneof 推导 |
-| login_request / login_response | 10 / 11 | message | 登录请求/结果 |
-| ping / pong | 12 / 13 | message | 应用心跳 |
-| error | 14 | message | Typed Error 的稳定线格式 |
+ARENA_DISCONNECT_GRACE_MS 默认30000，允许1..3600000毫秒。
+第一次匹配的断线使用steady_clock建立deadline；重复清理不延长。
+独立管理timer每100ms sweep，无新登录/查询也能回收；owner阻塞可能推迟物理清理，
+但 now>=deadline 仍拒绝恢复。旧epoch/connection的close或业务调用不能删除新绑定。
 
-有效调用需要非零关联 id：Envelope.request_id 非零时采用它，否则回退包头 request id；
-两者均为0返回 InvalidRequest。包头 id 始终原样回传，不要求等于64位 Envelope id。
-响应 Envelope.request_id 由路由器统一赋值，业务 Handler 不能覆盖关联 id。
+## 错误与请求生命周期
 
-旧消息的 msg_id=0 通过已知 oneof 推导，响应仍省略 msg_id，避免改变旧 Ping/Pong 字节。
-显式 msg_id 的请求，响应携带相应响应 MsgId。旧客户端可忽略/保留新字段4。
-显式未知 MsgId 可没有已知 oneof（用于未来消息），仍受 protobuf 大小/深度限制；
-路由器回复 UnknownMessage。已知 MsgId 与 oneof 不匹配则 InvalidRequest。
+Error字段保持code1(uint32)、message2(string)、causes3(repeated Error)。
 
-## MsgId → Handler
+| code | 固定message | 主要条件 |
+| ---: | --- | --- |
+| 1001 | unknown message | 未注册消息，包括把响应作为请求 |
+| 1002 | invalid request | 无ID、已知payload错配、room_id=0 |
+| 1003 | authentication required | 未认证/旧绑定/无效JWT/过期grace |
+| 1004 | request timed out | deadline或完成点实际超时 |
+| 1005 | too many requests | 64 pending上限 |
+| 1006 | duplicate request id | 结束原活动调用，回复一次 |
+| 2001 | business failure | 房间成员满或typed业务失败 |
+| 2002 | service unavailable | 未接入认证、玩家/房间总容量满 |
+| 9000 | internal error | 未知异常、错误回复类型或编码预算失败 |
 
-MsgId 数值由 shared/proto/envelope.proto 定义；已发布值禁止改号或复用。
+客户端按code判断，不解析message。异常文本、密码、token不写响应或日志。
+业务成功回复的payload必须匹配请求；协议统一填写关联字段。
+错误响应通常不关闭连接，帧/包策略、输出硬界或不可恢复编码失败可关闭。
 
-| MsgId | 名称 / payload | 方向 | 默认 Handler / 行为 | 默认认证要求 | 默认超时 |
-| ---: | --- | --- | --- | --- | --- |
-| 0 | MSG_UNSPECIFIED | 兼容入口 | 从已知 oneof 推导；无已知 payload 不路由 | 按推导后的注册项 | 同注册项 |
-| 10 | MSG_LOGIN_REQUEST / LoginRequest | C→S | 当前返回 Error 2002；可注册真实认证 Handler | 无；收到请求不会自动认证 | 5s |
-| 11 | MSG_LOGIN_RESPONSE / LoginResponse | S→C | 登录结果，不注册为请求路由 | — | — |
-| 12 | MSG_PING / Ping | C→S | 返回 Pong，并回传 nonce | 无；不改变登录状态 | 5s |
-| 13 | MSG_PONG / Pong | S→C | 心跳结果，不注册为请求路由 | — | — |
-| 14 | MSG_ERROR / Error | S→C | 失败响应，不注册为请求路由 | — | — |
-| 其他 | 未注册 MsgId | C→S | Error 1001，不执行业务 Handler | 不执行业务 | 立即响应 |
+RequestDispatcher 管 pending/generation/deadline，ArenaProtocol 管wire转换。
+RequestMessage拥有Envelope/context，完成回调可跨线程经有界poster回owner。
+最多256个未消费foreign action；满载拒绝后原deadline收尾。迟到/重复/关闭后完成无效。
+Handler仍在owner同步调用，耗时工作需主动交给executor；timer不抢占阻塞Handler。
+停机先quiesce新输入，等待已接收请求/期限，再排空输出，最后由server grace强制兜底。
 
-MessageRegistry::registerHandler 默认 requiresAuthentication=true、timeout=5s；
-只有明确公开的登录/心跳路由配置 false。Expired 会话拒绝所有已注册路由，
-Pending 不能执行要求认证的业务路由。未知消息先映射 UnknownMessage。
-原 AuthenticationGateHandler/PingHandler 可用于自定义对象链；默认握手链已改为
-EnvelopeDecodeHandler → MessageRouter，认证策略由注册项在业务调用前统一检查。
-
-注册示例（在共享注册表发布给 worker 前完成）：
-~~~cpp
-auto routes = std::make_shared<MessageRegistry>();
-routes->registerHandler(arena::protocol::MSG_PING,
-    [](std::shared_ptr<const RequestMessage> request,
-       RequestCompletion complete) {
-        arena::protocol::Envelope reply;
-        reply.mutable_pong()->set_nonce(request->envelope.ping().nonce());
-        complete(std::move(reply));
-    },
-    MessageRouteOptions{false, std::chrono::seconds(5)});
-routes->seal();
-ConnectionHandlerFactory handlers = [routes](ConnectionContext::Ptr context) {
-    return makePreLoginHandshakeHandler(std::move(context), routes);
-};
-~~~
-
-seal 后禁止注册/覆盖；重复 MsgId、空 Handler、响应方向的内置 MsgId、
-非正超时或大于1小时的超时在配置时拒绝。注册表只读地共享给 worker；
-共享 Handler 的捕获不得包含未同步的跨连接可变状态。
-
-## Typed Error
-
-Error 的字段保持兼容：code=1(uint32)、message=2(string)、causes=3(repeated Error)。
-C++ 业务使用 ErrorCode 枚举、MessageReply（std::expected<Envelope, ErrorCode>）和
-BusinessError。客户端依据 code 判断，不解析 message。响应文本固定，不发送
-未知异常的 what()、账户、凭据或原始请求 payload。
-
-| code | ErrorCode | 固定 message | 触发条件 |
-| ---: | --- | --- | --- |
-| 0 | ERR_OK | 非错误响应 | 正常完成；不会用作失败 Error |
-| 1001 | ERR_UNKNOWN_MESSAGE | unknown message | MsgId 未注册，包括服务端响应 MsgId 被当请求发送 |
-| 1002 | ERR_INVALID_REQUEST | invalid request | 无有效请求 id、已知 MsgId/payload 不匹配或请求方向错误 |
-| 1003 | ERR_UNAUTHENTICATED | authentication required | 会话未认证却调用业务路由，或会话已 Expired |
-| 1004 | ERR_TIMEOUT | request timed out | owner deadline 到期，或完成回调到达时已过 deadline |
-| 1005 | ERR_TOO_MANY_REQUESTS | too many requests | 每连接64个待完成请求已满 |
-| 1006 | ERR_DUPLICATE_REQUEST | duplicate request id | 重复活动 id：终止原调用，回复一次；重复包不执行 |
-| 2001 | ERR_BUSINESS_FAILURE | business failure | Handler 返回/抛出该 Typed Error |
-| 2002 | ERR_UNAVAILABLE | service unavailable | 服务尚未接入或 Handler 明确返回；默认 Login |
-| 9000 | ERR_INTERNAL | internal error | 非业务异常、非法错误枚举、不合法/超限业务响应、缺少调度依赖 |
-
-业务失败用 `complete(std::unexpected(code))` 或抛 BusinessError(code)；
-不要把失败伪装成成功 Envelope。已知 Ping/Login 的成功响应必须分别是
-Pong/LoginResponse。业务返回的 request_id/msg_id 会由路由器统一设置。
-
-Typed Error 表示调用完成，正常情况下连接继续可用；传输输出硬界、关闭或
-不可恢复编码失败仍可终止连接。现有包限流/白名单在解码之前执行并关闭，
-不会保证先发一个业务 Error；它们的拒绝计数与业务错误日志分开解释。
-
-## 请求生命周期、超时与日志
-
-每连接最多64个未完成调用。路由前挂 owner steady_clock deadline，
-成功/失败完成时取消 timer。超时、重复完成、迟到 timer/业务回调最多回复一次。
-请求 id 可以在完成后复用，内部 generation 阻止旧完成影响新请求。
-
-RequestMessage 拥有 protobuf 数据与 ConnectionContext，不借用 PacketCodec 缓冲；
-异步 Handler 保留 shared_ptr<const RequestMessage>。完成回调必须回到连接 owner，
-不能在工作线程直接调用。Handler 应非阻塞；owner timer 不会抢占阻塞 Handler，
-但同步完成时仍检查实际 deadline。关闭后不发送响应，回收取消 timer，
-completion 弱引用路由状态，不保活 Runtime/socket。
-
-请求链使用 spdlog，统一事件：
-~~~text
-event=request_start connection_id=123 request_id=456 msg_id=12 code=0 outcome=reply
-event=request_handler connection_id=123 request_id=456 msg_id=12 code=0 outcome=reply
-event=request_end connection_id=123 request_id=456 msg_id=12 code=0 outcome=reply
-~~~
-用 connection_id + request_id 检索同一次调用；客户端应使用独立调用 id。
-unknown/typed business/timeout 的结束事件使用对应错误码。关闭回收的待完成
-调用记录 outcome=cancelled，不当作成功响应；不记录凭据或原始 payload。
+spdlog保留event=request_start/request_handler/request_end，含connection_id、request_id、
+msg_id、code与outcome；reply表示进入发送路径，不代表peer已接收。
+新增event=session_install含player/connection/epoch/session_id/resumed；
+event=online_sweep含active/retained/rooms，只有真正回收时输出。
 
 ## 验收入口
 
-- tests/gateway/net/MessageDispatchTest.cpp：注册、typed映射、id、日志、超时/迟到/取消与上限。
-- tests/gateway/net/MessageDispatchIntegrationTest.py：真实TCP/WS响应及按request id核对日志。
-- tests/shared/protocol/EnvelopeCodecTest.cpp：旧/新字段兼容、tag4与retired tag2。
-- MessageDispatchTestProfile.h 的固定账户动作和合成业务 MsgId100只属于测试宿主。
+- tests/auth/OnlineRegistryTest.cpp：clock边界、竞态、索引、容量与清理。
+- tests/auth/OnlineRegistryMaintenanceTest.cpp：独立timer、取消/退役。
+- tests/auth/OnlineProtocolTest.cpp：真实生产routes、认证、恢复、快照与错误。
+- tests/auth/OnlinePresenceIntegrationTest.py：epoll/Asio0/4、TCP↔WS、observer与无流量回收。
+- tests/auth/AccountLoginIntegrationTest.py：100并发登录、旧token/旧连接隔离。
+- tests/shared/protocol/EnvelopeCodecTest.cpp：旧schema/tag兼容及新增payload。

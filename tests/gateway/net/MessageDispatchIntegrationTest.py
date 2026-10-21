@@ -1,6 +1,7 @@
 """Typed dispatch and request correlation through real TCP/WebSocket clients."""
 import os
 import re
+import signal
 import socket
 import struct
 import subprocess
@@ -153,6 +154,11 @@ def run_profile(binary, mode, workers):
                 assert fields(routed[13])[1] == 42
                 pong = exchange(12, base + 9, 12, b"\x08\x63")
                 assert fields(pong[13])[1] == 99
+                foreign = exchange(10, base + 10, 10, b"\x0a\x07foreign")
+                assert fields(foreign[11])[1] == 1
+                # A duplicate foreign completion must not precede this reply.
+                pong = exchange(12, base + 11, 12, b"\x08\x64")
+                assert fields(pong[13])[1] == 100
         wait_until(process, lambda: fd_count(process) == baseline, "rpc FD recovery")
         stop_host(process, log)
         with open(log.name, errors="replace") as stream:
@@ -171,10 +177,73 @@ def run_profile(binary, mode, workers):
             os.unlink(log.name)
         else:
             print("server log:", log.name, file=sys.stderr)
-    print("typed unknown/timeout/business mapping, authenticated routing, traces and FD recovery passed")
+    print("typed routing, foreign once-only completion, deadlines, traces and FD recovery passed")
+
+def run_drain_profile(binary, mode, workers):
+    if mode == "ws":
+        process, log, content, tcp_port, ws_port = run_host(binary, "rpc")
+        ports = [(tcp_port, False), (ws_port, True)]
+    else:
+        port = reserve_port()
+        log = tempfile.NamedTemporaryFile(prefix="arena-rpc-drain-", suffix=".log", delete=False)
+        process = subprocess.Popen([binary, str(port), "60000", str(workers), "rpc"],
+                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        def content():
+            log.flush()
+            with open(log.name, errors="replace") as stream:
+                return stream.read()
+        ports = [(port, False)]
+    peers = []
+    passed = False
+    try:
+        ready = "WS_TEST_READY" if mode == "ws" else "TEST_HOST_READY"
+        wait_until(process, lambda: ready in content(), "request-drain host startup")
+        for index, (port, ws) in enumerate(ports):
+            if ws:
+                peer, upgraded = upgrade(port)
+                assert upgraded.startswith(b"HTTP/1.1 101")
+            else:
+                peer = socket.create_connection(("127.0.0.1", port), 5)
+                peer.settimeout(5)
+            rid = 990000 + index
+            peers.append((peer, ws, rid))
+            frame = packet(envelope(10, rid, 10, b"\x0a\x04wait"))
+            if ws:
+                send_frame(peer, 2, frame)
+            else:
+                peer.sendall(frame)
+        wait_until(process, lambda: all(
+            re.search(rf"event=request_handler .*request_id={rid} ", content())
+            for _, _, rid in peers), "pending requests before drain")
+        process.send_signal(signal.SIGUSR1)
+        for peer, ws, rid in peers:
+            reply = response(peer, ws)
+            assert reply[1] == rid and fields(reply[14])[1] == 1004, reply
+            if ws:
+                opcode, payload = read_frame(peer)
+                assert opcode == 8 and payload[:2] == b"\x03\xe8", (opcode, payload)
+                send_frame(peer, 8, payload)
+            assert peer.recv(1) == b"", "drain did not close after the final pending reply"
+            peer.close()
+        assert process.wait(timeout=5) == 0, content()
+        output = content()
+        assert "AddressSanitizer" not in output and "runtime error:" not in output, output
+        passed = True
+    finally:
+        for peer, _, _ in peers:
+            peer.close()
+        stop_host(process, log)
+        if passed:
+            os.unlink(log.name)
+        else:
+            print("server log:", log.name, file=sys.stderr)
+    print("pending request deadlines reply before TCP/WS graceful retirement passed")
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 2:
         run(sys.argv[1])
+    elif len(sys.argv) == 5 and sys.argv[4] == "drain":
+        run_drain_profile(sys.argv[1], sys.argv[2], int(sys.argv[3]))
     else:
         run_profile(sys.argv[1], sys.argv[2], int(sys.argv[3]))

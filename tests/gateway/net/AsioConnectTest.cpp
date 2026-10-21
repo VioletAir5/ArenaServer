@@ -17,7 +17,7 @@
 #include "net/Socket.h"
 #include "net/TcpConnection.h"
 
-#include "ConnectionRuntimeTestSupport.h"
+#include "ConnectionHostTestSupport.h"
 
 namespace service::gateway
 {
@@ -95,7 +95,7 @@ protected:
 
 TEST_F(AsioConnectTest, CopiesSendInputAndPreservesOrder)
 {
-    IConnection& transport = *connection;
+    ITransport& transport = *connection;
     connection->start();
     std::string first = "original bytes";
     transport.send(std::as_bytes(std::span(first)));
@@ -112,7 +112,7 @@ TEST_F(AsioConnectTest, PausedInFlightReadIsDeliveredOnResume)
 {
     std::string received;
     connection->setMessageCallback(
-        [&](IConnection&, auto bytes)
+        [&](ITransport&, auto bytes)
         {
             received.append(
                 reinterpret_cast<const char*>(bytes.data()),
@@ -159,7 +159,7 @@ TEST_F(AsioConnectTest, ShutdownDrainsAndStillReceivesUntilPeerFin)
 {
     std::string received;
     connection->setMessageCallback(
-        [&](IConnection& c, auto bytes)
+        [&](ITransport& c, auto bytes)
         {
             received.append(
                 reinterpret_cast<const char*>(bytes.data()),
@@ -228,7 +228,7 @@ TEST_F(AsioConnectTest, PartialWritesDrainInOrderBeforeFin)
 
 TEST_F(AsioConnectTest, PeerFinFlushesQueuedEchoBeforeClose)
 {
-    connection->setMessageCallback([](IConnection& c, auto bytes)
+    connection->setMessageCallback([](ITransport& c, auto bytes)
                                    { c.send(bytes); });
     connection->start();
     sendPeer("last message");
@@ -252,14 +252,15 @@ TEST_F(AsioConnectTest, WatermarksAndHardLimitBoundOutput)
         0
     );
     int messages = 0;
-    auto runtime = testRuntime(
+    auto runtime = testHost(
         connection,
         connectionScheduler(context.get_executor()),
-        [&](auto) { return [&](IConnection&, auto) { ++messages; }; }
+        [&](auto)
+        { return [&](ConnectionChannel&, auto) { ++messages; }; }
     );
     int closed = 0;
     connection->setCloseCallback(
-        [&, weak = std::weak_ptr<ConnectionRuntime>(runtime)](auto*)
+        [&, weak = std::weak_ptr<ConnectionHost>(runtime)](auto*)
         {
             if (auto r = weak.lock())
                 r->transportClosed();
@@ -474,7 +475,7 @@ TEST_F(AsioConnectTest, CloseOnceDiscardsQueuedAndCancelledOperations)
     int closes = 0;
     int messages = 0;
     connection->setCloseCallback([&](auto*) { ++closes; });
-    connection->setMessageCallback([&](IConnection&, auto)
+    connection->setMessageCallback([&](ITransport&, auto)
                                    { ++messages; });
     const int socketBuffer = 4096;
     ASSERT_EQ(
@@ -538,7 +539,7 @@ TEST_F(
 {
     std::weak_ptr<AsioConnect> weak = connection;
     connection->setMessageCallback(
-        [&](IConnection& c, auto bytes)
+        [&](ITransport& c, auto bytes)
         {
             c.close();
             connection.reset();
@@ -560,7 +561,7 @@ TEST_F(
 TEST_F(AsioConnectTest, CallbackExceptionClosesOnlyThisConnection)
 {
     connection->setMessageCallback(
-        [](IConnection&, auto)
+        [](ITransport&, auto)
         { throw std::runtime_error("application failure"); }
     );
     connection->start();

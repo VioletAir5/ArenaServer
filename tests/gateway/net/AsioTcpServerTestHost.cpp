@@ -2,20 +2,18 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string_view>
 
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/AsioTcpServer.h"
+#include "net/ConnectionSchedulers.h"
+#include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
 
-#include "AuthTestProfile.h"
-#include "ChaosTestProfile.h"
-#include "ConnectionContextTestHandler.h"
-#include "ConnectionFeatureTestProfile.h"
-#include "MessageDispatchTestProfile.h"
-#include "SecurityPolicyTestProfile.h"
+#include "TransportTestProfile.h"
 
 int main(int argc, char** argv)
 {
@@ -23,61 +21,30 @@ int main(int argc, char** argv)
     {
         return 2;
     }
+    std::shared_ptr<service::gateway::OnlineRegistry> online;
     service::gateway::ConnectionHandlerFactory handlerFactory;
-    service::gateway::ConnectionFeatureFactory featureFactory;
     if (argc == 5)
     {
-        if (std::string_view(argv[4]) == "context")
+        try
         {
-            handlerFactory = makeContextTestFactory();
+            handlerFactory = service::gateway::transportTestProfile(
+                argv[4],
+                &online
+            );
         }
-        else if (
-            std::string_view(argv[4]) == "chaos" ||
-            std::string_view(argv[4]) == "chaos_packet"
-        )
-        {
-            featureFactory = service::gateway::
-                makeChaosTestFeatures();
-            if (std::string_view(argv[4]) == "chaos")
-                handlerFactory =
-                    [](service::gateway::ConnectionContext::Ptr ctx)
-                {
-                    return service::gateway::
-                        makePreLoginHandshakeHandler(std::move(ctx));
-                };
-        }
-        else if (std::string_view(argv[4]) == "auth")
-        {
-            handlerFactory = service::gateway::makeAuthTestFactory();
-        }
-        else if (std::string_view(argv[4]) == "rpc")
-        {
-            handlerFactory = service::gateway::makeRpcTestFactory();
-        }
-        else if (std::string_view(argv[4]) == "security")
-        {
-            handlerFactory = service::gateway::
-                makeSecurityTestFactory();
-            featureFactory = service::gateway::
-                makeSecurityTestFeatures();
-        }
-        else if (std::string_view(argv[4]) == "features")
-        {
-            featureFactory = service::gateway::
-                makeFeatureTestProfile();
-        }
-        else if (std::string_view(argv[4]) != "packet")
+        catch (const std::invalid_argument&)
         {
             return 2;
         }
-        if (!handlerFactory)
-            handlerFactory =
-                [](service::gateway::ConnectionContext::Ptr)
-            { return service::gateway::makePacketEchoHandler(); };
     }
-
     using namespace service::gateway;
     boost::asio::io_context context;
+    std::unique_ptr<OnlineRegistryMaintenance> upkeep;
+    if (online)
+        upkeep = std::make_unique<OnlineRegistryMaintenance>(
+            online,
+            connectionScheduler(context.get_executor())
+        );
     boost::asio::signal_set signals(context, SIGTERM, SIGUSR1);
     boost::asio::steady_timer poll(context);
     const auto port = static_cast<std::uint16_t>(
@@ -95,8 +62,7 @@ int main(int argc, char** argv)
         1000,
         idle,
         workers,
-        handlerFactory,
-        featureFactory
+        handlerFactory
     );
     std::function<void()> waitStopped;
     waitStopped = [&]
@@ -125,6 +91,8 @@ int main(int argc, char** argv)
             {
                 return;
             }
+            if (upkeep)
+                upkeep->stop();
             server.stop(
                 signal == SIGTERM ? std::chrono::milliseconds(0)
                                   : std::chrono::milliseconds(300)
@@ -134,9 +102,15 @@ int main(int argc, char** argv)
     );
     std::cerr << "TEST_HOST_READY" << std::endl;
     context.run();
+    if (upkeep)
+        upkeep->shutdown();
+    if (online)
+        printOnlineTestCounts(*online);
     if (argc == 5 && (std::string_view(argv[4]) == "chaos" ||
                       std::string_view(argv[4]) == "chaos_packet"))
         service::gateway::printChaosTestCounters();
     if (argc == 5 && std::string_view(argv[4]) == "security")
         printSecurityTestCounters();
+    if (argc == 5 && std::string_view(argv[4]) == "features")
+        printPacketPolicyTestCounters();
 }

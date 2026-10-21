@@ -25,7 +25,7 @@ makeContextTestFactory()
                 "new connection session is not pending"
             );
         return [context = std::move(context), owner, baseOwner](
-                   IConnection& connection,
+                   ConnectionChannel& connection,
                    std::span<const std::byte> bytes
                )
         {

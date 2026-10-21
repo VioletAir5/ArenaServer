@@ -14,6 +14,12 @@ enum MsgId {
   MSG_PING = 12;
   MSG_PONG = 13;
   MSG_ERROR = 14;
+  MSG_SESSION_STATE_REQUEST = 20;
+  MSG_SESSION_STATE_RESPONSE = 21;
+  MSG_ROOM_JOIN_REQUEST = 30;
+  MSG_ROOM_JOIN_RESPONSE = 31;
+  MSG_ROOM_LEAVE_REQUEST = 32;
+  MSG_ROOM_LEAVE_RESPONSE = 33;
 }
 
 // Stable wire codes. Error.code stays uint32 for v1 descriptor compatibility.
@@ -44,6 +50,12 @@ message Envelope {
     Ping ping = 12;
     Pong pong = 13;
     Error error = 14;
+    SessionStateRequest session_state_request = 20;
+    SessionStateResponse session_state_response = 21;
+    RoomJoinRequest room_join_request = 30;
+    RoomJoinResponse room_join_response = 31;
+    RoomLeaveRequest room_leave_request = 32;
+    RoomLeaveResponse room_leave_response = 33;
   }
 }
 
@@ -66,7 +78,42 @@ message LoginResponse {
   Error error = 3;
   uint64 player_id = 4;
   uint64 session_epoch = 5;
+  // Logical identity survives authorized transport recovery.
+  uint64 session_id = 6;
+  // Zero means the session currently belongs to no room.
+  uint64 room_id = 7;
+  bool resumed = 8;
 }
+
+enum Presence {
+  PRESENCE_UNSPECIFIED = 0;
+  PRESENCE_ONLINE = 1;
+  PRESENCE_DETACHED = 2;
+}
+
+// State is returned only to the authenticated current session.
+message SessionStateRequest {}
+
+message RoomMember {
+  uint64 player_id = 1;
+  uint64 session_id = 2;
+  Presence presence = 3;
+}
+
+message SessionStateResponse {
+  uint64 session_id = 1;
+  uint64 player_id = 2;
+  uint64 room_id = 3;
+  Presence presence = 4;
+  repeated RoomMember members = 5;
+}
+
+// A nonzero ID creates a bounded gateway roster if it does not exist.
+// This roster does not represent the planned battle RoomActor.
+message RoomJoinRequest { uint64 room_id = 1; }
+message RoomJoinResponse { SessionStateResponse state = 1; }
+message RoomLeaveRequest {}
+message RoomLeaveResponse { SessionStateResponse state = 1; }
 
 message Ping {
   uint64 nonce = 1;

@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 
 #include "net/ConnectionHandler.h"
+#include "net/MessageRegistry.h"
+#include "net/OnlineRegistry.h"
 
 using namespace service::gateway;
 
@@ -134,7 +136,7 @@ TEST(
         invoked = true;
         EXPECT_EQ(std::this_thread::get_id(), owner);
         EXPECT_EQ(info.get(), context.get());
-        return [](IConnection&, std::span<const std::byte>) {};
+        return [](ConnectionChannel&, std::span<const std::byte>) {};
     };
     auto callback = makeConnectionHandler(factory, context);
     auto copy = callback;
@@ -174,5 +176,143 @@ TEST(
         makeConnectionHandler(throwing, context),
         std::runtime_error
     );
-    EXPECT_TRUE(makeConnectionHandler({}, context));
+    EXPECT_TRUE(makeConnectionHandler({}, context).onMessage);
+}
+
+TEST(ConnectionContextTest, ForeignDisconnectRejectsBeforeMutation)
+{
+    ConnectionSession session;
+    ASSERT_TRUE(session.markAuthenticated());
+    std::thread foreign(
+        [&] { EXPECT_THROW(session.disconnect(), std::logic_error); }
+    );
+    foreign.join();
+    EXPECT_EQ(
+        session.loginState(),
+        ConnectionSession::LoginState::Authenticated
+    );
+    session.disconnect();
+    EXPECT_EQ(
+        session.loginState(),
+        ConnectionSession::LoginState::Expired
+    );
+}
+
+TEST(
+    ConnectionContextTest,
+    PassiveContextMayBeReleasedLastOnForeignThread
+)
+{
+    auto context = std::make_shared<ConnectionContext>(
+        99,
+        InetAddress("127.0.0.1", 1234),
+        ConnectionContext::Clock::now()
+    );
+    ASSERT_TRUE(context->session->markAuthenticated());
+    std::weak_ptr<const ConnectionContext> observed = context;
+    std::weak_ptr<ConnectionSession> session = context->session;
+    std::thread foreign(
+        [retained = std::move(context)]() mutable
+        {
+            // This is final passive metadata release, not an active
+            // mutation API.
+            retained.reset();
+        }
+    );
+    foreign.join();
+    EXPECT_TRUE(observed.expired());
+    EXPECT_TRUE(session.expired());
+}
+
+TEST(
+    ConnectionContextTest,
+    RetainedRequestFinalReleaseDetachesSessionWithoutOwnerIo
+)
+{
+    service::auth::JwtConfig config;
+    config.key = "0123456789abcdef0123456789abcdef"; // Test-only key.
+    config.now = [] { return std::int64_t{1700000000}; };
+    service::auth::JwtTokens tokens(std::move(config));
+    auto accounts = std::make_shared<OnlineRegistry>();
+    auto context = std::make_shared<ConnectionContext>(
+        100,
+        InetAddress("127.0.0.1", 1234),
+        ConnectionContext::Clock::now()
+    );
+    std::atomic<int> closePosts{0};
+    context->session->setCloseRequest([&] { ++closePosts; });
+    auto staleClose = context->session->closeRequest();
+    auto grant = accounts->install(
+        arena::domain::PlayerId{42},
+        context->connectionId,
+        std::nullopt,
+        tokens,
+        staleClose
+    );
+    ASSERT_TRUE(grant);
+    ASSERT_TRUE(context->session->bind(grant->lease));
+    EXPECT_EQ(accounts->activeCount(), 1U);
+    std::weak_ptr<const ConnectionContext> observed = context;
+    std::weak_ptr<ConnectionSession> session = context->session;
+    auto request = std::make_shared<const RequestMessage>(
+        RequestMessage{
+            context->connectionId,
+            1,
+            arena::protocol::MSG_PING,
+            {},
+            context
+        }
+    );
+    context.reset();
+    std::thread business([retained = std::move(request)]() mutable
+                         { retained.reset(); });
+    business.join();
+    EXPECT_TRUE(observed.expired());
+    EXPECT_TRUE(session.expired());
+    EXPECT_FALSE(grant->lease->current());
+    EXPECT_EQ(accounts->activeCount(), 0U);
+    staleClose();
+    EXPECT_EQ(closePosts.load(), 0);
+}
+
+TEST(
+    ConnectionContextTest,
+    BindingIsOwnerCheckedAndOnlyReportsCurrentLease
+)
+{
+    service::auth::JwtConfig config;
+    config.key = "0123456789abcdef0123456789abcdef";
+    config.now = [] { return std::int64_t{1700000000}; };
+    service::auth::JwtTokens tokens(std::move(config));
+    auto registry = std::make_shared<OnlineRegistry>();
+    ConnectionSession session;
+    EXPECT_FALSE(session.binding());
+    auto grant = registry->install(
+        arena::domain::PlayerId{42},
+        100,
+        std::nullopt,
+        tokens,
+        [] {}
+    );
+    ASSERT_TRUE(grant);
+    ASSERT_TRUE(session.bind(grant->lease));
+    const auto current = session.binding();
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->playerId, arena::domain::PlayerId{42});
+    EXPECT_EQ(current->connectionId, 100U);
+    EXPECT_EQ(current->epoch, grant->lease->binding.epoch);
+    std::thread foreign(
+        [&] { EXPECT_THROW(session.binding(), std::logic_error); }
+    );
+    foreign.join();
+    ASSERT_TRUE(registry->install(
+        arena::domain::PlayerId{42},
+        101,
+        std::nullopt,
+        tokens,
+        [] {}
+    ));
+    EXPECT_FALSE(session.binding());
+    session.disconnect();
+    EXPECT_FALSE(session.binding());
 }

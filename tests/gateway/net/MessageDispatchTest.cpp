@@ -2,13 +2,14 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
 #include <spdlog/sinks/ostream_sink.h>
 
-#include "net/ConnectionRuntime.h"
-#include "net/MessageRouter.h"
+#include "net/ArenaProtocol.h"
+#include "net/ConnectionHost.h"
 #include "net/PacketBuffer.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
@@ -17,9 +18,11 @@ namespace
 {
 using namespace service::gateway;
 namespace wire = arena::protocol;
-struct Transport final : IConnection
+struct Transport final : ITransport
 {
     std::string output;
+    std::string outputAtShutdown;
+    unsigned shutdownCalls{0};
     bool open = true;
     std::uint64_t id() const noexcept override
     {
@@ -27,6 +30,8 @@ struct Transport final : IConnection
     }
     void send(std::span<const std::byte> bytes) override
     {
+        if (shutdownCalls)
+            return;
         output.append(
             reinterpret_cast<const char*>(bytes.data()),
             bytes.size()
@@ -34,6 +39,8 @@ struct Transport final : IConnection
     }
     void shutdown() override
     {
+        ++shutdownCalls;
+        outputAtShutdown = output;
     }
     void close() override
     {
@@ -68,7 +75,7 @@ struct MessageDispatchTest : testing::Test
     std::vector<std::function<void()>> posts;
     std::vector<std::function<void()>> deadlines;
     int cancellations = 0;
-    std::shared_ptr<ConnectionRuntime> runtime;
+    std::shared_ptr<ConnectionHost> runtime;
 
     void start(
         std::shared_ptr<MessageRegistry> registry,
@@ -76,15 +83,7 @@ struct MessageDispatchTest : testing::Test
     )
     {
         registry->seal();
-        auto decoder = std::make_unique<EnvelopeDecodeHandler>();
-        decoder->setNext(
-            std::make_unique<MessageRouter>(
-                context,
-                std::move(registry),
-                std::move(logger)
-            )
-        );
-        runtime = std::make_shared<ConnectionRuntime>(
+        runtime = std::make_shared<ConnectionHost>(
             transport,
             context,
             ConnectionScheduler{
@@ -95,10 +94,11 @@ struct MessageDispatchTest : testing::Test
                     return ConnectionTimer([&] { ++cancellations; });
                 }
             },
-            makePacketHandler(
-                PacketPipeline(std::move(decoder)),
-                1024,
-                context->rejections
+            makeArenaProtocolHandler(
+                context,
+                std::move(registry),
+                {},
+                std::move(logger)
             )
         );
         runtime->start();
@@ -498,7 +498,7 @@ TEST_F(
     request.set_request_id(105);
     request.mutable_login_request()->set_account("copied");
     receive(request);
-    std::weak_ptr<ConnectionRuntime> weak = runtime;
+    std::weak_ptr<ConnectionHost> weak = runtime;
     runtime->close();
     posts[0]();
     runtime->transportClosed();
@@ -580,6 +580,400 @@ TEST(
         registry.registerHandler(wire::MSG_LOGIN_REQUEST, handler),
         std::logic_error
     );
+}
+
+TEST_F(
+    MessageDispatchTest,
+    ForeignThreadCompletionRunsOnlyOnConnectionOwner
+)
+{
+    RequestCompletion complete;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto request, auto callback)
+        {
+            EXPECT_EQ(request->envelope.ping().nonce(), 42);
+            complete = std::move(callback);
+        },
+        {false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(701);
+    request.mutable_ping()->set_nonce(42);
+    receive(request);
+    std::thread worker(
+        [complete]
+        {
+            wire::Envelope reply;
+            reply.mutable_pong()->set_nonce(42);
+            complete(reply);
+            complete(std::move(reply));
+        }
+    );
+    worker.join();
+    EXPECT_TRUE(transport->output.empty());
+    ASSERT_EQ(posts.size(), 1);
+    posts.front()();
+    EXPECT_EQ(response().pong().nonce(), 42);
+    EXPECT_EQ(cancellations, 1);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    SaturatedCompletionMailboxFallsBackToExistingDeadline
+)
+{
+    std::vector<RequestCompletion> completions;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto complete)
+        { completions.push_back(std::move(complete)); },
+        {false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(702);
+    request.mutable_ping();
+    receive(request);
+    const auto post = runtime->poster();
+    std::thread worker(
+        [&, post]
+        {
+            for (std::size_t i = 0;
+                 i < ConnectionHost::kMaxPostedActions;
+                 ++i)
+                EXPECT_TRUE(post([](ConnectionChannel&) {}));
+            wire::Envelope reply;
+            reply.mutable_pong();
+            completions.front()(std::move(reply));
+        }
+    );
+    worker.join();
+    EXPECT_EQ(posts.size(), ConnectionHost::kMaxPostedActions);
+    EXPECT_TRUE(transport->output.empty());
+    deadlines.front()();
+    EXPECT_EQ(response().error().code(), wire::ERR_TIMEOUT);
+    transport->output.clear();
+    for (auto& task : posts)
+        task();
+    receive(
+        request
+    ); // The deadline released the original pending slot.
+    ASSERT_EQ(completions.size(), 2);
+    wire::Envelope reply;
+    reply.mutable_pong()->set_nonce(9);
+    completions.front()(reply);
+    EXPECT_TRUE(transport->output.empty());
+    completions.back()(std::move(reply));
+    EXPECT_EQ(response().pong().nonce(), 9);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    ForeignThreadCompletionAfterTeardownRetainsNoHost
+)
+{
+    RequestCompletion complete;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto callback) { complete = std::move(callback); },
+        {false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(703);
+    request.mutable_ping();
+    receive(request);
+    const std::weak_ptr<ConnectionHost> weak = runtime;
+    runtime->transportClosed();
+    runtime.reset();
+    EXPECT_TRUE(weak.expired());
+    std::thread worker(
+        [complete]
+        { complete(std::unexpected(wire::ERR_BUSINESS_FAILURE)); }
+    );
+    worker.join();
+    EXPECT_TRUE(posts.empty());
+    EXPECT_TRUE(transport->output.empty());
+    EXPECT_EQ(cancellations, 1);
+}
+
+TEST(MessageRegistryTest, RouteLookupRequiresPublishedSealedTable)
+{
+    MessageRegistry registry;
+    registry
+        .registerHandler(wire::MSG_PING, [](auto, auto) {}, {false});
+    EXPECT_THROW(registry.find(wire::MSG_PING), std::logic_error);
+    registry.seal();
+    ASSERT_NE(registry.find(wire::MSG_PING), nullptr);
+    EXPECT_FALSE(
+        registry.find(wire::MSG_PING)->options.requiresAuthentication
+    );
+    EXPECT_EQ(registry.find(999), nullptr);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    PendingForeignReplyEnqueuesBeforeTransportShutdown
+)
+{
+    RequestCompletion complete;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto callback) { complete = std::move(callback); },
+        {false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(801);
+    request.mutable_ping();
+    receive(request);
+    runtime->shutdown();
+    runtime->shutdown();
+    EXPECT_TRUE(runtime->connected());
+    EXPECT_FALSE(runtime->acceptingInput());
+    EXPECT_EQ(transport->shutdownCalls, 0);
+    std::thread worker(
+        [complete]
+        {
+            wire::Envelope reply;
+            reply.mutable_pong()->set_nonce(801);
+            complete(std::move(reply));
+        }
+    );
+    worker.join();
+    EXPECT_EQ(transport->shutdownCalls, 0);
+    ASSERT_EQ(posts.size(), 1);
+    posts.front()();
+    EXPECT_EQ(response().pong().nonce(), 801);
+    EXPECT_EQ(transport->shutdownCalls, 1);
+    EXPECT_EQ(transport->outputAtShutdown, transport->output);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    ExistingDeadlineCompletesDrainAfterTimeoutReply
+)
+{
+    RequestCompletion late;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto complete) { late = std::move(complete); },
+        {false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(802);
+    request.mutable_ping();
+    receive(request);
+    runtime->shutdown();
+    EXPECT_EQ(transport->shutdownCalls, 0);
+    deadlines.front()();
+    EXPECT_EQ(response().error().code(), wire::ERR_TIMEOUT);
+    EXPECT_EQ(transport->shutdownCalls, 1);
+    EXPECT_EQ(transport->outputAtShutdown, transport->output);
+    const auto before = transport->output;
+    late(std::unexpected(wire::ERR_BUSINESS_FAILURE));
+    deadlines.front()();
+    EXPECT_EQ(transport->output, before);
+    EXPECT_EQ(transport->shutdownCalls, 1);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    DrainingRefusesNewRoutesButPreservesAcceptedWork
+)
+{
+    std::vector<RequestCompletion> completions;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto complete)
+        { completions.push_back(std::move(complete)); },
+        {false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(803);
+    request.mutable_ping();
+    receive(request);
+    request.set_request_id(804);
+    receive(request);
+    runtime->shutdown();
+    request.set_request_id(805);
+    receive(request);
+    ASSERT_EQ(completions.size(), 2);
+    EXPECT_EQ(deadlines.size(), 2);
+    wire::Envelope reply;
+    reply.mutable_pong();
+    completions.front()(reply);
+    EXPECT_EQ(transport->shutdownCalls, 0);
+    const auto firstSize = transport->output.size();
+    completions.back()(std::move(reply));
+    EXPECT_GT(transport->output.size(), firstSize);
+    EXPECT_EQ(transport->shutdownCalls, 1);
+    EXPECT_EQ(transport->outputAtShutdown, transport->output);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    CloseCancelsPendingDrainWithoutTransportShutdown
+)
+{
+    RequestCompletion late;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto complete) { late = std::move(complete); },
+        {false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(806);
+    request.mutable_ping();
+    receive(request);
+    runtime->shutdown();
+    runtime->close();
+    ASSERT_EQ(posts.size(), 1);
+    posts.front()();
+    runtime->transportClosed();
+    std::thread worker(
+        [late] { late(std::unexpected(wire::ERR_BUSINESS_FAILURE)); }
+    );
+    worker.join();
+    deadlines.front()();
+    EXPECT_EQ(transport->shutdownCalls, 0);
+    EXPECT_TRUE(transport->output.empty());
+    EXPECT_EQ(cancellations, 1);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    IdleProtocolDrainImmediatelyShutsTransportOnce
+)
+{
+    start(std::make_shared<MessageRegistry>());
+    runtime->shutdown();
+    runtime->shutdown();
+    EXPECT_EQ(transport->shutdownCalls, 1);
+    EXPECT_FALSE(runtime->acceptingInput());
+}
+
+TEST_F(
+    MessageDispatchTest,
+    DispatcherDrainGatesDirectAdmissionAndNotifiesOnce
+)
+{
+    RequestCompletion complete;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto callback) { complete = std::move(callback); },
+        {false}
+    );
+    start(registry);
+    unsigned replies = 0, drained = 0;
+    RequestDispatcher dispatcher(
+        context,
+        registry,
+        [&](ConnectionChannel&, const ReplyMetadata&, MessageReply)
+        {
+            ++replies;
+            return wire::ERR_OK;
+        }
+    );
+    const auto request = [&](std::uint64_t id)
+    {
+        wire::Envelope envelope;
+        envelope.mutable_ping();
+        return ReplyMetadata{
+            std::make_shared<const RequestMessage>(RequestMessage{
+                1,
+                id,
+                wire::MSG_PING,
+                std::move(envelope),
+                context
+            }),
+            7,
+            true
+        };
+    };
+    dispatcher.dispatch(*runtime, request(901), true);
+    dispatcher.drain([&] { ++drained; });
+    dispatcher.drain([&] { drained += 100; });
+    dispatcher.dispatch(*runtime, request(902), true);
+    EXPECT_EQ(deadlines.size(), 1);
+    EXPECT_EQ(drained, 0);
+    wire::Envelope reply;
+    reply.mutable_pong();
+    complete(reply);
+    complete(std::move(reply));
+    EXPECT_EQ(replies, 1);
+    EXPECT_EQ(drained, 1);
+    dispatcher.dispatch(*runtime, request(903), true);
+    EXPECT_EQ(deadlines.size(), 1);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    ReentrantDrainWaitsUntilReplySinkHasEnqueuedReply
+)
+{
+    RequestCompletion complete;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto callback) { complete = std::move(callback); },
+        {false}
+    );
+    start(registry);
+    std::vector<std::string> order;
+    RequestDispatcher* current = nullptr;
+    RequestDispatcher dispatcher(
+        context,
+        registry,
+        [&](ConnectionChannel&, const ReplyMetadata&, MessageReply)
+        {
+            current->drain([&] { order.emplace_back("drained"); });
+            order.emplace_back("reply");
+            return wire::ERR_OK;
+        }
+    );
+    current = &dispatcher;
+    wire::Envelope request;
+    request.mutable_ping();
+    dispatcher.dispatch(
+        *runtime,
+        ReplyMetadata{
+            std::make_shared<const RequestMessage>(RequestMessage{
+                1,
+                904,
+                wire::MSG_PING,
+                std::move(request),
+                context
+            }),
+            7,
+            true
+        },
+        true
+    );
+    wire::Envelope reply;
+    reply.mutable_pong();
+    complete(std::move(reply));
+    EXPECT_EQ(order, (std::vector<std::string>{"reply", "drained"}));
 }
 
 } // namespace

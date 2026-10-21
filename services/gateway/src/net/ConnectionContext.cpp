@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "net/AccountSessions.h"
+#include "net/OnlineRegistry.h"
 
 namespace service::gateway
 {
@@ -61,9 +61,9 @@ bool ConnectionSession::expireLogin()
     return true;
 }
 
-ConnectionSession::~ConnectionSession()
+ConnectionSession::~ConnectionSession() noexcept
 {
-    disconnect();
+    cleanup();
 }
 
 void ConnectionSession::setCloseRequest(std::function<void()> close)
@@ -87,10 +87,16 @@ std::function<void()> ConnectionSession::closeRequest() const
         );
     return [endpoint = m_closeEndpoint]
     {
-        std::lock_guard gate(endpoint->mutex);
-        if (endpoint->post)
-            endpoint->post(); // defer must enqueue, never invoke the
-                              // action inline.
+        std::function<void()> post;
+        {
+            std::lock_guard gate(endpoint->mutex);
+            post = endpoint->post;
+        }
+        // The durable mailbox handle supplies executor lifetime
+        // safety. Invoke unlocked: owner dispatch may close and
+        // disconnect inline.
+        if (post)
+            post();
     };
 }
 
@@ -115,12 +121,25 @@ bool ConnectionSession::superseded() const
     return m_binding && !m_binding->current();
 }
 
-void ConnectionSession::disconnect() noexcept
+std::optional<SessionBinding> ConnectionSession::binding() const
+{
+    requireOwner();
+    if (m_binding && m_binding->current())
+        return m_binding->binding;
+    return std::nullopt;
+}
+
+void ConnectionSession::disconnect()
+{
+    requireOwner();
+    cleanup();
+}
+
+void ConnectionSession::cleanup() noexcept
 {
     {
         std::lock_guard lock(m_closeEndpoint->mutex);
-        m_closeEndpoint->post = {}; // Wait for concurrent posts
-                                    // before owner context can die.
+        m_closeEndpoint->post = {};
     }
     if (m_binding)
         m_binding->release();

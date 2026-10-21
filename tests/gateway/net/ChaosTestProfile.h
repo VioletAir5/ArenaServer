@@ -1,20 +1,18 @@
 #pragma once
 #include <iostream>
 
-#include "net/BackpressureFeature.h"
-#include "net/PacketWhitelistFeature.h"
+#include "net/PacketRatePolicy.h"
+#include "net/PacketTypePolicy.h"
 #include "net/PreLoginHandshake.h"
-#include "net/TokenBucketFeature.h"
 namespace service::gateway
 {
 // Production handshake packet policies, also used for test-only echo.
-inline ConnectionFeatureFactory makeChaosTestFeatures()
+inline PacketPolicyFactory makeChaosTestPolicies()
 {
-    return [](ConnectionPipeline& p, const ConnectionContext&)
+    return [](PacketPolicyChain& p, const ConnectionContext&)
     {
-        p.add<BackpressureFeature>();
-        p.add<TokenBucketFeature>(200.0, 100.0);
-        p.add<PacketWhitelistFeature>(std::vector<std::uint16_t>{1});
+        p.add<PacketRatePolicy>(200.0, 100.0);
+        p.add<PacketTypePolicy>(std::vector<std::uint16_t>{1});
     };
 }
 inline void printChaosTestCounters()

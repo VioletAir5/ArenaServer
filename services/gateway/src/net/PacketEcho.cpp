@@ -1,47 +1,45 @@
 /** @file
- * @brief Replies to supported packets with an echo response.
+ * @brief Implements the binary echo protocol without business
+ * routing.
  */
 #include "net/PacketEcho.h"
 
-#include <memory>
-#include <span>
-
-#include "net/PacketPipeline.h"
 #include "protocol/PacketCodec.hpp"
 
 namespace service::gateway
 {
-PacketHandleResult EchoHandler::handle(PacketContext& context)
+ConnectionMessageCallback makePacketEchoHandler(
+    std::size_t maxBodySize,
+    RejectionCounters::Ptr counters,
+    PacketPolicyChain policies
+)
 {
-    if (context.header.m_type != protocol::PacketHeader::kEchoRequest)
-    {
-        return PacketHandler::handle(context);
-    }
-    auto response = protocol::PacketCodec::encode(
-        protocol::PacketHeader::kEchoResponse,
-        context.header.m_requestId,
-        std::as_bytes(std::span(context.payload))
-    );
-    if (!response)
-    {
-        return PacketHandleResult::Reject;
-    }
-    context.connection.send(
-        std::as_bytes(
-            std::span(response->peek(), response->readableBytes())
-        )
-    );
-    return context.connection.connected()
-               ? PacketHandleResult::Handled
-               : PacketHandleResult::Reject;
-}
-
-ConnectionMessageCallback
-makePacketEchoHandler(std::size_t maxBodySize)
-{
-    return makePacketHandler(
-        PacketPipeline(std::make_unique<EchoHandler>()),
-        maxBodySize
+    return makeFrameProtocolHandler(
+        [](FrameContext& frame)
+        {
+            if (frame.header.m_type !=
+                protocol::PacketHeader::kEchoRequest)
+                return FrameResult::Reject;
+            const auto response = protocol::PacketCodec::encode(
+                protocol::PacketHeader::kEchoResponse,
+                frame.header.m_requestId,
+                std::as_bytes(std::span(frame.payload))
+            );
+            if (!response)
+                return FrameResult::Reject;
+            frame.connection.send(
+                std::as_bytes(
+                    std::span(
+                        response->peek(),
+                        response->readableBytes()
+                    )
+                )
+            );
+            return FrameResult::Handled;
+        },
+        maxBodySize,
+        std::move(counters),
+        std::move(policies)
     );
 }
 } // namespace service::gateway

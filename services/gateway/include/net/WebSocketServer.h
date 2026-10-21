@@ -3,12 +3,14 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <string>
 
 #include <boost/asio/io_context.hpp>
 
+#include "net/AdmissionController.h"
 #include "net/ConnectionFeature.h"
 #include "net/ConnectionHandler.h"
 #include "net/InetAddress.h"
@@ -29,7 +31,8 @@ public:
         std::string allowedOrigin,
         ConnectionHandlerFactory handlerFactory,
         std::size_t maxConnections = 1000,
-        ConnectionFeatureFactory featureFactory = {}
+        ConnectionFeatureFactory featureFactory = {},
+        std::shared_ptr<AdmissionController> admission = {}
     );
     /** @brief Releases owned resources. */
     ~WebSocketServer() noexcept;
@@ -38,7 +41,15 @@ public:
     WebSocketServer(const WebSocketServer&) = delete;
     WebSocketServer& operator=(const WebSocketServer&) = delete;
 
-    void stop() noexcept;
+    /** @brief Stops acceptance and drains output within the grace
+     * period. Nonpositive grace aborts immediately and can escalate a
+     * prior drain. Positive grace is not extended by repeated calls.
+     * Destruction aborts.
+     */
+    void stop(
+        std::chrono::milliseconds grace =
+            std::chrono::milliseconds::zero()
+    ) noexcept;
     /** @brief Returns the number of active connections. */
     std::size_t connectionCount() const noexcept;
 

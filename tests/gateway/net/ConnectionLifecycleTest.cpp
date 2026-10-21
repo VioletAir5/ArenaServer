@@ -1,6 +1,6 @@
-#include "ConnectionRuntimeTestSupport.h"
+#include "ConnectionHostTestSupport.h"
 using service::gateway::BackpressureFeature;
-using service::gateway::IConnection;
+using service::gateway::ConnectionChannel;
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
@@ -749,12 +749,12 @@ TEST(
         0
     );
     int messages = 0;
-    auto runtime = testRuntime(
+    auto runtime = testHost(
         connection,
         connectionScheduler(loop),
         [&](auto)
         {
-            return [&](IConnection& conn, auto bytes)
+            return [&](ConnectionChannel& conn, auto bytes)
             {
                 EXPECT_EQ(
                     std::string_view(
@@ -809,7 +809,7 @@ TEST(TcpConnectionTest, SustainedHighWaterDisconnectsSlowClient)
         ),
         0
     );
-    auto runtime = testRuntime(
+    auto runtime = testHost(
         connection,
         connectionScheduler(loop),
         {},

@@ -43,17 +43,27 @@ The in-process credential adapters remain stubs, so password login cannot succee
 the application until real account/KDF adapters are supplied. Test doubles are
 confined to tests and are never selected by the application.
 
-`makeLoginMessageRegistry` accepts actual adapters and one shared `AccountSessions`
+`makeLoginMessageRegistry` accepts actual adapters and one shared `OnlineRegistry`
 directory for all workers/listeners. Protobuf `LoginRequest.credential_kind` tag 4
 defaults to PASSWORD=0 for old clients; JWT=1 requests must leave `account` empty and
 use the signed subject. Accepted responses add `player_id` tag 4 and
-`session_epoch` tag 5 without changing existing tags.
+`session_epoch` tag 5, then stable `session_id` tag 6, `room_id` tag 7 and
+`resumed` tag 8 without changing existing tags.
 
-A password login replaces the player's active binding. JWT login must match the
-directory's current epoch and expiry; it rotates the epoch on successful resume.
-Disconnect clears only the matching player/connection/epoch active binding and
-retains resume authorization until token expiry. A bounded directory defaults to
-100000 account records; expired entries are reclaimed when capacity is needed.
+A password login starts a fresh logical session and removes its old room membership.
+JWT login must match the registry's current epoch and expiry; it rotates the epoch
+while preserving stable SessionId/RoomId on successful recovery. First matching
+disconnect starts monotonic grace (default 30 seconds), retaining the logical
+session and room slot without retaining a transport. Repeated or stale detach
+cannot extend the deadline or affect the replacement. At the grace boundary,
+recovery fails even when the JWT itself has not expired.
+
+The registry defaults to 100000 retained players and bounded gateway room rosters.
+Management-owned upkeep sweeps expired records/members every 100 ms independently
+of new traffic, prunes empty rooms, and is cancelled before executor shutdown.
+Player/room operations use one synchronized authority; domain Session/Room remain
+separate owner-affine lifecycle models. See gateway README and docs/protocol.md
+for authenticated state/join/leave messages and ARENA_DISCONNECT_GRACE_MS.
 Epochs start from an OpenSSL random boot seed and monotonically increase without wrap.
 This mitigates restart ABA; it is not a durable or distributed epoch authority.
 
@@ -68,6 +78,10 @@ The directory does not instantiate the separate owner-thread domain Session mode
 
 The dedicated `arena_auth_tests` target covers crypto, password stubs, concurrent
 replacement, stale detach, resume, old packet rejection and late completion.
+It also checks grace boundaries, complete roster reclamation, maintenance lifetime,
+and the production state/join/leave routes.
 `AccountLoginTransport_*` covers epoll/Asio 0/4 workers and 50 TCP + 50 WS clients.
 The network fixture uses a deterministic test-only key/clock and strict test doubles.
 New login fields are also covered by frozen-client Envelope compatibility tests.
+`OnlinePresenceTransport_*` uses a real JWT clock and short grace to verify
+TCP/WS recovery and timer reclamation without further requests.
