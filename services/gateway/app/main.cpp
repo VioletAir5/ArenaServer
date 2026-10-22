@@ -32,6 +32,7 @@
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
 #include "net/LoginHandler.h"
+#include "net/MatchmakingService.h"
 #include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
 #include "net/PacketRatePolicy.h"
@@ -251,6 +252,41 @@ void printOnline(const OnlineRegistry& registry)
               << " retained=" << registry.retainedCount()
               << " rooms=" << registry.roomCount() << '\n';
 }
+/** @brief Exports cumulative wait/quality distributions and final
+ * resource gauges. */
+void printMatch(const MatchmakingService& matcher)
+{
+    const auto metrics = matcher.metrics();
+    std::cerr << "MATCH_COUNTS joined=" << metrics.joined
+              << " replayed=" << metrics.replayed
+              << " matched_pairs=" << metrics.matchedPairs
+              << " cancelled=" << metrics.cancelled
+              << " expired=" << metrics.expired
+              << " rejected=" << metrics.rejected
+              << " released_pairs=" << metrics.releasedPairs
+              << " queued=" << metrics.queued
+              << " assigned=" << metrics.assignedPlayers
+              << " retained=" << metrics.retained
+              << " wait_ms_sum=" << metrics.totalMatchedWaitMs
+              << " mmr_gap_sum=" << metrics.totalMmrGap;
+    const auto histogram =
+        [](std::string_view name, const auto& counts)
+    {
+        std::cerr << ' ' << name << '=';
+        bool first = true;
+        for (const auto value : counts)
+        {
+            if (!first)
+                std::cerr << ',';
+            std::cerr << value;
+            first = false;
+        }
+    };
+    histogram("matched_wait", metrics.matchedWait);
+    histogram("mmr_gap", metrics.mmrGap);
+    histogram("abandoned_wait", metrics.abandonedWait);
+    std::cerr << '\n';
+}
 } // namespace
 int main(int argc, char** argv)
 {
@@ -268,6 +304,7 @@ int main(int argc, char** argv)
     }
     std::shared_ptr<AdmissionController> admission;
     std::shared_ptr<OnlineRegistry> online;
+    std::shared_ptr<MatchmakingService> matcher;
     OnlineRegistryConfig onlineConfig;
     std::uint16_t tcpPort = 8888;
     std::uint16_t wsPort = 8889;
@@ -338,10 +375,44 @@ int main(int argc, char** argv)
                 online = std::make_shared<OnlineRegistry>(
                     onlineConfig
                 );
+                service::match::QueueConfig matchConfig;
+                matchConfig.maxQueued = positiveLimit(
+                    "ARENA_MATCH_MAX_QUEUED",
+                    1024
+                );
+                matchConfig.maxTickets = positiveLimit(
+                    "ARENA_MATCH_MAX_TICKETS",
+                    4096
+                );
+                const auto matchTimeout = positiveLimit(
+                    "ARENA_MATCH_TIMEOUT_MS",
+                    30000
+                );
+                if (matchTimeout > 3600000)
+                    throw std::invalid_argument(
+                        "ARENA_MATCH_TIMEOUT_MS must be at most "
+                        "3600000"
+                    );
+                matchConfig.timeout = std::chrono::milliseconds(
+                    matchTimeout
+                );
+                matcher = std::make_shared<MatchmakingService>(
+                    online,
+                    [](arena::domain::PlayerId)
+                        -> std::optional<std::uint32_t>
+                    {
+                        // Every player starts with a provisional
+                        // server rating until a persistent rating
+                        // adapter is configured.
+                        return 1500;
+                    },
+                    matchConfig
+                );
                 registry = makeLoginMessageRegistry(
                     std::move(passwords),
                     std::move(tokens),
-                    online
+                    online,
+                    matcher
                 );
             }
             catch (const std::exception&)
@@ -385,6 +456,8 @@ int main(int argc, char** argv)
                 online,
                 connectionScheduler(loop)
             );
+        if (matcher)
+            matcher->start(connectionScheduler(loop));
         {
             EpollShutdown shutdown(
                 loop,
@@ -392,6 +465,8 @@ int main(int argc, char** argv)
                 mask.signals(),
                 [&]
                 {
+                    if (matcher)
+                        matcher->stop();
                     if (upkeep)
                         upkeep->stop();
                 }
@@ -399,6 +474,11 @@ int main(int argc, char** argv)
             loop.loop();
         }
         server.reset();
+        if (matcher)
+        {
+            matcher->stop();
+            printMatch(*matcher);
+        }
         if (upkeep)
             upkeep->shutdown();
         if (online)
@@ -414,6 +494,8 @@ int main(int argc, char** argv)
             online,
             connectionScheduler(context.get_executor())
         );
+    if (matcher)
+        matcher->start(connectionScheduler(context.get_executor()));
     boost::asio::signal_set signals(context, SIGINT, SIGTERM);
     boost::asio::steady_timer poll(context);
     std::unique_ptr<ITcpServer>
@@ -467,6 +549,8 @@ int main(int argc, char** argv)
         {
             if (!error)
             {
+                if (matcher)
+                    matcher->stop();
                 if (upkeep)
                     upkeep->stop();
                 server->stop();
@@ -481,6 +565,11 @@ int main(int argc, char** argv)
     context.run();
     wsServer.reset();
     server.reset();
+    if (matcher)
+    {
+        matcher->stop();
+        printMatch(*matcher);
+    }
     if (upkeep)
         upkeep->shutdown();
     if (online)

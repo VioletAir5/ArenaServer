@@ -4,6 +4,8 @@
  */
 #include "net/LoginHandler.h"
 
+#include "net/MatchHandler.h"
+
 namespace service::gateway
 {
 namespace
@@ -58,7 +60,8 @@ std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
     std::shared_ptr<const service::auth::LoginAuthenticator>
         passwords,
     std::shared_ptr<const service::auth::JwtTokens> tokens,
-    std::shared_ptr<OnlineRegistry> sessions
+    std::shared_ptr<OnlineRegistry> sessions,
+    std::shared_ptr<MatchmakingService> matchmaking
 )
 {
     if (!passwords || !tokens || !sessions)
@@ -242,6 +245,12 @@ std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
             complete(std::move(reply));
         }
     );
+    if (matchmaking)
+        registerMatchRoutes(
+            *routes,
+            sessions,
+            std::move(matchmaking)
+        );
     routes->seal();
     return routes;
 }

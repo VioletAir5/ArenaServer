@@ -1,5 +1,5 @@
 /** @file
- * @brief Builds authenticated login, recovery, presence and roster
+ * @brief Builds authenticated login, presence, roster and matching
  * routes.
  */
 #pragma once
@@ -11,6 +11,8 @@
 
 namespace service::gateway
 {
+class MatchmakingService;
+
 /** @brief Builds sealed routes sharing one authentication and online
  * authority.
  * @param[in] passwords Password identity verifier shared across
@@ -18,10 +20,12 @@ namespace service::gateway
  * @param[in] tokens Exact-profile JWT verifier and rotating token
  * issuer.
  * @param[in] registry Shared presence and bounded roster authority.
+ * @param[in] matchmaking Optional management-owner matching service.
  */
 std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
     std::shared_ptr<const service::auth::LoginAuthenticator>,
     std::shared_ptr<const service::auth::JwtTokens>,
-    std::shared_ptr<OnlineRegistry>
+    std::shared_ptr<OnlineRegistry>,
+    std::shared_ptr<MatchmakingService> matchmaking = {}
 );
 } // namespace service::gateway

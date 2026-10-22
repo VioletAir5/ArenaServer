@@ -3,6 +3,7 @@
 #include <iostream>
 
 #include "net/LoginHandler.h"
+#include "net/MatchmakingService.h"
 #include "net/OnlineRegistry.h"
 #include "net/PreLoginHandshake.h"
 
@@ -60,7 +61,8 @@ public:
 
 inline ConnectionHandlerFactory makeAuthTestFactory(
     std::shared_ptr<OnlineRegistry> registry = {},
-    bool presence = false
+    bool presence = false,
+    std::shared_ptr<MatchmakingService> matcher = {}
 )
 {
     auto passwords = std::make_shared<
@@ -79,7 +81,8 @@ inline ConnectionHandlerFactory makeAuthTestFactory(
     auto routes = makeLoginMessageRegistry(
         std::move(passwords),
         std::make_shared<service::auth::JwtTokens>(std::move(config)),
-        std::move(registry)
+        std::move(registry),
+        std::move(matcher)
     );
     return [routes](ConnectionContext::Ptr context)
     {
@@ -94,5 +97,38 @@ inline void printOnlineTestCounts(const OnlineRegistry& registry)
     std::cerr << "ONLINE_COUNTS active=" << registry.activeCount()
               << " retained=" << registry.retainedCount()
               << " rooms=" << registry.roomCount() << std::endl;
+}
+inline void printMatchTestCounts(const MatchmakingService& matcher)
+{
+    const auto m = matcher.metrics();
+    std::cerr << "MATCH_COUNTS joined=" << m.joined
+              << " replayed=" << m.replayed
+              << " cancelled=" << m.cancelled
+              << " expired=" << m.expired
+              << " matched_pairs=" << m.matchedPairs
+              << " rejected=" << m.rejected
+              << " released_pairs=" << m.releasedPairs
+              << " queued=" << m.queued
+              << " assigned=" << m.assignedPlayers
+              << " retained=" << m.retained
+              << " wait_ms_sum=" << m.totalMatchedWaitMs
+              << " mmr_gap_sum=" << m.totalMmrGap;
+    const auto histogram =
+        [](std::string_view name, const auto& counts)
+    {
+        std::cerr << ' ' << name << '=';
+        bool first = true;
+        for (const auto value : counts)
+        {
+            if (!first)
+                std::cerr << ',';
+            std::cerr << value;
+            first = false;
+        }
+    };
+    histogram("matched_wait", m.matchedWait);
+    histogram("mmr_gap", m.mmrGap);
+    histogram("abandoned_wait", m.abandonedWait);
+    std::cerr << std::endl;
 }
 } // namespace service::gateway

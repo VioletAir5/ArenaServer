@@ -22,6 +22,7 @@ int main(int argc, char** argv)
         return 2;
     }
     std::shared_ptr<service::gateway::OnlineRegistry> online;
+    std::shared_ptr<service::gateway::MatchmakingService> matcher;
     service::gateway::ConnectionHandlerFactory handlerFactory;
     if (argc == 5)
     {
@@ -29,7 +30,8 @@ int main(int argc, char** argv)
         {
             handlerFactory = service::gateway::transportTestProfile(
                 argv[4],
-                &online
+                &online,
+                &matcher
             );
         }
         catch (const std::invalid_argument&)
@@ -39,6 +41,8 @@ int main(int argc, char** argv)
     }
     using namespace service::gateway;
     boost::asio::io_context context;
+    if (matcher)
+        matcher->start(connectionScheduler(context.get_executor()));
     std::unique_ptr<OnlineRegistryMaintenance> upkeep;
     if (online)
         upkeep = std::make_unique<OnlineRegistryMaintenance>(
@@ -93,6 +97,8 @@ int main(int argc, char** argv)
             }
             if (upkeep)
                 upkeep->stop();
+            if (matcher)
+                matcher->stop();
             server.stop(
                 signal == SIGTERM ? std::chrono::milliseconds(0)
                                   : std::chrono::milliseconds(300)
@@ -104,6 +110,11 @@ int main(int argc, char** argv)
     context.run();
     if (upkeep)
         upkeep->shutdown();
+    if (matcher)
+    {
+        matcher->stop();
+        printMatchTestCounts(*matcher);
+    }
     if (online)
         printOnlineTestCounts(*online);
     if (argc == 5 && (std::string_view(argv[4]) == "chaos" ||

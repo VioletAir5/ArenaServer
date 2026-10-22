@@ -1,12 +1,13 @@
 syntax = "proto3";
 
-// Application messages carried inside the length-prefixed packet frame.
+// Application messages carried inside the length-prefixed packet
+// frame.
 
 package arena.protocol;
 
-// Stable payload schema inside the existing length-prefixed PacketCodec frame.
-// Never renumber a field or reuse a retired tag. Tag 2 was legacy_client_tag
-// in the frozen v1 compatibility fixture.
+// Stable payload schema inside the existing length-prefixed
+// PacketCodec frame. Never renumber a field or reuse a retired tag.
+// Tag 2 was legacy_client_tag in the frozen v1 compatibility fixture.
 enum MsgId {
   MSG_UNSPECIFIED = 0;
   MSG_LOGIN_REQUEST = 10;
@@ -20,9 +21,16 @@ enum MsgId {
   MSG_ROOM_JOIN_RESPONSE = 31;
   MSG_ROOM_LEAVE_REQUEST = 32;
   MSG_ROOM_LEAVE_RESPONSE = 33;
+  MSG_MATCH_JOIN_REQUEST = 40;
+  MSG_MATCH_JOIN_RESPONSE = 41;
+  MSG_MATCH_CANCEL_REQUEST = 42;
+  MSG_MATCH_CANCEL_RESPONSE = 43;
+  MSG_MATCH_STATUS_REQUEST = 44;
+  MSG_MATCH_STATUS_RESPONSE = 45;
 }
 
-// Stable wire codes. Error.code stays uint32 for v1 descriptor compatibility.
+// Stable wire codes. Error.code stays uint32 for v1 descriptor
+// compatibility.
 enum ErrorCode {
   ERR_OK = 0;
   ERR_UNKNOWN_MESSAGE = 1001;
@@ -41,7 +49,8 @@ message Envelope {
   reserved 2;
   reserved "legacy_client_tag";
   uint64 sent_at_unix_ms = 3;
-  // Zero means a v1 peer: infer from the known payload. Never reuse this tag.
+  // Zero means a v1 peer: infer from the known payload. Never reuse
+  // this tag.
   uint32 msg_id = 4;
 
   oneof payload {
@@ -56,6 +65,12 @@ message Envelope {
     RoomJoinResponse room_join_response = 31;
     RoomLeaveRequest room_leave_request = 32;
     RoomLeaveResponse room_leave_response = 33;
+    MatchJoinRequest match_join_request = 40;
+    MatchJoinResponse match_join_response = 41;
+    MatchCancelRequest match_cancel_request = 42;
+    MatchCancelResponse match_cancel_response = 43;
+    MatchStatusRequest match_status_request = 44;
+    MatchStatusResponse match_status_response = 45;
   }
 }
 
@@ -110,10 +125,66 @@ message SessionStateResponse {
 
 // A nonzero ID creates a bounded gateway roster if it does not exist.
 // This roster does not represent the planned battle RoomActor.
-message RoomJoinRequest { uint64 room_id = 1; }
-message RoomJoinResponse { SessionStateResponse state = 1; }
+message RoomJoinRequest {
+  uint64 room_id = 1;
+}
+message RoomJoinResponse {
+  SessionStateResponse state = 1;
+}
 message RoomLeaveRequest {}
-message RoomLeaveResponse { SessionStateResponse state = 1; }
+message RoomLeaveResponse {
+  SessionStateResponse state = 1;
+}
+
+enum MatchTicketState {
+  MATCH_TICKET_UNSPECIFIED = 0;
+  MATCH_TICKET_QUEUED = 1;
+  MATCH_TICKET_RESERVED = 2;
+  MATCH_TICKET_ASSIGNED = 3;
+  MATCH_TICKET_CANCELLED = 4;
+  MATCH_TICKET_EXPIRED = 5;
+  MATCH_TICKET_FAILED = 6;
+}
+
+// Server-owned ticket state. A detached session remains queued but is
+// not eligible for pairing until authorized recovery. No room is
+// allocated here.
+message MatchTicket {
+  uint64 player_id = 1;
+  uint64 ticket_id = 2;
+  uint64 join_key = 3;
+  MatchTicketState state = 4;
+  uint32 mmr = 5;
+  uint32 window = 6;
+  uint64 waited_ms = 7;
+  uint64 remaining_ms = 8;
+  uint64 match_id = 9;
+  uint64 opponent_player_id = 10;
+  uint64 opponent_ticket_id = 11;
+  bool active = 12;
+}
+
+// Retry the same nonzero key after an uncertain RPC outcome. Ratings
+// and player/session identities are established by the server, never
+// the client.
+message MatchJoinRequest {
+  uint64 join_key = 1;
+}
+message MatchJoinResponse {
+  MatchTicket state = 1;
+}
+message MatchCancelRequest {
+  uint64 ticket_id = 1;
+}
+message MatchCancelResponse {
+  MatchTicket state = 1;
+}
+message MatchStatusRequest {
+  uint64 ticket_id = 1;
+}
+message MatchStatusResponse {
+  MatchTicket state = 1;
+}
 
 message Ping {
   uint64 nonce = 1;

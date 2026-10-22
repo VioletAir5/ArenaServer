@@ -20,6 +20,8 @@ documents.
 | `MessageRegistry` | A sealed route table shared by connection owners |
 | `OnlineRegistry` | Stable logical sessions, current auth leases, presence and bounded room rosters in one synchronized authority |
 | `OnlineRegistryMaintenance` | Management-owner sweeps and shutdown, independent of a disconnected transport |
+| `MatchmakingService` | Bounded cross-thread commands, current-session fencing and management-owner matching/expiry |
+| `MatchHandler` | Authenticated join/cancel/status wire adapters; MMR comes from the server |
 
 The input path is transport -> Host -> per-connection protocol -> packet
 policies -> Envelope -> Dispatcher -> registered handler. The reply path runs
@@ -86,6 +88,36 @@ and an outer request-type allowlist `{1}`. It applies once per complete frame
 before protobuf decoding. Malformed framing/payload closes the connection;
 typed request errors are encoded as replies.
 
+## Match tickets
+
+With the authenticated route table, MatchJoin (40/41), MatchCancel (42/43)
+and MatchStatus (44/45) use the process-local `arena_match` queue. Join takes
+a nonzero client join key, returns promptly, and can be retried after an
+uncertain RPC outcome. Cancel/status target a ticket ID and are restricted to
+the authenticated logical session. A connection request deadline cancels reply
+delivery; an already admitted business command may still commit. Retry the
+same join key to recover its outcome. No client-supplied rating is accepted.
+
+Matching runs every 100 ms on the management owner, separately from connection
+owners. Defaults: 1v1, window 50 +25 per second up to 500, both windows must
+accept, timeout 30 seconds. Detached sessions pause pairing while their original
+waiting time/deadline continue. JWT recovery retains the ticket; fresh password
+sessions cannot steal it. Expired/replaced/room-bound sessions cancel waiting
+tickets on upkeep. Authorization is rechecked when each deferred command runs.
+
+Main currently supplies a provisional rating of 1500 for every player; a real
+rating store plugs into `RatingProvider`. This produces an assignment with
+opponent/ticket identities, not a battle room. Assigned players remain fenced
+until a trusted allocation owner calls `release`; that future integration has
+no public route. See [match queue contract](../match/README.md).
+
+The service mailbox admits at most 1024 pending commands. Capacity/history
+limits fail closed. Shutdown closes command admission, completes accepted
+pending commands with unavailable, cancels the timer, and destroys domain
+tickets on the management owner before the executor retires. `event=match_tick`
+reports changed counters; final `MATCH_COUNTS` includes disjoint wait/gap
+histograms and cumulative sums, with no per-player metric labels.
+
 ## Capacity and shutdown
 
 | Environment variable | Default | Meaning |
@@ -95,6 +127,9 @@ typed request errors are encoded as replies.
 | `ARENA_TCP_PORT` | `8888` | TCP port, 1..65535 |
 | `ARENA_WS_PORT` | `8889` | WebSocket port, 1..65535 |
 | `ARENA_DISCONNECT_GRACE_MS` | `30000` | Detached session retention, 1..3600000 milliseconds |
+| `ARENA_MATCH_MAX_QUEUED` | `1024` | Maximum waiting players in the process-local queue |
+| `ARENA_MATCH_MAX_TICKETS` | `4096` | Waiting, pinned assignment and retry-history records; at least max queued |
+| `ARENA_MATCH_TIMEOUT_MS` | `30000` | Queue deadline, 1..3600000 milliseconds |
 
 Limits must be positive representable integers. Listener constructors still
 accept an optional shared controller; omitting it creates a listener-local

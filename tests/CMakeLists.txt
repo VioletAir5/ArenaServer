@@ -57,6 +57,7 @@ add_subdirectory(shared/protocol)
 add_subdirectory(gateway/net)
 add_subdirectory(domain)
 add_subdirectory(auth)
+add_subdirectory(match)
 
 include(GoogleTest)
 gtest_discover_tests(arena_tests)

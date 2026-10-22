@@ -1,7 +1,10 @@
 #include "protocol/EnvelopeCodec.hpp"
 
+#include <array>
+#include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/unknown_field_set.h>
@@ -440,4 +443,163 @@ TEST(
         arena::protocol::MSG_ROOM_JOIN_REQUEST
     );
     EXPECT_EQ(restored.room_join_request().room_id(), 77);
+}
+
+TEST(
+    EnvelopeCodecTest,
+    MatchMessagesKeepAllTicketValuesAndSurviveLegacyForwarding
+)
+{
+    namespace wire = arena::protocol;
+    New join;
+    join.set_msg_id(wire::MSG_MATCH_JOIN_REQUEST);
+    join.mutable_match_join_request()->set_join_key(UINT64_MAX);
+    New joined;
+    joined.set_msg_id(wire::MSG_MATCH_JOIN_RESPONSE);
+    auto* ticket = joined.mutable_match_join_response()
+                       ->mutable_state();
+    ticket->set_player_id(42);
+    ticket->set_ticket_id(91);
+    ticket->set_join_key(UINT64_MAX);
+    ticket->set_state(wire::MATCH_TICKET_ASSIGNED);
+    ticket->set_mmr(1500);
+    ticket->set_window(175);
+    ticket->set_waited_ms(5010);
+    ticket->set_remaining_ms(24990);
+    ticket->set_match_id(7);
+    ticket->set_opponent_player_id(43);
+    ticket->set_opponent_ticket_id(92);
+    ticket->set_active(true);
+    New cancel;
+    cancel.set_msg_id(wire::MSG_MATCH_CANCEL_REQUEST);
+    cancel.mutable_match_cancel_request()->set_ticket_id(91);
+    New cancelled;
+    cancelled.set_msg_id(wire::MSG_MATCH_CANCEL_RESPONSE);
+    *cancelled.mutable_match_cancel_response()
+         ->mutable_state() = *ticket;
+    cancelled.mutable_match_cancel_response()
+        ->mutable_state()
+        ->set_state(wire::MATCH_TICKET_CANCELLED);
+    cancelled.mutable_match_cancel_response()
+        ->mutable_state()
+        ->set_active(false);
+    New status;
+    status.set_msg_id(wire::MSG_MATCH_STATUS_REQUEST);
+    status.mutable_match_status_request()->set_ticket_id(91);
+    New queried;
+    queried.set_msg_id(wire::MSG_MATCH_STATUS_RESPONSE);
+    *queried.mutable_match_status_response()
+         ->mutable_state() = *ticket;
+    for (auto value :
+         {join, joined, cancel, cancelled, status, queried})
+    {
+        value.set_request_id(1234567890123ULL);
+        const auto encoded = EnvelopeCodec::encode(value);
+        ASSERT_TRUE(encoded);
+        New decoded;
+        ASSERT_TRUE(decode(*encoded, decoded));
+        EXPECT_EQ(
+            decoded.SerializeAsString(),
+            value.SerializeAsString()
+        );
+        Old legacy;
+        ASSERT_TRUE(legacy.ParseFromString(*encoded));
+        EXPECT_EQ(legacy.payload_case(), Old::PAYLOAD_NOT_SET);
+        EXPECT_GT(
+            legacy.GetReflection()
+                ->GetUnknownFields(legacy)
+                .field_count(),
+            0
+        );
+        std::string forwarded;
+        ASSERT_TRUE(legacy.SerializeToString(&forwarded));
+        New restored;
+        ASSERT_TRUE(decode(forwarded, restored));
+        EXPECT_EQ(
+            restored.SerializeAsString(),
+            value.SerializeAsString()
+        );
+    }
+}
+
+TEST(
+    EnvelopeCodecTest,
+    MatchTagsAreAdditiveAndRequestsNeverCarryRatings
+)
+{
+    namespace wire = arena::protocol;
+    const std::array<std::pair<std::string_view, int>, 6> payloads{
+        {{"match_join_request", 40},
+         {"match_join_response", 41},
+         {"match_cancel_request", 42},
+         {"match_cancel_response", 43},
+         {"match_status_request", 44},
+         {"match_status_response", 45}}
+    };
+    for (const auto& [name, number] : payloads)
+    {
+        const auto* field = New::descriptor()->FindFieldByName(
+            std::string(name)
+        );
+        ASSERT_NE(field, nullptr);
+        EXPECT_EQ(field->number(), number);
+        EXPECT_EQ(field->containing_oneof()->name(), "payload");
+    }
+    const std::array<std::pair<std::string_view, int>, 12> fields{
+        {{"player_id", 1},
+         {"ticket_id", 2},
+         {"join_key", 3},
+         {"state", 4},
+         {"mmr", 5},
+         {"window", 6},
+         {"waited_ms", 7},
+         {"remaining_ms", 8},
+         {"match_id", 9},
+         {"opponent_player_id", 10},
+         {"opponent_ticket_id", 11},
+         {"active", 12}}
+    };
+    for (const auto& [name, number] : fields)
+    {
+        const auto* field = wire::MatchTicket::descriptor()
+                                ->FindFieldByName(std::string(name));
+        ASSERT_NE(field, nullptr);
+        EXPECT_EQ(field->number(), number);
+    }
+    for (const auto* request :
+         {wire::MatchJoinRequest::descriptor(),
+          wire::MatchCancelRequest::descriptor(),
+          wire::MatchStatusRequest::descriptor()})
+    {
+        EXPECT_EQ(request->field_count(), 1);
+        EXPECT_EQ(request->field(0)->number(), 1);
+        EXPECT_EQ(request->FindFieldByName("mmr"), nullptr);
+        EXPECT_EQ(request->FindFieldByName("player_id"), nullptr);
+        EXPECT_EQ(request->FindFieldByName("session_id"), nullptr);
+    }
+    for (const auto* response :
+         {wire::MatchJoinResponse::descriptor(),
+          wire::MatchCancelResponse::descriptor(),
+          wire::MatchStatusResponse::descriptor()})
+    {
+        const auto* state = response->FindFieldByName("state");
+        ASSERT_NE(state, nullptr);
+        EXPECT_EQ(state->number(), 1);
+        EXPECT_EQ(
+            state->message_type(),
+            wire::MatchTicket::descriptor()
+        );
+    }
+    EXPECT_EQ(
+        wire::MatchTicket::descriptor()->FindFieldByName(
+            "session_id"
+        ),
+        nullptr
+    );
+    EXPECT_EQ(wire::MATCH_TICKET_QUEUED, 1);
+    EXPECT_EQ(wire::MATCH_TICKET_RESERVED, 2);
+    EXPECT_EQ(wire::MATCH_TICKET_ASSIGNED, 3);
+    EXPECT_EQ(wire::MATCH_TICKET_CANCELLED, 4);
+    EXPECT_EQ(wire::MATCH_TICKET_EXPIRED, 5);
+    EXPECT_EQ(wire::MATCH_TICKET_FAILED, 6);
 }

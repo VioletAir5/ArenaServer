@@ -40,6 +40,12 @@ bool validEnvelope(const arena::protocol::Envelope& envelope)
     case arena::protocol::Envelope::kRoomJoinResponse:
     case arena::protocol::Envelope::kRoomLeaveRequest:
     case arena::protocol::Envelope::kRoomLeaveResponse:
+    case arena::protocol::Envelope::kMatchJoinRequest:
+    case arena::protocol::Envelope::kMatchJoinResponse:
+    case arena::protocol::Envelope::kMatchCancelRequest:
+    case arena::protocol::Envelope::kMatchCancelResponse:
+    case arena::protocol::Envelope::kMatchStatusRequest:
+    case arena::protocol::Envelope::kMatchStatusResponse:
         return true;
     case arena::protocol::Envelope::kLoginResponse:
         return !envelope.login_response().has_error() ||

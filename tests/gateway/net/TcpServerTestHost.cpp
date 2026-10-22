@@ -31,6 +31,7 @@ int main(int argc, char** argv)
         return 2;
     }
     std::shared_ptr<service::gateway::OnlineRegistry> online;
+    std::shared_ptr<service::gateway::MatchmakingService> matcher;
     service::gateway::ConnectionHandlerFactory handlerFactory;
     if (argc == 5)
     {
@@ -38,7 +39,8 @@ int main(int argc, char** argv)
         {
             handlerFactory = service::gateway::transportTestProfile(
                 argv[4],
-                &online
+                &online,
+                &matcher
             );
         }
         catch (const std::invalid_argument&)
@@ -64,6 +66,8 @@ int main(int argc, char** argv)
     }
 
     service::gateway::EventLoop loop;
+    if (matcher)
+        matcher->start(service::gateway::connectionScheduler(loop));
     std::unique_ptr<service::gateway::OnlineRegistryMaintenance>
         upkeep;
     if (online)
@@ -87,6 +91,8 @@ int main(int argc, char** argv)
             }
             if (upkeep)
                 upkeep->stop();
+            if (matcher)
+                matcher->stop();
             if (event.ssi_signo == SIGTERM)
             {
                 loop.quit();
@@ -150,6 +156,11 @@ int main(int argc, char** argv)
 
     if (upkeep)
         upkeep->shutdown();
+    if (matcher)
+    {
+        matcher->stop();
+        service::gateway::printMatchTestCounts(*matcher);
+    }
     if (online)
         service::gateway::printOnlineTestCounts(*online);
     loop.removeChannel(&stopChannel);

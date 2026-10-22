@@ -38,6 +38,18 @@ std::uint32_t payloadMsgId(const arena::protocol::Envelope& value)
         return arena::protocol::MSG_ROOM_LEAVE_REQUEST;
     case arena::protocol::Envelope::kRoomLeaveResponse:
         return arena::protocol::MSG_ROOM_LEAVE_RESPONSE;
+    case arena::protocol::Envelope::kMatchJoinRequest:
+        return arena::protocol::MSG_MATCH_JOIN_REQUEST;
+    case arena::protocol::Envelope::kMatchJoinResponse:
+        return arena::protocol::MSG_MATCH_JOIN_RESPONSE;
+    case arena::protocol::Envelope::kMatchCancelRequest:
+        return arena::protocol::MSG_MATCH_CANCEL_REQUEST;
+    case arena::protocol::Envelope::kMatchCancelResponse:
+        return arena::protocol::MSG_MATCH_CANCEL_RESPONSE;
+    case arena::protocol::Envelope::kMatchStatusRequest:
+        return arena::protocol::MSG_MATCH_STATUS_REQUEST;
+    case arena::protocol::Envelope::kMatchStatusResponse:
+        return arena::protocol::MSG_MATCH_STATUS_RESPONSE;
     default:
         return arena::protocol::MSG_UNSPECIFIED;
     }
@@ -61,6 +73,12 @@ bool requestPayloadMatches(
         return envelope.has_room_join_request();
     case arena::protocol::MSG_ROOM_LEAVE_REQUEST:
         return envelope.has_room_leave_request();
+    case arena::protocol::MSG_MATCH_JOIN_REQUEST:
+        return envelope.has_match_join_request();
+    case arena::protocol::MSG_MATCH_CANCEL_REQUEST:
+        return envelope.has_match_cancel_request();
+    case arena::protocol::MSG_MATCH_STATUS_REQUEST:
+        return envelope.has_match_status_request();
     default:
         return true;
     }
@@ -83,6 +101,12 @@ bool responseMatches(std::uint32_t request, std::uint32_t response)
         return response == arena::protocol::MSG_ROOM_JOIN_RESPONSE;
     case arena::protocol::MSG_ROOM_LEAVE_REQUEST:
         return response == arena::protocol::MSG_ROOM_LEAVE_RESPONSE;
+    case arena::protocol::MSG_MATCH_JOIN_REQUEST:
+        return response == arena::protocol::MSG_MATCH_JOIN_RESPONSE;
+    case arena::protocol::MSG_MATCH_CANCEL_REQUEST:
+        return response == arena::protocol::MSG_MATCH_CANCEL_RESPONSE;
+    case arena::protocol::MSG_MATCH_STATUS_REQUEST:
+        return response == arena::protocol::MSG_MATCH_STATUS_RESPONSE;
     default:
         // Custom routes retain the existing supported reply contract.
         return response == arena::protocol::MSG_LOGIN_RESPONSE ||

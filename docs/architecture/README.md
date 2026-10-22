@@ -23,10 +23,12 @@ The source of truth is [workspace.dsl](workspace.dsl). Rendered SVG and PNG file
 
 ## Repository mapping
 
-- services/gateway is the only implemented service. It owns the current network headers, sources, and executable entry point.
-- services/auth, services/lobby, services/match, services/room, and services/storage are reserved for the planned C4 containers; each has a scope README.
-- shared contains only infrastructure intended for reuse across service boundaries: os and concurrent.
-- tests/gateway and tests/shared mirror those owners.
+- services/gateway owns the implemented network service and executable, including online presence, recovery and the management-owner matchmaking adapter.
+- services/auth implements account/JWT library interfaces; main still needs real password account/digest adapters.
+- services/match now implements an embedded process-local ticket queue, aging MMR rules and 1v1 assignment. Independent deployment, RoomAllocator and durable assignment remain planned; the target C4 diagrams do not describe current runtime wiring.
+- services/lobby, services/room and services/storage remain planned scopes.
+- shared contains reusable infrastructure; domain owns business identities and lifecycle models.
+- tests/gateway, tests/auth, tests/match, tests/domain and tests/shared mirror those owners. Current runtime diagrams are maintained in the Obsidian ArenaServer architecture folder.
 - Each service can become a separate CMake executable or library without requiring a separate repository.
 ## Design rules
 

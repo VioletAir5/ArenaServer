@@ -11,5 +11,7 @@ Each entity has a typed nonzero identity and one immutable owner thread. State r
 transitions return `std::expected`; failed transitions preserve state and revision.
 The generic graph algorithm lives in `shared/include/state/OwnedStateMachine.h`.
 
-The service registries, authorization, lease timers, actor coordination and persistence
-are future integrations. Only validated owner facts should become lifecycle events.
+The embedded `arena_match` queue now owns Ticket lifecycle objects on the management
+executor. Gateway OnlineRegistry stores synchronized SessionId/RoomId values rather
+than sharing owner-affine Session/Room entities. Room actors and persistence remain
+planned. Only validated owner facts should become lifecycle events.
