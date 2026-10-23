@@ -18,8 +18,8 @@ using ConnectionMessageCallback = std::function<
 /** @brief Owns one protocol's input and lifecycle callbacks.
  *
  * All callbacks run on the connection owner. onClosed runs exactly
- * once, after active callbacks unwind, including when construction
- * never starts.
+ * once, after active callbacks unwind, including hosts destroyed
+ * before start().
  */
 struct ConnectionHandler
 {
@@ -44,8 +44,7 @@ struct ConnectionHandler
     /// after every pending reply or deadline has completed. An absent
     /// hook drains at once. The callback is idempotent and does not
     /// retain the host or transport.
-    std::function<void(ConnectionChannel&, std::function<void()>)>
-        onDraining;
+    std::function<void(std::function<void()>)> onDraining;
     /// Cancels protocol work and releases authentication/session
     /// bindings.
     std::function<void()> onClosed;
@@ -57,15 +56,4 @@ struct ConnectionHandler
 using ConnectionHandlerFactory = std::function<
     ConnectionHandler(ConnectionContext::Ptr)>;
 
-/** @brief Retains context and validates the factory's protocol
- * callbacks.
- * @param[in] factory Produces fresh per-connection protocol state;
- * empty echoes.
- * @param[in] context Immutable admission metadata retained by the
- * handler.
- */
-ConnectionHandler makeConnectionHandler(
-    const ConnectionHandlerFactory& factory,
-    ConnectionContext::Ptr context
-);
 } // namespace service::gateway

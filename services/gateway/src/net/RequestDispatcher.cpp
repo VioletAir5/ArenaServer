@@ -273,24 +273,15 @@ void RequestDispatcher::dispatch(
     {
         auto timer = channel.scheduleAt(
             deadline,
-            [weak, post = channel.poster(), id, ticket](
-                IConnectionControl&
-            )
+            [weak, id, ticket](ConnectionChannel& owner)
             {
-                post(
-                    [weak, id, ticket](ConnectionChannel& owner)
-                    {
-                        if (auto state = weak.lock())
-                            state->finish(
-                                owner,
-                                id,
-                                ticket,
-                                std::unexpected(
-                                    arena::protocol::ERR_TIMEOUT
-                                )
-                            );
-                    }
-                );
+                if (auto state = weak.lock())
+                    state->finish(
+                        owner,
+                        id,
+                        ticket,
+                        std::unexpected(arena::protocol::ERR_TIMEOUT)
+                    );
             }
         );
         m_state->pending.at(id).timer = std::move(timer);

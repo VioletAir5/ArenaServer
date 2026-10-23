@@ -24,7 +24,7 @@ public:
         ConnectionClock::duration timeout = kSlowClientTimeout
     );
     void onOutputBufferChanged(
-        IConnectionControl&, std::size_t, std::size_t
+        ConnectionChannel&, std::size_t, std::size_t
     ) override;
     void onClosed() noexcept override;
 

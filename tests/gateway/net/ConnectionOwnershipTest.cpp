@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <chrono>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -114,7 +115,7 @@ struct TrackedConnection
                 EXPECT_FALSE(weak.expired());
                 EXPECT_EQ(destructions, 0);
                 EXPECT_EQ(connection->fd(), descriptor);
-                connection->handleClose();
+                connection->close();
                 EXPECT_EQ(closes, 1);
                 events.emplace_back("close-exit");
                 loop.quit();
@@ -192,7 +193,7 @@ TEST_P(ConnectionOwnershipTest, CloseReleasesConnectionExactlyOnce)
     }
     case TerminalTrigger::LocalShutdown:
     {
-        tracked.owner->shutdownWrite();
+        tracked.owner->shutdown();
         const timeval timeout{1, 0};
         ASSERT_EQ(
             ::setsockopt(
@@ -264,12 +265,12 @@ TEST(ConnectionCallbackTest, MessageFinishesAfterLastOwnerIsReleased)
         [&](TcpConnection& connection, std::string_view bytes)
         {
             tracked.events.emplace_back("message-enter");
-            connection.handleClose();
+            connection.close();
             EXPECT_FALSE(tracked.weak.expired());
             EXPECT_EQ(tracked.destructions, 0);
             EXPECT_EQ(bytes, "last message");
             EXPECT_EQ(connection.fd(), tracked.descriptor);
-            connection.send("ignored", 7);
+            connection.send(std::as_bytes(std::span("ignored", 7)));
             tracked.events.emplace_back("message-exit");
             messageReturned = true;
         }
@@ -320,7 +321,7 @@ TEST(
     tracked.owner->setMessageCallback(
         [&](TcpConnection& connection, std::string_view)
         {
-            connection.handleClose();
+            connection.close();
             EXPECT_EQ(tracked.destructions, 0);
             throw std::runtime_error("callback failed");
         }

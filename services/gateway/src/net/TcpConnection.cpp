@@ -134,7 +134,7 @@ void TcpConnection::send(std::span<const std::byte> data)
     {
         if (owner)
         {
-            handleClose();
+            close();
         }
         else
         {
@@ -143,7 +143,7 @@ void TcpConnection::send(std::span<const std::byte> data)
                 {
                     if (auto self = weak.lock())
                     {
-                        self->handleClose();
+                        self->close();
                     }
                 }
             );
@@ -221,7 +221,7 @@ void TcpConnection::drainSendQueue()
         pendingBytes() == 0
     )
     {
-        handleClose();
+        close();
     }
 }
 
@@ -268,7 +268,7 @@ void TcpConnection::sendInLoop(std::span<const std::byte> data)
         {
             std::cerr << "TcpConnection output limit reached fd="
                       << fd() << '\n';
-            handleClose();
+            close();
             return;
         }
         notifyOutputChanged();
@@ -286,44 +286,15 @@ void TcpConnection::sendInLoop(std::span<const std::byte> data)
         notifyOutputChanged();
     }
 }
-void TcpConnection::shutdown()
-{
-    shutdownWrite();
-}
-
-void TcpConnection::close()
-{
-    handleClose();
-}
-
 bool TcpConnection::connected() const noexcept
 {
     return m_state != TcpConnectionState::Disconnected;
-}
-
-void TcpConnection::pauseRead()
-{
-    pauseReading();
-}
-
-void TcpConnection::resumeRead()
-{
-    resumeReading();
 }
 
 std::size_t TcpConnection::pendingBytes() const noexcept
 {
     std::lock_guard lock(m_sendMutex);
     return m_pendingBytes;
-}
-
-void TcpConnection::send(const void* data, std::size_t length)
-{
-    send(
-        std::as_bytes(
-            std::span(static_cast<const char*>(data), length)
-        )
-    );
 }
 
 void TcpConnection::handleRead()
@@ -361,7 +332,7 @@ void TcpConnection::handleRead()
             m_lastActivity = std::chrono::steady_clock::now();
             if (!m_inputBuffer.append(buffer, static_cast<size_t>(n)))
             {
-                handleClose();
+                close();
                 return;
             }
 
@@ -389,7 +360,7 @@ void TcpConnection::handleRead()
         {
             if (m_state == TcpConnectionState::WriteHalfClosed)
             {
-                handleClose();
+                close();
             }
             else if (m_state == TcpConnectionState::WriteDraining)
             {
@@ -405,7 +376,7 @@ void TcpConnection::handleRead()
             }
             else if (pendingBytes() == 0)
             {
-                handleClose();
+                close();
             }
             else
             {
@@ -498,7 +469,7 @@ void TcpConnection::handleWrite()
 
     if (m_state == TcpConnectionState::PeerHalfClosed)
     {
-        handleClose();
+        close();
         return;
     }
 
@@ -508,7 +479,7 @@ void TcpConnection::handleWrite()
     }
 }
 
-void TcpConnection::handleClose()
+void TcpConnection::close()
 {
     if (m_state == TcpConnectionState::Disconnected)
     {
@@ -581,7 +552,7 @@ void TcpConnection::setOutputCallback(OutputCallback cb)
     m_outputCallback = std::move(cb);
 }
 
-void TcpConnection::shutdownWrite()
+void TcpConnection::shutdown()
 {
     if (m_state != TcpConnectionState::Connected &&
         m_state != TcpConnectionState::PeerHalfClosed)
@@ -610,7 +581,7 @@ void TcpConnection::shutdownWrite()
     }
 }
 
-void TcpConnection::pauseReading()
+void TcpConnection::pauseRead()
 {
     if (m_state == TcpConnectionState::Disconnected ||
         m_state == TcpConnectionState::PeerHalfClosed ||
@@ -624,7 +595,7 @@ void TcpConnection::pauseReading()
     m_readPaused = true;
 }
 
-void TcpConnection::resumeReading()
+void TcpConnection::resumeRead()
 {
     if (m_state == TcpConnectionState::Disconnected ||
         m_state == TcpConnectionState::PeerHalfClosed ||
@@ -652,20 +623,10 @@ int TcpConnection::fd() const noexcept
     return m_socket.get();
 }
 
-std::size_t TcpConnection::pendingOutputBytes() const noexcept
-{
-    return pendingBytes();
-}
-
 std::chrono::steady_clock::time_point
 TcpConnection::lastActivity() const noexcept
 {
     return m_lastActivity;
-}
-
-bool TcpConnection::closing() const noexcept
-{
-    return m_state == TcpConnectionState::Disconnected;
 }
 
 void TcpConnection::notifyOutputChanged()
@@ -679,7 +640,7 @@ void TcpConnection::notifyOutputChanged()
         }
         catch (...)
         {
-            handleClose();
+            close();
         }
     }
 }
@@ -701,13 +662,13 @@ void TcpConnection::finishShutdownWrite()
     {
         std::cerr << "TcpConnection shutdown write failed fd=" << fd()
                   << ": " << error.what() << '\n';
-        handleClose();
+        close();
         return;
     }
 
     if (m_state == TcpConnectionState::WriteDrainingPeerClosed)
     {
-        handleClose();
+        close();
         return;
     }
 
@@ -735,6 +696,6 @@ void TcpConnection::handleIoError(int error)
         std::cerr << "TcpConnection I/O error fd=" << fd()
                   << ", error=" << error << '\n';
     }
-    handleClose();
+    close();
 }
 } // namespace service::gateway

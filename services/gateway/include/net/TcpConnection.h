@@ -67,7 +67,11 @@ public:
     std::uint64_t id() const noexcept override;
     /** @brief Queues bytes for transmission. */
     void send(std::span<const std::byte> data) override;
+    /** @brief Drains output, sends FIN and keeps reading until peer
+     * EOF. */
     void shutdown() override;
+    /** @brief Marks closure and notifies owner cleanup exactly once.
+     */
     void close() override;
     /** @brief Reports whether the connection is still active. */
     bool connected() const noexcept override;
@@ -78,15 +82,10 @@ public:
     /** @brief Returns the number of bytes awaiting transmission. */
     std::size_t pendingBytes() const noexcept override;
 
-    // Compatibility overload for existing byte-pointer callers.
-    void send(const void* data, std::size_t length);
-
     // Event dispatch on the owner thread.
     void handleRead();
     /** @brief Flushes queued socket output. */
     void handleWrite();
-    /** @brief Handles peer closure and connection teardown. */
-    void handleClose();
     /** @brief Handles a socket or channel error. */
     void handleError();
 
@@ -98,24 +97,13 @@ public:
     // Owner reports pending output after queue/write changes.
     void setOutputCallback(OutputCallback);
 
-    // Owner EventLoop thread only. Flush queued bytes, then send FIN;
-    // keep reading until the peer also closes its write half.
-    void shutdownWrite();
-    /** @brief Disables socket read interest on the owner thread. */
-    void pauseReading();
-    /** @brief Enables socket read interest on the owner thread. */
-    void resumeReading();
-
     /** @brief Returns the socket channel owned by this connection. */
     Channel& channel() noexcept;
     /** @brief Returns the underlying file descriptor. */
     int fd() const noexcept;
     // Read only on the owning EventLoop thread.
-    std::size_t pendingOutputBytes() const noexcept;
     std::chrono::steady_clock::time_point
     lastActivity() const noexcept;
-    /** @brief Reports whether connection teardown has begun. */
-    bool closing() const noexcept;
 
 private:
     /** @brief Transfers cross-thread sends to the owner buffer. */

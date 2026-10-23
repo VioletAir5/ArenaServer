@@ -165,10 +165,6 @@ TEST_F(ITransportTest, QueuedSendOwnsBytesUntilDrainedBeforeFin)
         std::as_bytes(std::span(payload.data(), payload.size()))
     );
     ASSERT_GT(connection->pendingBytes(), 0U);
-    EXPECT_EQ(
-        connection->pendingBytes(),
-        concrete->pendingOutputBytes()
-    );
     payload.assign(payload.size(), 'y');
     connection->shutdown();
     EXPECT_TRUE(connection->connected());

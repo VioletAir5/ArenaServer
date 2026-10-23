@@ -206,10 +206,23 @@ terminal response. The count bound does not constrain arbitrary allocations
 made by business code.
 
 `ConnectionChannel` operations require the owner except immutable `id()` and
-thread-safe `post()`/`poster()`. Retain `poster()` for foreign work, never a raw
+thread-safe `poster()`. Retain `poster()` for foreign work, never a raw
 channel reference. Concrete transport cross-thread send capabilities do not
 change this protocol-facing contract. Final Host/transport release occurs on
 owner; shared pointers alone do not make connection methods thread-safe.
+
+Protocols and connection policies share this one flat `ConnectionChannel`
+interface. Read control uses `setReadPaused(reason, paused)`; immediate logical
+closure uses `close()`. Timer callbacks receive the same channel on its owner,
+so request deadlines finish directly without posting again. The host owns its
+context and protocol callbacks, including through closure and callback unwind;
+handler factories return their callbacks directly.
+
+Concrete TCP byte operations use the `ITransport` names and byte spans:
+`send`, `shutdown`, `close`, `pauseRead`, `resumeRead`, `pendingBytes` and
+`connected`. Shutdown still drains output and half-closes; close still notifies
+owner cleanup exactly once. The low-level `Socket::shutdownWrite` remains the
+actual write-half shutdown operation.
 
 ## Verification
 

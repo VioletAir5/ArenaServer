@@ -106,10 +106,10 @@ TEST_F(ConnectionHostTest, PauseReasonsDoNotResumeEachOther)
 {
     runtime->start();
     runtime->setReadPaused(ReadPauseReason::Backpressure, true);
-    runtime->pauseRead();
+    runtime->setReadPaused(ReadPauseReason::Application, true);
     runtime->setReadPaused(ReadPauseReason::Backpressure, false);
     EXPECT_TRUE(transport->paused);
-    runtime->resumeRead();
+    runtime->setReadPaused(ReadPauseReason::Application, false);
     EXPECT_FALSE(transport->paused);
     EXPECT_EQ(transport->resumes, 1);
 }
@@ -166,7 +166,7 @@ TEST_F(ConnectionHostTest, ExceptionsCloseAndOutputReentryIsCoalesced)
         {
         }
         void onOutputBufferChanged(
-            IConnectionControl&, std::size_t, std::size_t
+            ConnectionChannel&, std::size_t, std::size_t
         ) override
         {
             if (++calls == 1)
@@ -194,7 +194,7 @@ TEST_F(ConnectionHostTest, CloseNotificationWaitsUntilFeatureReturns)
         {
         }
         void onOutputBufferChanged(
-            IConnectionControl&, std::size_t, std::size_t
+            ConnectionChannel&, std::size_t, std::size_t
         ) override
         {
             inside = true;
@@ -219,12 +219,12 @@ TEST_F(ConnectionHostTest, BackpressureHysteresisCancelsOldTimer)
     ASSERT_TRUE(transport->paused);
     runtime->outputChanged(3);
     EXPECT_TRUE(transport->paused);
-    runtime->pauseRead();
+    runtime->setReadPaused(ReadPauseReason::Application, true);
     runtime->outputChanged(2);
     EXPECT_TRUE(transport->paused);
     timers[0]();
     EXPECT_TRUE(runtime->connected());
-    runtime->resumeRead();
+    runtime->setReadPaused(ReadPauseReason::Application, false);
     EXPECT_FALSE(transport->paused);
     runtime->outputChanged(5);
     timers[1]();
@@ -241,6 +241,60 @@ TEST_F(ConnectionHostTest, CloseCancelsBackpressureTimer)
     timers[0]();
     drain();
     EXPECT_EQ(transport->closes, 0);
+}
+TEST_F(
+    ConnectionHostTest,
+    TimerChannelCloseKeepsHostAliveUntilCallbackReturns
+)
+{
+    struct ObserveClose : IConnectionFeature
+    {
+        ObserveClose(int& count, bool& active, bool& nested)
+            : closed(count)
+            , inside(active)
+            , notifiedInside(nested)
+        {
+        }
+        void onClosed() noexcept override
+        {
+            ++closed;
+            notifiedInside = inside;
+        }
+        int& closed;
+        bool& inside;
+        bool& notifiedInside;
+    };
+    int closed = 0, fired = 0;
+    bool inside = false, notifiedInside = false;
+    runtime->features()
+        .add<ObserveClose>(closed, inside, notifiedInside);
+    runtime->start();
+    std::weak_ptr<ConnectionHost> observed = runtime;
+    auto timer = runtime->scheduleAt(
+        ConnectionClock::now(),
+        [&](ConnectionChannel& channel)
+        {
+            inside = true;
+            ++fired;
+            EXPECT_EQ(channel.context().connectionId, 7U);
+            channel.close();
+            runtime.reset();
+            EXPECT_FALSE(observed.expired());
+            EXPECT_EQ(channel.id(), 7U);
+            auto post = channel.poster();
+            EXPECT_FALSE(post([](ConnectionChannel&) {}));
+            EXPECT_EQ(closed, 0);
+            inside = false;
+        }
+    );
+    timers.front()();
+    EXPECT_TRUE(observed.expired());
+    EXPECT_EQ(closed, 1);
+    EXPECT_FALSE(notifiedInside);
+    drain();
+    timers.front()();
+    EXPECT_EQ(fired, 1);
+    EXPECT_EQ(closed, 1);
 }
 TEST(BackpressureFeatureTest, RejectsInvalidConfiguration)
 {
@@ -311,17 +365,17 @@ TEST_F(
     ConnectionHostTest, OwnerCompletionRunsInlineAndExceptionsClose
 )
 {
-    EXPECT_FALSE(runtime->post([](auto&) {}));
+    auto post = runtime->poster();
+    EXPECT_FALSE(post([](auto&) {}));
     runtime->start();
-    EXPECT_FALSE(runtime->post({}));
+    EXPECT_FALSE(post({}));
     int completed = 0;
-    EXPECT_TRUE(runtime->post([&](auto&) { ++completed; }));
+    EXPECT_TRUE(post([&](auto&) { ++completed; }));
     EXPECT_EQ(completed, 1);
-    EXPECT_TRUE(runtime->post(
-        [](auto&) { throw std::runtime_error("reply"); }
-    ));
+    EXPECT_TRUE(post([](auto&)
+                     { throw std::runtime_error("reply"); }));
     EXPECT_FALSE(runtime->connected());
-    EXPECT_FALSE(runtime->post([](auto&) {}));
+    EXPECT_FALSE(post([](auto&) {}));
     drain();
     EXPECT_EQ(transport->closes, 1);
 }
@@ -333,6 +387,39 @@ TEST_F(ConnectionHostTest, ForeignSendMustUseTheOwnerMailbox)
     );
     foreign.join();
     EXPECT_TRUE(runtime->connected());
+}
+TEST_F(ConnectionHostTest, ForeignChannelControlsRejectBeforeMutation)
+{
+    runtime->start();
+    ConnectionChannel& channel = *runtime;
+    std::thread foreign(
+        [&]
+        {
+            EXPECT_THROW(channel.close(), std::logic_error);
+            EXPECT_THROW(channel.shutdown(), std::logic_error);
+            EXPECT_THROW(
+                channel.setReadPaused(
+                    ReadPauseReason::Application,
+                    true
+                ),
+                std::logic_error
+            );
+            EXPECT_THROW(
+                channel.scheduleAt(
+                    ConnectionClock::now(),
+                    [](ConnectionChannel&) {}
+                ),
+                std::logic_error
+            );
+        }
+    );
+    foreign.join();
+    EXPECT_TRUE(channel.connected());
+    EXPECT_TRUE(channel.acceptingInput());
+    EXPECT_FALSE(transport->paused);
+    EXPECT_TRUE(posted.empty());
+    EXPECT_TRUE(timers.empty());
+    EXPECT_EQ(transport->shutdowns, 0);
 }
 TEST(
     ConnectionHostLifecycleTest,
@@ -476,8 +563,7 @@ TEST_F(
     int messages = 0, draining = 0;
     std::function<void()> drained;
     ConnectionHandler handler([&](auto&, auto) { ++messages; });
-    handler.onDraining =
-        [&](ConnectionChannel&, std::function<void()> done)
+    handler.onDraining = [&](std::function<void()> done)
     {
         ++draining;
         drained = std::move(done);
@@ -485,7 +571,7 @@ TEST_F(
     create(std::move(handler));
     host->start();
     host->received({});
-    host->pauseRead();
+    host->setReadPaused(ReadPauseReason::Application, true);
     ASSERT_TRUE(transport->paused);
     host->shutdown();
     EXPECT_EQ(draining, 1);
@@ -495,7 +581,7 @@ TEST_F(
     EXPECT_EQ(transport->shutdowns, 0);
     host->received({});
     EXPECT_EQ(messages, 1);
-    host->pauseRead();
+    host->setReadPaused(ReadPauseReason::Application, true);
     EXPECT_FALSE(transport->paused);
     auto post = host->poster();
     std::thread completion(
@@ -526,7 +612,7 @@ TEST_F(
     std::function<void()> drained;
     int closed = 0;
     ConnectionHandler handler([](auto&, auto) {});
-    handler.onDraining = [&](auto&, std::function<void()> done)
+    handler.onDraining = [&](std::function<void()> done)
     { drained = std::move(done); };
     handler.onClosed = [&] { ++closed; };
     create(std::move(handler));
@@ -551,7 +637,7 @@ TEST_F(
     bool inside = false, closedInside = false;
     int closed = 0;
     ConnectionHandler handler([](auto&, auto) {});
-    handler.onDraining = [&](auto&, std::function<void()> done)
+    handler.onDraining = [&](std::function<void()> done)
     {
         inside = true;
         done();
@@ -578,21 +664,16 @@ TEST_F(
 {
     struct DrainOnStart : IConnectionFeature
     {
-        explicit DrainOnStart(ConnectionHost& value)
-            : host(value)
+        void onConnected(ConnectionChannel& channel) override
         {
+            channel.shutdown();
         }
-        void onConnected(IConnectionControl&) override
-        {
-            host.shutdown();
-        }
-        ConnectionHost& host;
     };
     int started = 0;
     ConnectionHandler handler([](auto&, auto) {});
     handler.onStarted = [&](auto&) { ++started; };
     create(std::move(handler));
-    host->features().add<DrainOnStart>(*host);
+    host->features().add<DrainOnStart>();
     host->start();
     EXPECT_EQ(started, 0);
     EXPECT_FALSE(host->acceptingInput());
@@ -619,7 +700,7 @@ TEST_F(
 {
     std::function<void()> drained;
     ConnectionHandler handler([](auto&, auto) {});
-    handler.onDraining = [&](auto&, std::function<void()> done)
+    handler.onDraining = [&](std::function<void()> done)
     { drained = std::move(done); };
     create(std::move(handler));
     host->start();
@@ -635,7 +716,7 @@ TEST_F(
 TEST_F(ConnectionHostDrainTest, ThrowingDrainHookClosesConnection)
 {
     ConnectionHandler handler([](auto&, auto) {});
-    handler.onDraining = [](auto&, auto)
+    handler.onDraining = [](auto)
     { throw std::runtime_error("drain hook"); };
     create(std::move(handler));
     host->start();

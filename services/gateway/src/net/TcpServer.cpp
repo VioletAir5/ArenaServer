@@ -223,7 +223,7 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     void checkIdleConnection(Id id)
     {
         const auto it = connections.find(id);
-        if (it == connections.end() || it->second->closing())
+        if (it == connections.end() || !it->second->connected())
         {
             return;
         }
@@ -233,7 +233,7 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
         {
             std::cerr << "TcpConnection idle timeout fd="
                       << it->second->fd() << '\n';
-            it->second->handleClose();
+            it->second->close();
             return;
         }
         const auto weak = weak_from_this();
@@ -261,7 +261,7 @@ struct TcpServer::Worker : std::enable_shared_from_this<Worker>
     {
         for (auto& [id, connection] : connections)
         {
-            connection->handleClose();
+            connection->close();
         }
     }
 

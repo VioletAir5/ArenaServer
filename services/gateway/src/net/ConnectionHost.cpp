@@ -213,7 +213,7 @@ void ConnectionHost::start()
         m_context->rejections->record(
             RejectionReason::CallbackFailure
         );
-        requestClose();
+        close();
     }
     finishEvent();
     outputChanged(m_transport->pendingBytes());
@@ -234,7 +234,7 @@ void ConnectionHost::received(std::span<const std::byte> data)
         m_context->rejections->record(
             RejectionReason::CallbackFailure
         );
-        requestClose();
+        close();
     }
     finishEvent();
 }
@@ -267,7 +267,7 @@ void ConnectionHost::outputChanged(std::size_t bytes)
         m_context->rejections->record(
             RejectionReason::CallbackFailure
         );
-        requestClose();
+        close();
     }
     m_notifyingOutput = false;
     finishEvent();
@@ -342,7 +342,6 @@ void ConnectionHost::shutdown()
         }
         if (m_handler.onDraining)
             m_handler.onDraining(
-                *this,
                 [weak = weak_from_this(), owner = m_owner]
                 {
                     // The protocol drains its request map on the
@@ -364,7 +363,7 @@ void ConnectionHost::shutdown()
         m_context->rejections->record(
             RejectionReason::CallbackFailure
         );
-        requestClose();
+        close();
     }
     finishEvent();
 }
@@ -387,13 +386,9 @@ void ConnectionHost::finishDrain()
         m_context->rejections->record(
             RejectionReason::CallbackFailure
         );
-        requestClose();
+        close();
     }
     finishEvent();
-}
-void ConnectionHost::close()
-{
-    requestClose();
 }
 bool ConnectionHost::connected() const noexcept
 {
@@ -402,18 +397,6 @@ bool ConnectionHost::connected() const noexcept
 bool ConnectionHost::acceptingInput() const noexcept
 {
     return m_started && !m_closing && !m_draining;
-}
-void ConnectionHost::pauseRead()
-{
-    setReadPaused(ReadPauseReason::Application, true);
-}
-void ConnectionHost::resumeRead()
-{
-    setReadPaused(ReadPauseReason::Application, false);
-}
-std::size_t ConnectionHost::pendingBytes() const noexcept
-{
-    return m_transport->pendingBytes();
 }
 void ConnectionHost::setReadPaused(
     ReadPauseReason reason, bool paused
@@ -435,7 +418,7 @@ void ConnectionHost::setReadPaused(
     if (before && !m_pauseReasons)
         m_transport->resumeRead();
 }
-void ConnectionHost::requestClose()
+void ConnectionHost::close()
 {
     requireOwner();
     if (m_closing)
@@ -467,8 +450,7 @@ const ConnectionContext& ConnectionHost::context() const noexcept
     return *m_context;
 }
 ConnectionTimer ConnectionHost::scheduleAt(
-    ConnectionClock::time_point when,
-    std::function<void(IConnectionControl&)> callback
+    ConnectionClock::time_point when, ConnectionAction callback
 )
 {
     requireOwner();
@@ -490,16 +472,12 @@ ConnectionTimer ConnectionHost::scheduleAt(
                     self->m_context->rejections->record(
                         RejectionReason::CallbackFailure
                     );
-                    self->requestClose();
+                    self->close();
                 }
                 self->finishEvent();
             }
         }
     );
-}
-bool ConnectionHost::post(ConnectionAction action)
-{
-    return m_mailbox->post(std::move(action));
 }
 ConnectionPost ConnectionHost::poster() const
 {
@@ -525,7 +503,7 @@ void ConnectionHost::runAction(ConnectionAction action)
         m_context->rejections->record(
             RejectionReason::CallbackFailure
         );
-        requestClose();
+        close();
     }
     finishEvent();
 }
@@ -537,7 +515,14 @@ std::shared_ptr<ConnectionHost> makeConnectionHost(
     const ConnectionFeatureFactory& features
 )
 {
-    auto handler = makeConnectionHandler(handlers, context);
+    if (!context)
+        throw std::invalid_argument("missing connection context");
+    auto handler = handlers ? handlers(context)
+                            : ConnectionHandler(
+                                  [](ConnectionChannel& channel,
+                                     std::span<const std::byte> bytes)
+                                  { channel.send(bytes); }
+                              );
     auto host = std::make_shared<ConnectionHost>(
         std::move(transport),
         std::move(context),

@@ -315,8 +315,7 @@ ConnectionHandler makeArenaProtocolHandler(
     handler.onStarted = [protocol](ConnectionChannel& channel)
     { protocol->start(channel); };
     handler.onClosed = [protocol] { protocol->stop(); };
-    handler.onDraining =
-        [protocol](ConnectionChannel&, std::function<void()> drained)
+    handler.onDraining = [protocol](std::function<void()> drained)
     { protocol->drain(std::move(drained)); };
     return handler;
 }

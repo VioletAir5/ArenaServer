@@ -1,14 +1,18 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 #include <gtest/gtest.h>
 
-#include "net/ConnectionHandler.h"
+#include "net/ConnectionHost.h"
 #include "net/MessageRegistry.h"
 #include "net/OnlineRegistry.h"
+
+#include "ProtocolTestHarness.h"
 
 using namespace service::gateway;
 
@@ -119,7 +123,7 @@ TEST(ConnectionContextTest, SessionAccessRequiresItsOwner)
 
 TEST(
     ConnectionContextTest,
-    CallbackCopiesRetainIgnoredContextUntilFinalRelease
+    HostRetainsContextThroughCloseWhenFactoryDoesNotCaptureIt
 )
 {
     auto context = std::make_shared<ConnectionContext>(
@@ -128,7 +132,8 @@ TEST(
         ConnectionContext::Clock::now()
     );
     std::weak_ptr<const ConnectionContext> observed = context;
-    bool invoked = false;
+    bool invoked = false, aliveDuringClose = false;
+    int closed = 0;
     const auto owner = std::this_thread::get_id();
     ConnectionHandlerFactory factory =
         [&](ConnectionContext::Ptr info)
@@ -136,16 +141,37 @@ TEST(
         invoked = true;
         EXPECT_EQ(std::this_thread::get_id(), owner);
         EXPECT_EQ(info.get(), context.get());
-        return [](ConnectionChannel&, std::span<const std::byte>) {};
+        ConnectionHandler handler([](ConnectionChannel&,
+                                     std::span<const std::byte>) {});
+        handler.onClosed = [&]
+        {
+            ++closed;
+            const auto retained = observed.lock();
+            aliveDuringClose = bool(retained);
+            if (retained)
+            {
+                EXPECT_EQ(retained->connectionId, 1U);
+            }
+        };
+        return handler;
     };
-    auto callback = makeConnectionHandler(factory, context);
-    auto copy = callback;
+    auto transport = std::make_shared<test::MemoryTransport>();
+    auto host = makeConnectionHost(
+        transport,
+        context,
+        {[](auto) {}, [](auto, auto) { return ConnectionTimer{}; }},
+        factory
+    );
     EXPECT_TRUE(invoked);
+    host->start();
     context.reset();
     EXPECT_FALSE(observed.expired());
-    callback = {};
+    host->transportClosed();
+    EXPECT_EQ(closed, 1);
+    EXPECT_TRUE(aliveDuringClose);
     EXPECT_FALSE(observed.expired());
-    copy = {};
+    host.reset();
+    EXPECT_EQ(closed, 1);
     EXPECT_TRUE(observed.expired());
 }
 
@@ -154,10 +180,22 @@ TEST(
     RejectsMissingContextAndInvalidFactoryResult
 )
 {
+    auto transport = std::make_shared<test::MemoryTransport>();
+    ConnectionScheduler scheduler{
+        [](auto) {},
+        [](auto, auto) { return ConnectionTimer{}; }
+    };
+    bool invoked = false;
+    ConnectionHandlerFactory counting = [&](ConnectionContext::Ptr)
+    {
+        invoked = true;
+        return ConnectionHandler([](auto&, auto) {});
+    };
     EXPECT_THROW(
-        makeConnectionHandler({}, {}),
+        makeConnectionHost(transport, {}, scheduler, counting),
         std::invalid_argument
     );
+    EXPECT_FALSE(invoked);
     auto context = std::make_shared<ConnectionContext>(
         1,
         InetAddress("127.0.0.1", 1234),
@@ -166,17 +204,73 @@ TEST(
     ConnectionHandlerFactory invalid = [](ConnectionContext::Ptr)
     { return ConnectionMessageCallback{}; };
     EXPECT_THROW(
-        makeConnectionHandler(invalid, context),
+        makeConnectionHost(transport, context, scheduler, invalid),
         std::invalid_argument
     );
     ConnectionHandlerFactory throwing =
         [](ConnectionContext::Ptr) -> ConnectionMessageCallback
     { throw std::runtime_error("factory failed"); };
     EXPECT_THROW(
-        makeConnectionHandler(throwing, context),
+        makeConnectionHost(transport, context, scheduler, throwing),
         std::runtime_error
     );
-    EXPECT_TRUE(makeConnectionHandler({}, context).onMessage);
+    ConnectionHandlerFactory nonstandard =
+        [](ConnectionContext::Ptr) -> ConnectionHandler { throw 42; };
+    EXPECT_THROW(
+        makeConnectionHost(
+            transport,
+            context,
+            scheduler,
+            nonstandard
+        ),
+        int
+    );
+    auto host = makeConnectionHost(transport, context, scheduler, {});
+    host->start();
+    const std::string message = "default echo";
+    host->received(std::as_bytes(std::span(message)));
+    EXPECT_EQ(transport->output, message);
+}
+
+TEST(
+    ConnectionContextTest,
+    FeatureFactoryFailureClosesWithLiveContextOnce
+)
+{
+    auto context = std::make_shared<ConnectionContext>(
+        1,
+        InetAddress("127.0.0.1", 1234),
+        ConnectionContext::Clock::now()
+    );
+    std::weak_ptr<const ConnectionContext> observed = context;
+    int closed = 0;
+    bool aliveDuringClose = false;
+    ConnectionHandlerFactory handlers = [&](ConnectionContext::Ptr)
+    {
+        ConnectionHandler handler([](auto&, auto) {});
+        handler.onClosed = [&]
+        {
+            ++closed;
+            aliveDuringClose = !observed.expired();
+        };
+        return handler;
+    };
+    ConnectionFeatureFactory fail = [](auto&, const auto&)
+    { throw std::runtime_error("feature factory"); };
+    EXPECT_THROW(
+        makeConnectionHost(
+            std::make_shared<test::MemoryTransport>(),
+            std::move(context),
+            {[](auto) {},
+             [](auto, auto) { return ConnectionTimer{}; }},
+            handlers,
+            fail
+        ),
+        std::runtime_error
+    );
+    EXPECT_EQ(closed, 1);
+    EXPECT_TRUE(aliveDuringClose);
+    EXPECT_TRUE(observed.expired());
 }
 
 TEST(ConnectionContextTest, ForeignDisconnectRejectsBeforeMutation)

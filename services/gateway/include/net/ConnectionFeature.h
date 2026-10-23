@@ -15,6 +15,7 @@
 
 namespace service::gateway
 {
+class ConnectionChannel;
 using ConnectionClock = std::chrono::steady_clock;
 // Destroy/reset on the owner to cancel. The scheduler outlives
 // tokens.
@@ -50,42 +51,16 @@ struct ConnectionScheduler
         ConnectionTimer(ConnectionClock::time_point, Action)>
         at;
 };
-/** @brief Represents read pause reason. */
-enum class ReadPauseReason : std::uint32_t
-{
-    Backpressure = 1,
-    Application = 2
-};
-/** @brief Exposes owner-thread connection controls to policy
- * features. */
-class IConnectionControl
-{
-public:
-    virtual ~IConnectionControl() = default;
-    /** @brief Sets read paused. */
-    virtual void setReadPaused(ReadPauseReason, bool) = 0;
-    /** @brief Returns the number of bytes awaiting transmission. */
-    virtual std::size_t pendingBytes() const noexcept = 0;
-    /** @brief Requests connection closure on the owner thread. */
-    virtual void requestClose() = 0;
-    /** @brief Returns the immutable connection context. */
-    virtual const ConnectionContext& context() const noexcept = 0;
-    // Callback runs on owner, only while the host remains open.
-    virtual ConnectionTimer scheduleAt(
-        ConnectionClock::time_point,
-        std::function<void(IConnectionControl&)>
-    ) = 0;
-};
 /** @brief Receives transport lifecycle and output pressure hooks. */
 class IConnectionFeature
 {
 public:
     virtual ~IConnectionFeature() = default;
-    virtual void onConnected(IConnectionControl&)
+    virtual void onConnected(ConnectionChannel&)
     {
     }
     virtual void onOutputBufferChanged(
-        IConnectionControl&, std::size_t, std::size_t
+        ConnectionChannel&, std::size_t, std::size_t
     )
     {
     }

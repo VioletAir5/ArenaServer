@@ -54,17 +54,11 @@ public:
     void close() override;
     bool connected() const noexcept override;
     bool acceptingInput() const noexcept override;
-    void pauseRead() override;
-    void resumeRead() override;
-    std::size_t pendingBytes() const noexcept override;
     void setReadPaused(ReadPauseReason, bool) override;
-    void requestClose() override;
     const ConnectionContext& context() const noexcept override;
     ConnectionTimer scheduleAt(
-        ConnectionClock::time_point,
-        std::function<void(IConnectionControl&)>
+        ConnectionClock::time_point, ConnectionAction
     ) override;
-    bool post(ConnectionAction) override;
     ConnectionPost poster() const override;
 
 private:

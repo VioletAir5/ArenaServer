@@ -12,6 +12,7 @@ using service::gateway::ConnectionChannel;
 #include <cerrno>
 #include <chrono>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -95,7 +96,9 @@ TEST(TcpConnectionTest, ConcurrentSendsDrainOrderedRecordsOnOwner)
                             33 + producer * records + record
                         )
                     );
-                    connection->send(payload.data(), payload.size());
+                    connection->send(
+                        std::as_bytes(std::span(payload))
+                    );
                 }
                 if (++finished == producers)
                 {
@@ -104,7 +107,7 @@ TEST(TcpConnectionTest, ConcurrentSendsDrainOrderedRecordsOnOwner)
                         {
                             if (auto self = weak.lock())
                             {
-                                self->shutdownWrite();
+                                self->shutdown();
                             }
                         }
                     );
@@ -199,7 +202,7 @@ TEST(TcpConnectionTest, PeerFinWaitsForAcceptedForeignSend)
     );
     const std::string payload = "reply before close";
     std::thread sender(
-        [&] { connection->send(payload.data(), payload.size()); }
+        [&] { connection->send(std::as_bytes(std::span(payload))); }
     );
     sender.join();
     ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
@@ -229,11 +232,11 @@ TEST(TcpConnectionTest, ForeignOutputLimitClosesAndReleasesQueue)
     connection->setCloseCallback([&](TcpConnection*) { ++closes; });
     const std::string payload(600 * 1024, 'x');
     std::thread first(
-        [&] { connection->send(payload.data(), payload.size()); }
+        [&] { connection->send(std::as_bytes(std::span(payload))); }
     );
     first.join();
     std::thread second(
-        [&] { connection->send(payload.data(), payload.size()); }
+        [&] { connection->send(std::as_bytes(std::span(payload))); }
     );
     second.join();
     EXPECT_LE(
@@ -257,14 +260,14 @@ TEST(TcpConnectionTest, CloseDropsForeignQueuedSendsAndWeakDrain)
     );
     const std::string payload(64 * 1024, 'q');
     std::thread sender(
-        [&] { connection->send(payload.data(), payload.size()); }
+        [&] { connection->send(std::as_bytes(std::span(payload))); }
     );
     sender.join();
     ASSERT_EQ(connection->pendingBytes(), payload.size());
     connection->close();
     EXPECT_EQ(connection->pendingBytes(), 0);
     std::thread lateSender(
-        [&] { connection->send(payload.data(), payload.size()); }
+        [&] { connection->send(std::as_bytes(std::span(payload))); }
     );
     lateSender.join();
     EXPECT_EQ(connection->pendingBytes(), 0);
@@ -288,7 +291,7 @@ TEST(TcpConnectionTest, ReadsAndEchoesIncomingBytes)
     );
     connection.setMessageCallback(
         [](TcpConnection& conn, std::string_view bytes)
-        { conn.send(bytes.data(), bytes.size()); }
+        { conn.send(std::as_bytes(std::span(bytes))); }
     );
     constexpr std::string_view message = "hello";
 
@@ -318,8 +321,8 @@ TEST(TcpConnectionTest, ClosedPeerSendDoesNotRaiseSigpipe)
     connection.setCloseCallback([&](TcpConnection*) { ++closes; });
 
     pair.peer = FileDescriptor();
-    connection.send("x", 1);
-    connection.send("again", 5);
+    connection.send(std::as_bytes(std::span("x", 1)));
+    connection.send(std::as_bytes(std::span("again", 5)));
 
     EXPECT_EQ(closes, 1);
 }
@@ -338,7 +341,7 @@ TEST(TcpConnectionTest, PeerEofNotifiesCloseCallbackOnce)
 
     pair.peer = FileDescriptor();
     connection.handleRead();
-    connection.handleClose();
+    connection.close();
 
     EXPECT_EQ(closeCount, 1);
 }
@@ -395,7 +398,7 @@ TEST(TcpConnectionTest, EchoesBytesBeforePeerWriteShutdown)
     );
     connection.setMessageCallback(
         [](TcpConnection& conn, std::string_view bytes)
-        { conn.send(bytes.data(), bytes.size()); }
+        { conn.send(std::as_bytes(std::span(bytes))); }
     );
     constexpr std::string_view message = "last message";
 
@@ -429,10 +432,10 @@ TEST(TcpConnectionTest, LocalWriteShutdownKeepsReceivingUntilPeerFin)
                                       std::string_view bytes)
                                   { received.append(bytes); });
 
-    connection.send("reply", 5);
-    connection.shutdownWrite();
-    connection.shutdownWrite();
-    connection.send("ignored", 7);
+    connection.send(std::as_bytes(std::span("reply", 5)));
+    connection.shutdown();
+    connection.shutdown();
+    connection.send(std::as_bytes(std::span("ignored", 7)));
 
     char buffer[32]{};
     ASSERT_EQ(::read(pair.peer.get(), buffer, sizeof(buffer)), 5);
@@ -480,10 +483,10 @@ TEST(TcpConnectionTest, QueuedWriteShutdownWaitsForPeerFin)
         0
     );
     const std::string payload(128 * 1024, 'x');
-    connection.send(payload.data(), payload.size());
-    ASSERT_GT(connection.pendingOutputBytes(), 0U);
-    connection.shutdownWrite();
-    connection.send("ignored", 7);
+    connection.send(std::as_bytes(std::span(payload)));
+    ASSERT_GT(connection.pendingBytes(), 0U);
+    connection.shutdown();
+    connection.send(std::as_bytes(std::span("ignored", 7)));
 
     std::string received;
     char buffer[8192];
@@ -554,9 +557,9 @@ TEST(TcpConnectionTest, LocalWriteShutdownDrainsBeforeFinAfterPeerFin)
         0
     );
     const std::string payload(128 * 1024, 'x');
-    connection.send(payload.data(), payload.size());
-    ASSERT_GT(connection.pendingOutputBytes(), 0U);
-    connection.shutdownWrite();
+    connection.send(std::as_bytes(std::span(payload)));
+    ASSERT_GT(connection.pendingBytes(), 0U);
+    connection.shutdown();
     ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
     connection.handleRead();
     EXPECT_EQ(closes, 0);
@@ -594,7 +597,7 @@ TEST(TcpConnectionTest, LocalWriteShutdownDrainsBeforeFinAfterPeerFin)
 
     EXPECT_TRUE(sawFin);
     EXPECT_EQ(received, payload);
-    EXPECT_EQ(connection.pendingOutputBytes(), 0U);
+    EXPECT_EQ(connection.pendingBytes(), 0U);
     EXPECT_EQ(closes, 1);
 }
 
@@ -676,7 +679,7 @@ TEST(
         0
     );
     const std::string payload(128 * 1024, 'x');
-    connection.send(payload.data(), payload.size());
+    connection.send(std::as_bytes(std::span(payload)));
     ASSERT_NE(connection.channel().events() & EPOLLOUT, 0U);
 
     ASSERT_EQ(::shutdown(pair.peer.get(), SHUT_WR), 0);
@@ -876,7 +879,7 @@ TEST(TcpConnectionTest, HardOutputLimitDisconnectsImmediately)
         TcpConnection::kHardOutputLimit + 8192,
         'x'
     );
-    connection.send(payload.data(), payload.size());
+    connection.send(std::as_bytes(std::span(payload)));
 
     EXPECT_EQ(closes, 1);
 }
@@ -912,7 +915,7 @@ TEST(TcpConnectionTest, OutputEventsLeaveReadPolicyToComponents)
         BackpressureFeature::kHighWaterMark + 128 * 1024,
         'x'
     );
-    connection.send(payload.data(), payload.size());
+    connection.send(std::as_bytes(std::span(payload)));
     ASSERT_FALSE(reported.empty());
     EXPECT_GT(reported.front(), BackpressureFeature::kHighWaterMark);
     EXPECT_NE(connection.channel().events() & EPOLLIN, 0U);
@@ -954,18 +957,17 @@ TEST(TcpConnectionTest, SlowPeerPendingOutputIsBounded)
     const std::string payload(64 * 1024, 'x');
     for (int attempt = 0; attempt < 64 && closes == 0; ++attempt)
     {
-        connection.send(payload.data(), payload.size());
+        connection.send(std::as_bytes(std::span(payload)));
         EXPECT_LE(
-            connection.pendingOutputBytes(),
+            connection.pendingBytes(),
             TcpConnection::kHardOutputLimit
         );
     }
 
     ASSERT_EQ(closes, 1);
-    const std::size_t pendingAtClose = connection
-                                           .pendingOutputBytes();
-    connection.send(payload.data(), payload.size());
-    EXPECT_EQ(connection.pendingOutputBytes(), pendingAtClose);
+    const std::size_t pendingAtClose = connection.pendingBytes();
+    connection.send(std::as_bytes(std::span(payload)));
+    EXPECT_EQ(connection.pendingBytes(), pendingAtClose);
 }
 
 TEST(TcpServerTest, StopWithoutConnectionsIsImmediateAndIdempotent)
