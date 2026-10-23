@@ -67,6 +67,8 @@ void MessageRegistry::registerHandler(
         id == arena::protocol::MSG_MATCH_JOIN_RESPONSE ||
         id == arena::protocol::MSG_MATCH_CANCEL_RESPONSE ||
         id == arena::protocol::MSG_MATCH_STATUS_RESPONSE ||
+        id == arena::protocol::MSG_ROOM_INPUT_RESPONSE ||
+        id == arena::protocol::MSG_ROOM_SNAPSHOT_RESPONSE ||
         options.timeout <= std::chrono::milliseconds::zero() ||
         options.timeout > std::chrono::hours(1))
         throw std::invalid_argument("invalid message route");

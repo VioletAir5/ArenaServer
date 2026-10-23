@@ -603,3 +603,193 @@ TEST(
     EXPECT_EQ(wire::MATCH_TICKET_EXPIRED, 5);
     EXPECT_EQ(wire::MATCH_TICKET_FAILED, 6);
 }
+
+TEST(
+    EnvelopeCodecTest,
+    RoomTicksRoundTripSignedStateAndFixedChecksumThroughLegacy
+)
+{
+    namespace wire = arena::protocol;
+    New input;
+    input.set_msg_id(wire::MSG_ROOM_INPUT_REQUEST);
+    auto* control = input.mutable_room_input_request();
+    control->set_actor_incarnation(71);
+    control->set_membership_epoch(4);
+    control->set_seq(10);
+    control->set_dx(-1);
+    control->set_dy(1);
+    New applied;
+    applied.set_msg_id(wire::MSG_ROOM_INPUT_RESPONSE);
+    auto* result = applied.mutable_room_input_response();
+    result->set_result(wire::ROOM_INPUT_APPLIED);
+    auto* snapshot = result->mutable_state();
+    snapshot->set_room_id(7);
+    snapshot->set_incarnation(71);
+    snapshot->set_tick(123);
+    snapshot->set_checksum(UINT64_MAX);
+    snapshot->set_checksum_version(1);
+    snapshot->set_position_limit(1000000);
+    auto* player = snapshot->add_players();
+    player->set_player_id(42);
+    player->set_session_id(81);
+    player->set_member_epoch(4);
+    player->set_x(-999);
+    player->set_y(999);
+    player->set_last_seq(10);
+    player->set_last_dx(-1);
+    player->set_last_dy(1);
+    New query;
+    query.set_msg_id(wire::MSG_ROOM_SNAPSHOT_REQUEST);
+    query.mutable_room_snapshot_request();
+    New queried;
+    queried.set_msg_id(wire::MSG_ROOM_SNAPSHOT_RESPONSE);
+    *queried.mutable_room_snapshot_response()
+         ->mutable_state() = *snapshot;
+    for (auto message : {input, applied, query, queried})
+    {
+        message.set_request_id(1ULL << 40);
+        const auto encoded = EnvelopeCodec::encode(message);
+        ASSERT_TRUE(encoded);
+        New decoded;
+        ASSERT_TRUE(decode(*encoded, decoded));
+        EXPECT_EQ(
+            decoded.SerializeAsString(),
+            message.SerializeAsString()
+        );
+        Old legacy;
+        ASSERT_TRUE(legacy.ParseFromString(*encoded));
+        EXPECT_EQ(legacy.payload_case(), Old::PAYLOAD_NOT_SET);
+        std::string forwarded;
+        ASSERT_TRUE(legacy.SerializeToString(&forwarded));
+        New restored;
+        ASSERT_TRUE(decode(forwarded, restored));
+        EXPECT_EQ(
+            restored.SerializeAsString(),
+            message.SerializeAsString()
+        );
+    }
+}
+
+TEST(
+    EnvelopeCodecTest,
+    RoomTickSchemaKeepsStableFencesAndCanonicalStateFields
+)
+{
+    namespace wire = arena::protocol;
+    const auto checkFields =
+        [](const auto* descriptor, const auto& fields)
+    {
+        for (const auto& [name, number] : fields)
+        {
+            const auto* field = descriptor->FindFieldByName(
+                std::string(name)
+            );
+            ASSERT_NE(field, nullptr);
+            EXPECT_EQ(field->number(), number);
+        }
+    };
+    checkFields(
+        New::descriptor(),
+        std::array<std::pair<std::string_view, int>, 4>{
+            {{"room_input_request", 50},
+             {"room_input_response", 51},
+             {"room_snapshot_request", 52},
+             {"room_snapshot_response", 53}}
+        }
+    );
+    checkFields(
+        wire::RoomInputRequest::descriptor(),
+        std::array<std::pair<std::string_view, int>, 5>{
+            {{"actor_incarnation", 1},
+             {"membership_epoch", 2},
+             {"seq", 3},
+             {"dx", 4},
+             {"dy", 5}}
+        }
+    );
+    checkFields(
+        wire::RoomSnapshot::descriptor(),
+        std::array<std::pair<std::string_view, int>, 7>{
+            {{"room_id", 1},
+             {"incarnation", 2},
+             {"tick", 3},
+             {"checksum", 4},
+             {"players", 5},
+             {"checksum_version", 6},
+             {"position_limit", 7}}
+        }
+    );
+    checkFields(
+        wire::RoomPlayerState::descriptor(),
+        std::array<std::pair<std::string_view, int>, 8>{
+            {{"player_id", 1},
+             {"session_id", 2},
+             {"member_epoch", 3},
+             {"x", 4},
+             {"y", 5},
+             {"last_seq", 6},
+             {"last_dx", 7},
+             {"last_dy", 8}}
+        }
+    );
+    EXPECT_EQ(wire::RoomInputRequest::descriptor()->field_count(), 5);
+    EXPECT_EQ(
+        wire::RoomInputRequest::descriptor()->FindFieldByName(
+            "player_id"
+        ),
+        nullptr
+    );
+    EXPECT_EQ(
+        wire::RoomInputRequest::descriptor()->FindFieldByName(
+            "session_id"
+        ),
+        nullptr
+    );
+    EXPECT_EQ(
+        wire::RoomInputRequest::descriptor()->FindFieldByName(
+            "room_id"
+        ),
+        nullptr
+    );
+    EXPECT_EQ(
+        wire::RoomSnapshot::descriptor()
+            ->FindFieldByName("checksum")
+            ->type(),
+        google::protobuf::FieldDescriptor::TYPE_FIXED64
+    );
+    EXPECT_EQ(
+        wire::RoomPlayerState::descriptor()
+            ->FindFieldByName("x")
+            ->type(),
+        google::protobuf::FieldDescriptor::TYPE_SINT32
+    );
+    EXPECT_EQ(
+        wire::RoomSnapshotRequest::descriptor()->field_count(),
+        0
+    );
+    EXPECT_EQ(
+        wire::RoomInputResponse::descriptor()
+            ->FindFieldByName("state")
+            ->number(),
+        1
+    );
+    EXPECT_EQ(
+        wire::RoomInputResponse::descriptor()
+            ->FindFieldByName("result")
+            ->number(),
+        2
+    );
+    EXPECT_EQ(
+        wire::RoomSnapshotResponse::descriptor()
+            ->FindFieldByName("state")
+            ->number(),
+        1
+    );
+    EXPECT_EQ(wire::ROOM_INPUT_APPLIED, 1);
+    EXPECT_EQ(wire::ROOM_INPUT_DUPLICATE, 2);
+    EXPECT_EQ(wire::ROOM_INPUT_GAP, 3);
+    EXPECT_EQ(wire::ROOM_INPUT_STALE, 4);
+    EXPECT_EQ(wire::ROOM_INPUT_CONFLICT, 5);
+    EXPECT_EQ(wire::ROOM_INPUT_NOT_MEMBER, 6);
+    EXPECT_EQ(wire::ROOM_INPUT_INVALID, 7);
+}

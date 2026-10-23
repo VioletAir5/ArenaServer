@@ -38,6 +38,7 @@
 #include "net/PacketRatePolicy.h"
 #include "net/PacketTypePolicy.h"
 #include "net/PreLoginHandshake.h"
+#include "net/RoomService.h"
 #include "net/TcpServer.h"
 #include "net/WebSocketServer.h"
 #include "os/FileDescriptor.h"
@@ -252,6 +253,19 @@ void printOnline(const OnlineRegistry& registry)
               << " retained=" << registry.retainedCount()
               << " rooms=" << registry.roomCount() << '\n';
 }
+/** @brief Reports committed room ticks and verifies final actor
+ * reclamation. */
+void printRooms(const RoomService& rooms)
+{
+    const auto metrics = rooms.metrics();
+    std::cerr << "ROOM_COUNTS actors=" << metrics.actors
+              << " ticks=" << metrics.ticks
+              << " applied=" << metrics.applied
+              << " rejected=" << metrics.rejected
+              << " duplicates=" << metrics.duplicates
+              << " skipped_wall_slots=" << metrics.skippedWallSlots
+              << '\n';
+}
 /** @brief Exports cumulative wait/quality distributions and final
  * resource gauges. */
 void printMatch(const MatchmakingService& matcher)
@@ -305,6 +319,7 @@ int main(int argc, char** argv)
     std::shared_ptr<AdmissionController> admission;
     std::shared_ptr<OnlineRegistry> online;
     std::shared_ptr<MatchmakingService> matcher;
+    std::shared_ptr<RoomService> rooms;
     OnlineRegistryConfig onlineConfig;
     std::uint16_t tcpPort = 8888;
     std::uint16_t wsPort = 8889;
@@ -408,11 +423,13 @@ int main(int argc, char** argv)
                     },
                     matchConfig
                 );
+                rooms = std::make_shared<RoomService>(online);
                 registry = makeLoginMessageRegistry(
                     std::move(passwords),
                     std::move(tokens),
                     online,
-                    matcher
+                    matcher,
+                    rooms
                 );
             }
             catch (const std::exception&)
@@ -458,6 +475,8 @@ int main(int argc, char** argv)
             );
         if (matcher)
             matcher->start(connectionScheduler(loop));
+        if (rooms)
+            rooms->start(connectionScheduler(loop));
         {
             EpollShutdown shutdown(
                 loop,
@@ -465,6 +484,8 @@ int main(int argc, char** argv)
                 mask.signals(),
                 [&]
                 {
+                    if (rooms)
+                        rooms->stop();
                     if (matcher)
                         matcher->stop();
                     if (upkeep)
@@ -474,6 +495,11 @@ int main(int argc, char** argv)
             loop.loop();
         }
         server.reset();
+        if (rooms)
+        {
+            rooms->stop();
+            printRooms(*rooms);
+        }
         if (matcher)
         {
             matcher->stop();
@@ -496,6 +522,8 @@ int main(int argc, char** argv)
         );
     if (matcher)
         matcher->start(connectionScheduler(context.get_executor()));
+    if (rooms)
+        rooms->start(connectionScheduler(context.get_executor()));
     boost::asio::signal_set signals(context, SIGINT, SIGTERM);
     boost::asio::steady_timer poll(context);
     std::unique_ptr<ITcpServer>
@@ -549,6 +577,8 @@ int main(int argc, char** argv)
         {
             if (!error)
             {
+                if (rooms)
+                    rooms->stop();
                 if (matcher)
                     matcher->stop();
                 if (upkeep)
@@ -565,6 +595,11 @@ int main(int argc, char** argv)
     context.run();
     wsServer.reset();
     server.reset();
+    if (rooms)
+    {
+        rooms->stop();
+        printRooms(*rooms);
+    }
     if (matcher)
     {
         matcher->stop();

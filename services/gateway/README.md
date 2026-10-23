@@ -22,6 +22,8 @@ documents.
 | `OnlineRegistryMaintenance` | Management-owner sweeps and shutdown, independent of a disconnected transport |
 | `MatchmakingService` | Bounded cross-thread commands, current-session fencing and management-owner matching/expiry |
 | `MatchHandler` | Authenticated join/cancel/status wire adapters; MMR comes from the server |
+| `RoomService` | Bounded tick-cutoff mailboxes and fixed-owner 20 Hz room actors |
+| `RoomHandler` | Authenticated input/snapshot adapters with actor and membership fences |
 
 The input path is transport -> Host -> per-connection protocol -> packet
 policies -> Envelope -> Dispatcher -> registered handler. The reply path runs
@@ -59,7 +61,7 @@ password database or KDF. Online/session authority is process-local.
 The authenticated registry exposes SessionState (20/21), RoomJoin (30/31) and
 RoomLeave (32/33) request/response routes. A nonzero room ID creates a bounded
 gateway roster on first join. This is the current membership store; battle
-RoomActor lifecycle, invitations and game admission rules remain planned.
+lifecycle, invitations and game admission rules remain planned.
 The defaults are 100000 retained players, 10000 rooms and 64 members per room.
 Room moves, leaving, session replacement and expiry update both indexes in
 one mutex transaction; snapshots own their data and include Online/Detached
@@ -119,6 +121,21 @@ reports changed counters; final `MATCH_COUNTS` includes disjoint wait/gap
 histograms and cumulative sums, with no per-player metric labels.
 
 ## Capacity and shutdown
+
+Authenticated RoomSnapshot (52/53) lazily initializes an `arena_room` actor for
+an existing roster. RoomInput (50/51) carries its incarnation, membership epoch,
+contiguous sequence and integer controls. Actors run on the management owner
+at an absolute 50 ms cadence. Connection workers enqueue bounded value commands;
+only a tick cutoff changes room state. JWT recovery preserves member sequence;
+leaving and rejoining increments a separate membership fence. Every committed
+tick has a canonical checksum and a bounded replay record. See the
+[room runtime contract](../room/README.md) for input ordering, catch-up,
+reclamation, replay schema and the reference integer update rule.
+
+All rooms currently share one management owner. This implements room execution
+in process; match-to-room allocation and Battle simulation remain planned.
+Shutdown stops room ticking and command admission before connection drain,
+then prints final `ROOM_COUNTS` with zero actors after owner reclamation.
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |

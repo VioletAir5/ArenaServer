@@ -5,6 +5,7 @@
 #include "net/LoginHandler.h"
 
 #include "net/MatchHandler.h"
+#include "net/RoomHandler.h"
 
 namespace service::gateway
 {
@@ -61,7 +62,8 @@ std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
         passwords,
     std::shared_ptr<const service::auth::JwtTokens> tokens,
     std::shared_ptr<OnlineRegistry> sessions,
-    std::shared_ptr<MatchmakingService> matchmaking
+    std::shared_ptr<MatchmakingService> matchmaking,
+    std::shared_ptr<RoomService> rooms
 )
 {
     if (!passwords || !tokens || !sessions)
@@ -251,6 +253,8 @@ std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
             sessions,
             std::move(matchmaking)
         );
+    if (rooms)
+        registerRoomRoutes(*routes, sessions, std::move(rooms));
     routes->seal();
     return routes;
 }

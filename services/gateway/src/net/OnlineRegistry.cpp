@@ -356,7 +356,8 @@ OnlineRegistry::install(
         nextEpoch,
         Presence::Online,
         resume ? found->second.snapshot.roomId : std::nullopt,
-        std::nullopt
+        std::nullopt,
+        resume ? found->second.snapshot.roomEpoch : 0
     };
     auto lease = std::shared_ptr<SessionLease>(new SessionLease(
         {player, connection, nextEpoch},
@@ -547,6 +548,9 @@ std::expected<OnlineState, OnlineError> OnlineRegistry::joinRoom(
         return std::unexpected(OnlineError::NotCurrent);
     if (entry->snapshot.roomId == room)
         return m_state->view(*entry);
+    if (entry->snapshot.roomEpoch ==
+        std::numeric_limits<std::uint64_t>::max())
+        return std::unexpected(OnlineError::Capacity);
     auto target = m_state->rooms.find(room.value());
     if (target != m_state->rooms.end() &&
         target->second.size() >= m_state->config.maxRoomMembers)
@@ -576,6 +580,7 @@ std::expected<OnlineState, OnlineError> OnlineRegistry::joinRoom(
     }
     auto next = entry->snapshot;
     next.roomId = room;
+    ++next.roomEpoch;
     auto members = m_state->members(room);
     members.push_back(next);
     std::sort(
@@ -603,6 +608,7 @@ std::expected<OnlineState, OnlineError> OnlineRegistry::joinRoom(
     }
     m_state->removeRoom(*entry);
     entry->snapshot.roomId = room;
+    entry->snapshot.roomEpoch = next.roomEpoch;
     return result;
 }
 
@@ -618,10 +624,17 @@ OnlineRegistry::leaveRoom(SessionBinding binding)
     );
     if (!entry)
         return std::unexpected(OnlineError::NotCurrent);
+    if (!entry->snapshot.roomId)
+        return m_state->view(*entry);
+    if (entry->snapshot.roomEpoch ==
+        std::numeric_limits<std::uint64_t>::max())
+        return std::unexpected(OnlineError::Capacity);
     auto next = entry->snapshot;
     next.roomId.reset();
+    ++next.roomEpoch;
     OnlineState result{next, {}};
     m_state->removeRoom(*entry);
+    entry->snapshot.roomEpoch = next.roomEpoch;
     return result;
 }
 

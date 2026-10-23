@@ -16,16 +16,20 @@ namespace service::gateway
 inline ConnectionHandlerFactory transportTestProfile(
     std::string_view mode,
     std::shared_ptr<OnlineRegistry>* onlineOut = nullptr,
-    std::shared_ptr<MatchmakingService>* matcherOut = nullptr
+    std::shared_ptr<MatchmakingService>* matcherOut = nullptr,
+    std::shared_ptr<RoomService>* roomsOut = nullptr
 )
 {
     if (onlineOut)
         onlineOut->reset();
     if (matcherOut)
         matcherOut->reset();
+    if (roomsOut)
+        roomsOut->reset();
     if (mode == "context")
         return makeContextTestFactory();
-    if (mode == "auth" || mode == "presence" || mode == "match")
+    if (mode == "auth" || mode == "presence" || mode == "match" ||
+        mode == "room")
     {
         OnlineRegistryConfig config;
         if (mode != "auth")
@@ -64,10 +68,18 @@ inline ConnectionHandlerFactory transportTestProfile(
             if (matcherOut)
                 *matcherOut = matcher;
         }
+        std::shared_ptr<RoomService> rooms;
+        if (mode == "room")
+        {
+            rooms = std::make_shared<RoomService>(registry);
+            if (roomsOut)
+                *roomsOut = rooms;
+        }
         return makeAuthTestFactory(
             std::move(registry),
             mode != "auth",
-            std::move(matcher)
+            std::move(matcher),
+            std::move(rooms)
         );
     }
     if (mode == "rpc")

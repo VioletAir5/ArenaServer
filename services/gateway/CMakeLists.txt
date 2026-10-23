@@ -13,6 +13,7 @@ target_link_libraries(arena_gateway PUBLIC
     arena_shared
     arena_auth
     arena_match
+    arena_room
     Boost::boost
     Threads::Threads
     spdlog::spdlog

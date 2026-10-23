@@ -58,6 +58,7 @@ add_subdirectory(gateway/net)
 add_subdirectory(domain)
 add_subdirectory(auth)
 add_subdirectory(match)
+add_subdirectory(room)
 
 include(GoogleTest)
 gtest_discover_tests(arena_tests)

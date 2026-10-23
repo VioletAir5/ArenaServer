@@ -27,6 +27,10 @@ enum MsgId {
   MSG_MATCH_CANCEL_RESPONSE = 43;
   MSG_MATCH_STATUS_REQUEST = 44;
   MSG_MATCH_STATUS_RESPONSE = 45;
+  MSG_ROOM_INPUT_REQUEST = 50;
+  MSG_ROOM_INPUT_RESPONSE = 51;
+  MSG_ROOM_SNAPSHOT_REQUEST = 52;
+  MSG_ROOM_SNAPSHOT_RESPONSE = 53;
 }
 
 // Stable wire codes. Error.code stays uint32 for v1 descriptor
@@ -71,6 +75,10 @@ message Envelope {
     MatchCancelResponse match_cancel_response = 43;
     MatchStatusRequest match_status_request = 44;
     MatchStatusResponse match_status_response = 45;
+    RoomInputRequest room_input_request = 50;
+    RoomInputResponse room_input_response = 51;
+    RoomSnapshotRequest room_snapshot_request = 52;
+    RoomSnapshotResponse room_snapshot_response = 53;
   }
 }
 
@@ -184,6 +192,59 @@ message MatchStatusRequest {
 }
 message MatchStatusResponse {
   MatchTicket state = 1;
+}
+
+enum RoomInputStatus {
+  ROOM_INPUT_UNSPECIFIED = 0;
+  ROOM_INPUT_APPLIED = 1;
+  ROOM_INPUT_DUPLICATE = 2;
+  ROOM_INPUT_GAP = 3;
+  ROOM_INPUT_STALE = 4;
+  ROOM_INPUT_CONFLICT = 5;
+  ROOM_INPUT_NOT_MEMBER = 6;
+  ROOM_INPUT_INVALID = 7;
+}
+
+// Canonical player state from the last committed room tick.
+message RoomPlayerState {
+  uint64 player_id = 1;
+  uint64 session_id = 2;
+  uint64 member_epoch = 3;
+  sint32 x = 4;
+  sint32 y = 5;
+  uint64 last_seq = 6;
+  sint32 last_dx = 7;
+  sint32 last_dy = 8;
+}
+
+message RoomSnapshot {
+  uint64 room_id = 1;
+  uint64 incarnation = 2;
+  uint64 tick = 3;
+  fixed64 checksum = 4;
+  repeated RoomPlayerState players = 5;
+  uint64 checksum_version = 6;
+  sint32 position_limit = 7;
+}
+
+// Identity and room come from the current authenticated binding. Controls are
+// integer steps in [-1, 1]; sequence starts at one per membership generation.
+message RoomInputRequest {
+  uint64 actor_incarnation = 1;
+  uint64 membership_epoch = 2;
+  uint64 seq = 3;
+  sint32 dx = 4;
+  sint32 dy = 5;
+}
+// Completed after the input tick, including a typed rejected-input outcome.
+message RoomInputResponse {
+  RoomSnapshot state = 1;
+  RoomInputStatus result = 2;
+}
+// Initializes an actor lazily for an already joined authoritative roster.
+message RoomSnapshotRequest {}
+message RoomSnapshotResponse {
+  RoomSnapshot state = 1;
 }
 
 message Ping {

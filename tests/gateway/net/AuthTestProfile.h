@@ -6,6 +6,7 @@
 #include "net/MatchmakingService.h"
 #include "net/OnlineRegistry.h"
 #include "net/PreLoginHandshake.h"
+#include "net/RoomService.h"
 
 namespace service::gateway
 {
@@ -62,7 +63,8 @@ public:
 inline ConnectionHandlerFactory makeAuthTestFactory(
     std::shared_ptr<OnlineRegistry> registry = {},
     bool presence = false,
-    std::shared_ptr<MatchmakingService> matcher = {}
+    std::shared_ptr<MatchmakingService> matcher = {},
+    std::shared_ptr<RoomService> rooms = {}
 )
 {
     auto passwords = std::make_shared<
@@ -82,7 +84,8 @@ inline ConnectionHandlerFactory makeAuthTestFactory(
         std::move(passwords),
         std::make_shared<service::auth::JwtTokens>(std::move(config)),
         std::move(registry),
-        std::move(matcher)
+        std::move(matcher),
+        std::move(rooms)
     );
     return [routes](ConnectionContext::Ptr context)
     {
@@ -130,5 +133,16 @@ inline void printMatchTestCounts(const MatchmakingService& matcher)
     histogram("mmr_gap", m.mmrGap);
     histogram("abandoned_wait", m.abandonedWait);
     std::cerr << std::endl;
+}
+inline void printRoomTestCounts(const RoomService& rooms)
+{
+    const auto metrics = rooms.metrics();
+    std::cerr << "ROOM_COUNTS actors=" << metrics.actors
+              << " ticks=" << metrics.ticks
+              << " applied=" << metrics.applied
+              << " rejected=" << metrics.rejected
+              << " duplicates=" << metrics.duplicates
+              << " skipped_wall_slots=" << metrics.skippedWallSlots
+              << std::endl;
 }
 } // namespace service::gateway

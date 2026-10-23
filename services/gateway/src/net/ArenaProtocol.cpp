@@ -50,6 +50,14 @@ std::uint32_t payloadMsgId(const arena::protocol::Envelope& value)
         return arena::protocol::MSG_MATCH_STATUS_REQUEST;
     case arena::protocol::Envelope::kMatchStatusResponse:
         return arena::protocol::MSG_MATCH_STATUS_RESPONSE;
+    case arena::protocol::Envelope::kRoomInputRequest:
+        return arena::protocol::MSG_ROOM_INPUT_REQUEST;
+    case arena::protocol::Envelope::kRoomInputResponse:
+        return arena::protocol::MSG_ROOM_INPUT_RESPONSE;
+    case arena::protocol::Envelope::kRoomSnapshotRequest:
+        return arena::protocol::MSG_ROOM_SNAPSHOT_REQUEST;
+    case arena::protocol::Envelope::kRoomSnapshotResponse:
+        return arena::protocol::MSG_ROOM_SNAPSHOT_RESPONSE;
     default:
         return arena::protocol::MSG_UNSPECIFIED;
     }
@@ -79,6 +87,10 @@ bool requestPayloadMatches(
         return envelope.has_match_cancel_request();
     case arena::protocol::MSG_MATCH_STATUS_REQUEST:
         return envelope.has_match_status_request();
+    case arena::protocol::MSG_ROOM_INPUT_REQUEST:
+        return envelope.has_room_input_request();
+    case arena::protocol::MSG_ROOM_SNAPSHOT_REQUEST:
+        return envelope.has_room_snapshot_request();
     default:
         return true;
     }
@@ -107,6 +119,11 @@ bool responseMatches(std::uint32_t request, std::uint32_t response)
         return response == arena::protocol::MSG_MATCH_CANCEL_RESPONSE;
     case arena::protocol::MSG_MATCH_STATUS_REQUEST:
         return response == arena::protocol::MSG_MATCH_STATUS_RESPONSE;
+    case arena::protocol::MSG_ROOM_INPUT_REQUEST:
+        return response == arena::protocol::MSG_ROOM_INPUT_RESPONSE;
+    case arena::protocol::MSG_ROOM_SNAPSHOT_REQUEST:
+        return response ==
+               arena::protocol::MSG_ROOM_SNAPSHOT_RESPONSE;
     default:
         // Custom routes retain the existing supported reply contract.
         return response == arena::protocol::MSG_LOGIN_RESPONSE ||

@@ -23,6 +23,7 @@ int main(int argc, char** argv)
     }
     std::shared_ptr<service::gateway::OnlineRegistry> online;
     std::shared_ptr<service::gateway::MatchmakingService> matcher;
+    std::shared_ptr<service::gateway::RoomService> rooms;
     service::gateway::ConnectionHandlerFactory handlerFactory;
     if (argc == 5)
     {
@@ -31,7 +32,8 @@ int main(int argc, char** argv)
             handlerFactory = service::gateway::transportTestProfile(
                 argv[4],
                 &online,
-                &matcher
+                &matcher,
+                &rooms
             );
         }
         catch (const std::invalid_argument&)
@@ -43,6 +45,8 @@ int main(int argc, char** argv)
     boost::asio::io_context context;
     if (matcher)
         matcher->start(connectionScheduler(context.get_executor()));
+    if (rooms)
+        rooms->start(connectionScheduler(context.get_executor()));
     std::unique_ptr<OnlineRegistryMaintenance> upkeep;
     if (online)
         upkeep = std::make_unique<OnlineRegistryMaintenance>(
@@ -99,6 +103,8 @@ int main(int argc, char** argv)
                 upkeep->stop();
             if (matcher)
                 matcher->stop();
+            if (rooms)
+                rooms->stop();
             server.stop(
                 signal == SIGTERM ? std::chrono::milliseconds(0)
                                   : std::chrono::milliseconds(300)
@@ -110,6 +116,11 @@ int main(int argc, char** argv)
     context.run();
     if (upkeep)
         upkeep->shutdown();
+    if (rooms)
+    {
+        rooms->stop();
+        printRoomTestCounts(*rooms);
+    }
     if (matcher)
     {
         matcher->stop();

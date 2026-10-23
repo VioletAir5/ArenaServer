@@ -42,13 +42,17 @@ int main(int argc, char** argv)
                            mode == "destroy_drain";
     std::shared_ptr<OnlineRegistry> online;
     std::shared_ptr<MatchmakingService> matcher;
+    std::shared_ptr<RoomService> rooms;
     ConnectionHandlerFactory handshake = transportTestProfile(
         mode == "flood" || lifecycle ? "handshake" : mode,
         &online,
-        &matcher
+        &matcher,
+        &rooms
     );
     if (matcher)
         matcher->start(connectionScheduler(context.get_executor()));
+    if (rooms)
+        rooms->start(connectionScheduler(context.get_executor()));
     std::unique_ptr<OnlineRegistryMaintenance> upkeep;
     if (online)
         upkeep = std::make_unique<OnlineRegistryMaintenance>(
@@ -133,6 +137,8 @@ int main(int argc, char** argv)
                     upkeep->stop();
                 if (matcher)
                     matcher->stop();
+                if (rooms)
+                    rooms->stop();
                 const auto
                     grace = mode == "rpc"
                                 ? std::chrono::milliseconds(300)
@@ -154,6 +160,11 @@ int main(int argc, char** argv)
     context.run();
     if (upkeep)
         upkeep->shutdown();
+    if (rooms)
+    {
+        rooms->stop();
+        printRoomTestCounts(*rooms);
+    }
     if (matcher)
     {
         matcher->stop();

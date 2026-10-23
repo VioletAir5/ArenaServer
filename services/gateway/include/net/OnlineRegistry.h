@@ -58,6 +58,9 @@ struct OnlineSnapshot
     /// Exclusive monotonic recovery deadline, present only in grace.
     std::optional<std::chrono::steady_clock::time_point>
         graceDeadline;
+    /// Logical-session membership generation; changes on actual
+    /// move/leave.
+    std::uint64_t roomEpoch{0};
 };
 
 struct OnlineState

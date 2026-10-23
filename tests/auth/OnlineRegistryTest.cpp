@@ -184,6 +184,66 @@ TEST_F(
 }
 
 TEST_F(
+    OnlineRegistryPresenceTest,
+    RoomEpochFencesReentryButSurvivesJwtRecovery
+)
+{
+    auto original = login();
+    ASSERT_TRUE(original);
+    EXPECT_EQ(original->snapshot.roomEpoch, 0u);
+    const auto binding = original->lease->binding;
+    auto joined = registry->joinRoom(binding, RoomId{7});
+    ASSERT_TRUE(joined);
+    EXPECT_EQ(joined->session.roomEpoch, 1u);
+    const auto epoch = [](const auto& result)
+    {
+        EXPECT_TRUE(result);
+        return result ? result->session.roomEpoch : 0;
+    };
+    EXPECT_EQ(epoch(registry->joinRoom(binding, RoomId{7})), 1u);
+    EXPECT_EQ(epoch(registry->joinRoom(binding, RoomId{8})), 2u);
+    EXPECT_EQ(epoch(registry->leaveRoom(binding)), 3u);
+    EXPECT_EQ(epoch(registry->leaveRoom(binding)), 3u);
+    EXPECT_EQ(epoch(registry->joinRoom(binding, RoomId{7})), 4u);
+    original->lease->release();
+    const auto detached = registry->snapshot(PlayerId{1});
+    ASSERT_TRUE(detached);
+    EXPECT_EQ(detached->roomEpoch, 4u);
+    auto recovered = registry->install(
+        PlayerId{1},
+        2,
+        claims(*original),
+        *tokens,
+        [] {}
+    );
+    ASSERT_TRUE(recovered);
+    EXPECT_EQ(
+        recovered->snapshot.sessionId,
+        original->snapshot.sessionId
+    );
+    EXPECT_EQ(recovered->snapshot.roomId, RoomId{7});
+    EXPECT_EQ(recovered->snapshot.roomEpoch, 4u);
+    original->lease->release();
+    const auto current = registry->snapshot(PlayerId{1});
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->roomEpoch, 4u);
+    auto replaced = login(1, 3);
+    ASSERT_TRUE(replaced);
+    EXPECT_NE(
+        replaced->snapshot.sessionId,
+        recovered->snapshot.sessionId
+    );
+    EXPECT_FALSE(replaced->snapshot.roomId);
+    EXPECT_EQ(replaced->snapshot.roomEpoch, 0u);
+    EXPECT_EQ(
+        epoch(
+            registry->joinRoom(replaced->lease->binding, RoomId{7})
+        ),
+        1u
+    );
+}
+
+TEST_F(
     OnlineRegistryPresenceTest, DetachIsVisibleAndRetainsItsRoomSlot
 )
 {

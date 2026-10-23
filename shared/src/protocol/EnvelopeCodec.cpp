@@ -46,6 +46,10 @@ bool validEnvelope(const arena::protocol::Envelope& envelope)
     case arena::protocol::Envelope::kMatchCancelResponse:
     case arena::protocol::Envelope::kMatchStatusRequest:
     case arena::protocol::Envelope::kMatchStatusResponse:
+    case arena::protocol::Envelope::kRoomInputRequest:
+    case arena::protocol::Envelope::kRoomInputResponse:
+    case arena::protocol::Envelope::kRoomSnapshotRequest:
+    case arena::protocol::Envelope::kRoomSnapshotResponse:
         return true;
     case arena::protocol::Envelope::kLoginResponse:
         return !envelope.login_response().has_error() ||

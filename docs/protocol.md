@@ -1,6 +1,6 @@
 # Gateway request protocol
 
-Current implementation: 2026-10-22. TCP and binary WebSocket use the same
+Current implementation: 2026-10-23. TCP and binary WebSocket use the same
 PacketCodec frame and Envelope. The application entry is
 `ArenaServer asio handshake [ws-origin]`. Without authentication configuration,
 the default routes provide Ping and an unavailable Login. `ARENA_JWT_KEY` selects
@@ -38,9 +38,13 @@ MsgId equals the corresponding Envelope oneof tag.
 | 40 / 41 | MatchJoinRequest / MatchJoinResponse | Current authenticated binding | Admit or replay one matching ticket |
 | 42 / 43 | MatchCancelRequest / MatchCancelResponse | Current authenticated binding | Cancel the caller's waiting ticket |
 | 44 / 45 | MatchStatusRequest / MatchStatusResponse | Current authenticated binding | Query a caller-owned ticket |
+| 50 / 51 | RoomInputRequest / RoomInputResponse | Current authenticated room member | Apply a fenced integer control on a room tick |
+| 52 / 53 | RoomSnapshotRequest / RoomSnapshotResponse | Current authenticated room member | Query or lazily initialize the existing roster's actor |
 
 `makeLoginMessageRegistry` registers 20/30/32 and optionally 40/42/44 when supplied
-a MatchmakingService. The default unauthenticated registry omits these routes.
+a MatchmakingService. An optional fifth RoomService dependency registers 50/52;
+the roster's 30/32 routes retain their synchronous registry semantics. The default
+unauthenticated registry omits these routes.
 Response IDs cannot register as requests. All built-in requests support explicit
 and inferred IDs. Registries are sealed before publication; each connection has
 at most 64 pending requests and routes default to a five-second reply deadline.
@@ -86,8 +90,9 @@ SessionStateResponse in `state1`; RoomLeaveRequest is empty. Repeated leave and
 joining the same room are idempotent.
 
 The default registry retains at most 100000 players, 10000 rooms and 64 members per
-room. A nonzero ID can create a bounded gateway roster. This is not a battle
-RoomActor, invitation system or access-control policy. Move, leave, replacement
+room. A nonzero ID can create a bounded gateway roster. Join does not create a
+simulation actor, allocate a battle or provide an invitation/access-control
+policy. Move, leave, replacement
 and expiry update both indexes atomically; failure preserves existing membership.
 Detached players retain their slots until grace expires; empty rooms are removed.
 
@@ -163,6 +168,77 @@ the service retains neither transport pointers nor owner-only ConnectionSession.
 Stopping the service rejects new commands and fails pending commands before
 server drain and management executor retirement.
 
+## Room ticks, input and snapshots
+
+RoomJoin/Leave continue to change the authoritative roster synchronously. A
+RoomSnapshotRequest is empty and derives the room from the current authenticated
+session; it lazily initializes that roster's actor when the room service is
+configured. Merely joining a roster does not allocate an actor. There is no
+match-to-room allocator or combat engine in this reference simulation.
+
+RoomInputRequest has no caller or room identity fields:
+
+| Field | Tag | Meaning |
+| --- | ---: | --- |
+| actor_incarnation | 1 | Nonzero actor identity obtained from a snapshot |
+| membership_epoch | 2 | This player's member_epoch from the current snapshot |
+| seq | 3 | Contiguous input sequence starting at one for this membership |
+| dx | 4 | sint32 integer control in [-1, 1] |
+| dy | 5 | sint32 integer control in [-1, 1] |
+
+RoomInputResponse wraps RoomSnapshot in `state1` and RoomInputStatus in `result2`.
+RoomSnapshotResponse wraps the same snapshot in `state1`:
+
+| Snapshot field | Tag | Meaning |
+| --- | ---: | --- |
+| room_id | 1 | Current authoritative roster identity |
+| incarnation | 2 | Process-unique actor identity; changes after actor retirement |
+| tick | 3 | Logical 50ms step index |
+| checksum | 4 | fixed64 canonical state checksum |
+| players | 5 | Repeated RoomPlayerState sorted by PlayerId |
+| checksum_version | 6 | Canonical hash format version, currently one |
+| position_limit | 7 | sint32 inclusive clamp on both coordinates |
+
+RoomPlayerState is `player_id1/session_id2/member_epoch3/x4/y5/last_seq6/last_dx7/last_dy8`.
+Coordinates and previous controls use sint32. Unlike an Envelope request ID,
+last_seq describes an input actually applied by the simulation. The snapshot
+includes all bounded room members, including those retained during disconnect
+grace. State contains integer coordinates, not wall-clock or floating-point
+integration. Version one uses FNV-1a64 over explicit little-endian integer fields;
+`RoomActor::checksum` defines the canonical ordering, including the position limit.
+It never hashes raw C++ object memory or unordered-container iteration order.
+
+Both snapshot and input RPCs enter a bounded room mailbox and complete at a
+20Hz owner cutoff. Inputs are applied before the response is encoded. Empty
+ticks still advance logical tick IDs; polling does not create extra ticks.
+Absolute deadlines allow bounded catch-up, then rebase the wall schedule without
+skipping logical tick IDs. Default catch-up is four ticks, with actor/member/input
+and journal limits configured separately from transport buffering.
+
+RoomInputStatus is UNSPECIFIED0, APPLIED1, DUPLICATE2, GAP3, STALE4, CONFLICT5,
+NOT_MEMBER6 or INVALID7. Only APPLIED changes coordinates. An identical retry of
+the last applied sequence is DUPLICATE and does not move twice; a gap may be
+retried after supplying the missing sequence. The same sequence with different
+controls conflicts. Conflicting copies in the same tick are rejected together.
+Use the typed result and returned state rather than assuming every completed RPC
+applied movement. Authentication, missing-room, actor and mailbox failures may
+instead use the existing Envelope Error contract.
+
+The server copies binding, logical SessionId and current room on the connection
+owner, then rechecks authority on the room owner. Transport epoch fences old
+connections; actor incarnation fences a recreated actor. The registry's per-session
+roomEpoch fences leave/rejoin even when the RoomId is unchanged. Actual room moves
+and leaves increment this epoch, idempotent operations do not, JWT recovery
+preserves it and a fresh password session starts at zero. Epoch exhaustion rejects
+a membership change before mutation. Obtain a new snapshot after changing rooms.
+
+Detached members retain coordinates and applied sequence during grace; authorized
+JWT recovery continues that same membership. Expiry or password replacement
+removes the old logical member. The service reconciles rosters on ticks and
+retires empty actors without depending on another client RPC. Tick callbacks,
+actors and bounded replay journals remain on one owner. Shutdown closes mailbox
+admission, cancels ticking and settles pending commands before executor teardown.
+
 ## Errors and request lifetime
 
 Error retains `code1(uint32)`, `message2(string)` and `causes3(repeated Error)`.
@@ -206,3 +282,5 @@ online_sweep records active/retained/rooms only when reclamation occurs.
 - `tests/shared/protocol/EnvelopeCodecTest.cpp`: frozen schema compatibility,
   additive matchmaking tags and forwarding through old protobuf peers.
 - `tests/match/`: queue/service/route and transport matching acceptance tests.
+- `tests/room/`: deterministic actor/replay, mailbox fencing and real transport
+  room input/snapshot acceptance tests.
