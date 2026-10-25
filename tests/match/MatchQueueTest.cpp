@@ -868,4 +868,86 @@ TEST(
         EXPECT_EQ(queue.metrics().retained, 0U);
     }
 }
+
+TEST(
+    MatchQueueTest, AdvanceExportsEveryNewPairOnceAndNoHistoricalPairs
+)
+{
+    MatchQueue queue(config());
+    for (std::uint64_t id = 1; id <= 4; ++id)
+        ASSERT_TRUE(
+            queue.join(player(id), session(id), 1, 1000, origin)
+        );
+    const auto pairs = queue.advance(origin);
+    ASSERT_EQ(pairs.size(), 2U);
+    std::vector<std::uint64_t> players;
+    for (const auto& pair : pairs)
+    {
+        EXPECT_EQ(pair.first.matchId, pair.second.matchId);
+        EXPECT_NE(pair.first.playerId, pair.second.playerId);
+        EXPECT_EQ(pair.first.state, TicketState::Assigned);
+        EXPECT_EQ(pair.second.opponent, pair.first.playerId);
+        EXPECT_TRUE(pair.first.active);
+        EXPECT_FALSE(pair.first.roomId);
+        players.push_back(pair.first.playerId.value());
+        players.push_back(pair.second.playerId.value());
+    }
+    std::sort(players.begin(), players.end());
+    EXPECT_EQ(players, (std::vector<std::uint64_t>{1, 2, 3, 4}));
+    EXPECT_TRUE(queue.advance(origin + 1ms).empty());
+    EXPECT_EQ(queue.metrics().matchedPairs, 2U);
+}
+
+TEST(
+    MatchQueueTest,
+    AllocatorRoomIsRetainedInBothReleasedTicketHistories
+)
+{
+    MatchQueue queue(config());
+    const auto a = queue
+                       .join(player(1), session(1), 10, 1000, origin);
+    const auto b = queue
+                       .join(player(2), session(2), 20, 1000, origin);
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(b);
+    const auto pairs = queue.advance(origin);
+    ASSERT_EQ(pairs.size(), 1U);
+    const arena::domain::RoomId room{
+        (UINT64_C(1) << 63) | pairs[0].first.matchId
+    };
+    ASSERT_TRUE(
+        queue.release(pairs[0].first.matchId, origin + 1ms, room)
+    );
+    EXPECT_FALSE(queue.release(
+        pairs[0].first.matchId,
+        origin + 2ms,
+        arena::domain::RoomId{99}
+    ));
+    for (const auto& saved : {a.value(), b.value()})
+    {
+        const auto status = queue.status(
+            saved.playerId,
+            saved.sessionId,
+            saved.ticketId,
+            origin + 3ms
+        );
+        ASSERT_TRUE(status);
+        EXPECT_EQ(status->roomId, room);
+        EXPECT_FALSE(status->active);
+        EXPECT_EQ(status->state, TicketState::Assigned);
+        const auto retry = queue.replay(
+            saved.playerId,
+            saved.sessionId,
+            saved.joinKey,
+            origin + 3ms
+        );
+        ASSERT_TRUE(retry);
+        EXPECT_EQ(retry->roomId, room);
+    }
+    EXPECT_EQ(queue.metrics().assignedPlayers, 0U);
+    EXPECT_EQ(queue.metrics().releasedPairs, 1U);
+    EXPECT_TRUE(queue.advance(origin + 1001ms).empty());
+    EXPECT_EQ(queue.metrics().retained, 0U);
+}
+
 } // namespace

@@ -1,6 +1,6 @@
 /** @file
- * @brief Builds authenticated login, presence, roster and matching
- * routes.
+ * @brief Builds authenticated login, lobby, matching and managed
+ * room lifecycle routes.
  */
 #pragma once
 
@@ -22,8 +22,8 @@ class RoomService;
  * issuer.
  * @param[in] registry Shared presence and bounded roster authority.
  * @param[in] matchmaking Optional management-owner matching service.
- * @param[in] rooms Optional fixed-owner room input and snapshot
- * service.
+ * @param[in] rooms Optional fixed-owner room input, readiness,
+ * recovery and immutable result service.
  */
 std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
     std::shared_ptr<const service::auth::LoginAuthenticator>,

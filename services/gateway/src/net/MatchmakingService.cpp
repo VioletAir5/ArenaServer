@@ -69,9 +69,6 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
         /// Dispatcher-owned completion safe to invoke from this
         /// owner.
         Completion complete;
-        /// Only new joins require the caller to be outside a gateway
-        /// roster.
-        bool requiresFreeRoom{false};
     };
 
     State(
@@ -79,12 +76,14 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
         RatingProvider provider,
         service::match::QueueConfig limits,
         std::chrono::milliseconds period,
-        std::size_t pendingLimit
+        std::size_t pendingLimit,
+        Allocation allocator
     )
         : online(std::move(authority))
         , ratings(std::move(provider))
         , interval(period)
         , maxPending(pendingLimit)
+        , allocate(std::move(allocator))
     {
         if (!online || !ratings ||
             interval <= std::chrono::milliseconds::zero() ||
@@ -118,6 +117,35 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
             throw std::logic_error(
                 "matchmaking requires management owner"
             );
+    }
+
+    /** @brief Defers final queue destruction until callbacks unwind.
+     */
+    struct QueueUse
+    {
+        State& owner;
+        explicit QueueUse(State& state) noexcept
+            : owner(state)
+        {
+            ++owner.queueDepth;
+        }
+        ~QueueUse()
+        {
+            if (!--owner.queueDepth && !owner.running)
+                owner.retireQueue();
+        }
+    };
+
+    /** @brief Retires domain tickets outside eligibility or
+     * allocation callbacks. */
+    void retireQueue() noexcept
+    {
+        if (!queue)
+            return;
+        finalMetrics = queue->metrics();
+        queue.reset();
+        finalMetrics.queued = finalMetrics.assignedPlayers =
+            finalMetrics.retained = 0;
     }
 
     /** @brief Keeps enqueue and executor retirement behind the same
@@ -175,24 +203,32 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
             // The deferred request must still belong to this exact
             // transport; existing tickets use logical SessionId so
             // JWT recovery can reuse them.
-            if (current && current->sessionId == command->session &&
+            if (running && queue && current &&
+                current->sessionId == command->session &&
                 current->connectionId ==
                     command->binding.connectionId &&
                 current->epoch == command->binding.epoch &&
                 current->presence == Presence::Online)
             {
-                if (current->roomId && command->requiresFreeRoom)
+                QueueUse use{*this};
+                result = command->operation(*queue);
+                if (allocate && result &&
+                    result->state ==
+                        service::match::TicketState::Assigned &&
+                    !result->active && !result->roomId)
                     result = std::unexpected(
-                        arena::protocol::ERR_BUSINESS_FAILURE
+                        arena::protocol::ERR_UNAVAILABLE
                     );
-                else
-                    result = command->operation(*queue);
             }
         }
         catch (...)
         {
             result = std::unexpected(arena::protocol::ERR_INTERNAL);
         }
+        if (!running)
+            result = std::unexpected(
+                arena::protocol::ERR_UNAVAILABLE
+            );
         deliver(std::move(command->complete), std::move(result));
     }
 
@@ -220,7 +256,74 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
         timer.reset();
         try
         {
-            queue->advance(service::match::Clock::now());
+            QueueUse use{*this};
+            const auto pairs = queue->advance(
+                service::match::Clock::now()
+            );
+            if (!running)
+                return;
+            if (allocate)
+            {
+                for (const auto& pair : pairs)
+                {
+                    std::optional<ManagedRoom> room;
+                    bool hosted = false;
+                    try
+                    {
+                        auto bound = online->allocateMatch(
+                            pair.first.matchId,
+                            {{{pair.first.playerId,
+                               pair.first.sessionId},
+                              {pair.second.playerId,
+                               pair.second.sessionId}}}
+                        );
+                        if (bound)
+                        {
+                            room = *bound;
+                            if (running)
+                                hosted = allocate(*room);
+                        }
+                    }
+                    catch (...)
+                    {
+                        // A failed owner callback cannot strand
+                        // registry membership.
+                    }
+                    if (room && (!hosted || !running))
+                    {
+                        online->finishMatch(
+                            room->roomId,
+                            room->matchId
+                        );
+                        hosted = false;
+                    }
+                    if (!running)
+                        return;
+                    queue->release(
+                        pair.first.matchId,
+                        service::match::Clock::now(),
+                        hosted ? std::optional(room->roomId)
+                               : std::nullopt
+                    );
+                    try
+                    {
+                        spdlog::info(
+                            "event=match_allocate match_id={} "
+                            "room_id={} "
+                            "allocated={} first_player={} "
+                            "second_player={}",
+                            pair.first.matchId,
+                            hosted ? room->roomId.value() : 0,
+                            hosted,
+                            pair.first.playerId.value(),
+                            pair.second.playerId.value()
+                        );
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
             const auto metrics = queue->metrics();
             const auto stamp = std::tuple{
                 metrics.joined,
@@ -276,13 +379,8 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
         }
         timer.reset();
         scheduler = {};
-        if (queue)
-        {
-            finalMetrics = queue->metrics();
-            queue.reset();
-            finalMetrics.queued = finalMetrics.assignedPlayers =
-                finalMetrics.retained = 0;
-        }
+        if (!queueDepth)
+            retireQueue();
         for (auto& [id, command] : abandoned)
         {
             (void)id;
@@ -304,6 +402,12 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
     const std::chrono::milliseconds interval;
     /// Hard limit for commands retained by the mailbox.
     const std::size_t maxPending;
+    /// Optional downstream owner hook; absence keeps standalone queue
+    /// behavior.
+    Allocation allocate;
+    /// Prevents callback-driven stop from destroying an active queue
+    /// frame.
+    std::size_t queueDepth{0};
     /// Only admission fields and pending commands require a mutex.
     std::mutex mutex;
     /// Admitted commands removed once by execute or stop.
@@ -344,7 +448,8 @@ MatchmakingService::MatchmakingService(
     RatingProvider ratings,
     service::match::QueueConfig config,
     std::chrono::milliseconds interval,
-    std::size_t maxPending
+    std::size_t maxPending,
+    Allocation allocate
 )
     : m_state(
           std::make_shared<State>(
@@ -352,7 +457,8 @@ MatchmakingService::MatchmakingService(
               std::move(ratings),
               config,
               interval,
-              maxPending
+              maxPending,
+              std::move(allocate)
           )
       )
 {
@@ -415,7 +521,24 @@ bool MatchmakingService::join(
                      service::match::Clock::now()
                  ))
                  return *retained;
+             const auto current = state->online->snapshot(player);
+             if (!state->running)
+                 return std::unexpected(
+                     arena::protocol::ERR_UNAVAILABLE
+                 );
+             if (!current || current->sessionId != session)
+                 return std::unexpected(
+                     arena::protocol::ERR_UNAUTHENTICATED
+                 );
+             if (current->roomId)
+                 return std::unexpected(
+                     arena::protocol::ERR_BUSINESS_FAILURE
+                 );
              const auto rating = state->ratings(player);
+             if (!state->running)
+                 return std::unexpected(
+                     arena::protocol::ERR_UNAVAILABLE
+                 );
              if (!rating)
                  return std::unexpected(
                      arena::protocol::ERR_UNAVAILABLE
@@ -431,8 +554,7 @@ bool MatchmakingService::join(
                  return std::unexpected(queueError(result.error()));
              return *result;
          },
-         std::move(complete),
-         true}
+         std::move(complete)}
     );
 }
 bool MatchmakingService::cancel(

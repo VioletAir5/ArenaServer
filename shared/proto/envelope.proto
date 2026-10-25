@@ -31,6 +31,12 @@ enum MsgId {
   MSG_ROOM_INPUT_RESPONSE = 51;
   MSG_ROOM_SNAPSHOT_REQUEST = 52;
   MSG_ROOM_SNAPSHOT_RESPONSE = 53;
+  MSG_ROOM_READY_REQUEST = 54;
+  MSG_ROOM_READY_RESPONSE = 55;
+  MSG_ROOM_STATUS_REQUEST = 56;
+  MSG_ROOM_STATUS_RESPONSE = 57;
+  MSG_SETTLEMENT_REQUEST = 58;
+  MSG_SETTLEMENT_RESPONSE = 59;
 }
 
 // Stable wire codes. Error.code stays uint32 for v1 descriptor
@@ -79,6 +85,12 @@ message Envelope {
     RoomInputResponse room_input_response = 51;
     RoomSnapshotRequest room_snapshot_request = 52;
     RoomSnapshotResponse room_snapshot_response = 53;
+    RoomReadyRequest room_ready_request = 54;
+    RoomReadyResponse room_ready_response = 55;
+    RoomStatusRequest room_status_request = 56;
+    RoomStatusResponse room_status_response = 57;
+    SettlementRequest settlement_request = 58;
+    SettlementResponse settlement_response = 59;
   }
 }
 
@@ -131,8 +143,8 @@ message SessionStateResponse {
   repeated RoomMember members = 5;
 }
 
-// A nonzero ID creates a bounded gateway roster if it does not exist.
-// This roster does not represent the planned battle RoomActor.
+// A nonzero ID creates a bounded manual roster if it does not exist.
+// Server-managed match rooms cannot be entered through this route.
 message RoomJoinRequest {
   uint64 room_id = 1;
 }
@@ -155,8 +167,8 @@ enum MatchTicketState {
 }
 
 // Server-owned ticket state. A detached session remains queued but is
-// not eligible for pairing until authorized recovery. No room is
-// allocated here.
+// not eligible for pairing until authorized recovery. An assigned room
+// is published only after the authoritative allocation commits.
 message MatchTicket {
   uint64 player_id = 1;
   uint64 ticket_id = 2;
@@ -170,6 +182,9 @@ message MatchTicket {
   uint64 opponent_player_id = 10;
   uint64 opponent_ticket_id = 11;
   bool active = 12;
+  // Zero when the service has no room allocator or allocation has not
+  // committed. Terminal ticket history retains a completed assignment.
+  uint64 room_id = 13;
 }
 
 // Retry the same nonzero key after an uncertain RPC outcome. Ratings
@@ -245,6 +260,82 @@ message RoomInputResponse {
 message RoomSnapshotRequest {}
 message RoomSnapshotResponse {
   RoomSnapshot state = 1;
+}
+
+enum RoomPhase {
+  ROOM_PHASE_UNSPECIFIED = 0;
+  ROOM_PHASE_FORMING = 1;
+  ROOM_PHASE_READY = 2;
+  ROOM_PHASE_PLAYING = 3;
+  ROOM_PHASE_SETTLING = 4;
+  ROOM_PHASE_FINISHED = 5;
+}
+
+enum SettlementReason {
+  SETTLEMENT_REASON_UNSPECIFIED = 0;
+  SETTLEMENT_REASON_COMPLETED = 1;
+  SETTLEMENT_REASON_MEMBER_UNAVAILABLE = 2;
+  SETTLEMENT_REASON_READY_TIMEOUT = 3;
+}
+
+// Logical membership is stable across transport recovery. Readiness
+// and presence are sampled by the room owner with the returned state.
+message RoomReadyMember {
+  uint64 player_id = 1;
+  uint64 session_id = 2;
+  uint64 member_epoch = 3;
+  bool ready = 4;
+  Presence presence = 5;
+}
+
+// Deterministic result stub: winner zero means draw. No currency,
+// ranking or persistent account effect is implied by this result.
+message SettlementResult {
+  uint64 result_id = 1;
+  uint64 match_id = 2;
+  uint64 room_id = 3;
+  uint64 final_tick = 4;
+  fixed64 final_checksum = 5;
+  SettlementReason reason = 6;
+  uint64 winner_player_id = 7;
+  repeated RoomPlayerState players = 8;
+}
+
+// Recovery entry: the snapshot carries actor/membership fences and
+// each player's last applied input sequence. A retained finished result
+// is queryable by the same logical session after roster release.
+message RoomStatus {
+  RoomSnapshot snapshot = 1;
+  uint64 match_id = 2;
+  RoomPhase phase = 3;
+  repeated RoomReadyMember members = 4;
+  uint64 started_tick = 5;
+  uint64 finished_tick = 6;
+  uint64 played_ticks = 7;
+  uint64 duration_ticks = 8;
+  SettlementResult settlement = 9;
+}
+
+// Fences a readiness change to the observed actor and membership.
+message RoomReadyRequest {
+  bool ready = 1;
+  uint64 actor_incarnation = 2;
+  uint64 membership_epoch = 3;
+}
+message RoomReadyResponse {
+  RoomStatus state = 1;
+}
+message RoomStatusRequest {}
+message RoomStatusResponse {
+  RoomStatus state = 1;
+}
+// Nonzero server match identity; authorization is participant/session
+// scoped, including retained results after room unbinding.
+message SettlementRequest {
+  uint64 match_id = 1;
+}
+message SettlementResponse {
+  SettlementResult state = 1;
 }
 
 message Ping {

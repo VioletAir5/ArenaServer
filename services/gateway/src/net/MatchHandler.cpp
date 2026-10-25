@@ -65,6 +65,9 @@ void encodeTicket(
         snapshot.opponentTicket ? snapshot.opponentTicket->value() : 0
     );
     ticket.set_active(snapshot.active);
+    ticket.set_room_id(
+        snapshot.roomId ? snapshot.roomId->value() : 0
+    );
 }
 
 void registerRoute(

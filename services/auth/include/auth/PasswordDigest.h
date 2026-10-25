@@ -28,6 +28,19 @@ public:
     ) const = 0;
 };
 
+/** @brief Random-salt PBKDF2-HMAC-SHA256 with bounded work and
+ * constant-time equality. */
+class Pbkdf2PasswordDigest final : public PasswordDigest
+{
+public:
+    std::expected<std::string, AuthError>
+        hash(std::string_view) const override;
+    std::expected<bool, AuthError>
+        verify(std::string_view, std::string_view) const override;
+    /** @brief Validates the algorithm version, rounds and exact
+     * salt/key encoding. */
+    static bool validEncoding(std::string_view);
+};
 class UnavailablePasswordDigest final : public PasswordDigest
 {
 public:

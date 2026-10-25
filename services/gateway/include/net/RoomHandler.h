@@ -1,5 +1,5 @@
 /** @file
- * @brief Registers authenticated room input and snapshot routes.
+ * @brief Registers authenticated room controls, recovery and results.
  */
 #pragma once
 
@@ -16,8 +16,8 @@ class RoomService;
  * @param[in] routes Unsealed application routes.
  * @param[in] sessions Authority used to capture current logical
  * identity/room.
- * @param[in] rooms Bounded fixed-owner mailbox, started by the
- * application.
+ * @param[in] rooms Bounded fixed-owner mailbox for input, readiness,
+ * current/recovered lifecycle state and retained settlement queries.
  */
 void registerRoomRoutes(
     MessageRegistry& routes,

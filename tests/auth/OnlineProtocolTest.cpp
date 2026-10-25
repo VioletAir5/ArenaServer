@@ -10,6 +10,7 @@
 #include "net/LoginHandler.h"
 #include "net/PacketBuffer.h"
 #include "net/PreLoginHandshake.h"
+#include "net/RoomService.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
 
@@ -252,6 +253,25 @@ wire::Envelope leaveRequest()
     request.set_msg_id(wire::MSG_ROOM_LEAVE_REQUEST);
     request.mutable_room_leave_request();
     return request;
+}
+
+std::vector<wire::Envelope> lifecycleRequests()
+{
+    wire::Envelope ready;
+    ready.set_request_id(104);
+    ready.set_msg_id(wire::MSG_ROOM_READY_REQUEST);
+    ready.mutable_room_ready_request()->set_ready(true);
+    ready.mutable_room_ready_request()->set_actor_incarnation(1);
+    ready.mutable_room_ready_request()->set_membership_epoch(1);
+    wire::Envelope status;
+    status.set_request_id(105);
+    status.set_msg_id(wire::MSG_ROOM_STATUS_REQUEST);
+    status.mutable_room_status_request();
+    wire::Envelope settlement;
+    settlement.set_request_id(106);
+    settlement.set_msg_id(wire::MSG_SETTLEMENT_REQUEST);
+    settlement.mutable_settlement_request()->set_match_id(7);
+    return {ready, status, settlement};
 }
 
 const wire::RoomMember*
@@ -634,10 +654,95 @@ TEST(
     for (const auto id :
          {wire::MSG_SESSION_STATE_RESPONSE,
           wire::MSG_ROOM_JOIN_RESPONSE,
-          wire::MSG_ROOM_LEAVE_RESPONSE})
+          wire::MSG_ROOM_LEAVE_RESPONSE,
+          wire::MSG_ROOM_READY_RESPONSE,
+          wire::MSG_ROOM_STATUS_RESPONSE,
+          wire::MSG_SETTLEMENT_RESPONSE})
         EXPECT_THROW(
             registry.registerHandler(id, [](auto, auto) {}),
             std::invalid_argument
         );
+}
+
+TEST(
+    OnlineProtocolDirectionTest,
+    LifecycleRoutesRejectWrongBusinessResponseTypes
+)
+{
+    for (const auto& request : lifecycleRequests())
+    {
+        auto registry = std::make_shared<MessageRegistry>();
+        registry->registerHandler(
+            static_cast<MsgId>(request.msg_id()),
+            [](auto, auto complete)
+            {
+                wire::Envelope reply;
+                reply.mutable_pong();
+                complete(std::move(reply));
+            },
+            {false}
+        );
+        registry->seal();
+        Client client(1, registry);
+        client.send(request);
+        EXPECT_EQ(client.reply().error().code(), wire::ERR_INTERNAL);
+    }
+}
+
+TEST(
+    OnlineProtocolDirectionTest,
+    LifecycleRoutesRejectMismatchedRequestPayloads
+)
+{
+    auto registry = std::make_shared<MessageRegistry>();
+    bool called = false;
+    for (const auto& request : lifecycleRequests())
+        registry->registerHandler(
+            static_cast<MsgId>(request.msg_id()),
+            [&called](auto, auto) { called = true; },
+            {false}
+        );
+    registry->seal();
+    Client client(1, registry);
+    for (auto request : lifecycleRequests())
+    {
+        request.mutable_ping();
+        client.send(request);
+        EXPECT_EQ(
+            client.reply().error().code(),
+            wire::ERR_INVALID_REQUEST
+        );
+    }
+    EXPECT_FALSE(called);
+}
+
+TEST_F(
+    OnlineProtocolTest,
+    ProductionLifecycleRoutesRequireCurrentAuthentication
+)
+{
+    auth::JwtConfig jwt;
+    jwt.key = "0123456789abcdef0123456789abcdef";
+    jwt.now = [] { return 1700000000LL; };
+    auto rooms = std::make_shared<RoomService>(registry);
+    auto production = makeLoginMessageRegistry(
+        std::make_shared<auth::LoginAuthenticator>(
+            std::make_shared<Accounts>(),
+            std::make_shared<Digest>()
+        ),
+        std::make_shared<auth::JwtTokens>(std::move(jwt)),
+        registry,
+        {},
+        rooms
+    );
+    for (const auto& request : lifecycleRequests())
+    {
+        Client client(1, production);
+        client.send(request);
+        EXPECT_EQ(
+            client.reply().error().code(),
+            wire::ERR_UNAUTHENTICATED
+        );
+    }
 }
 } // namespace

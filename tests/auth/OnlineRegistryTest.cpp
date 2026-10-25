@@ -836,5 +836,325 @@ TEST_F(
     EXPECT_EQ(copied.presence, Presence::Online);
     registry = std::make_shared<OnlineRegistry>(configuration());
 }
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    MatchAllocationAtomicallyBindsSortedCohortAndRetries
+)
+{
+    auto alice = login(1, 1), bob = login(2, 2),
+         outsider = login(3, 3);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(outsider);
+    const std::array<MatchParticipant, 2> participants{
+        {{bob->snapshot.playerId, bob->snapshot.sessionId},
+         {alice->snapshot.playerId, alice->snapshot.sessionId}}
+    };
+    auto allocated = registry->allocateMatch(17, participants);
+    ASSERT_TRUE(allocated);
+    EXPECT_EQ(allocated->members[0].playerId, PlayerId{1});
+    EXPECT_EQ(allocated->members[1].playerId, PlayerId{2});
+    EXPECT_EQ(allocated->members[0].roomEpoch, 1U);
+    EXPECT_NE(allocated->roomId.value() & (UINT64_C(1) << 63), 0U);
+    for (const auto& grant : {alice.value(), bob.value()})
+    {
+        const auto state = registry->state(grant.lease->binding);
+        ASSERT_TRUE(state);
+        EXPECT_EQ(state->session.roomId, allocated->roomId);
+        EXPECT_EQ(state->members.size(), 2U);
+    }
+    auto reversed = participants;
+    std::swap(reversed[0], reversed[1]);
+    auto retry = registry->allocateMatch(17, reversed);
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(retry->roomId, allocated->roomId);
+    EXPECT_EQ(retry->members, allocated->members);
+    EXPECT_EQ(registry->roomCount(), 1U);
+    EXPECT_FALSE(registry->allocateMatch(
+        17,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{3}, outsider->snapshot.sessionId}}}
+    ));
+    EXPECT_FALSE(registry->snapshot(PlayerId{3})->roomId);
+}
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    ClientCannotReserveHijackOrEscapeManagedRoom
+)
+{
+    auto alice = login(1, 1), bob = login(2, 2),
+         outsider = login(3, 3);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(outsider);
+    const auto future = registry->joinRoom(
+        outsider->lease->binding,
+        RoomId{(UINT64_C(1) << 63) | 45}
+    );
+    ASSERT_FALSE(future);
+    EXPECT_EQ(future.error(), OnlineError::InvalidRoom);
+    auto room = registry->allocateMatch(
+        45,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{2}, bob->snapshot.sessionId}}}
+    );
+    ASSERT_TRUE(room);
+    for (const auto& binding :
+         {alice->lease->binding, outsider->lease->binding})
+    {
+        const auto joined = registry->joinRoom(binding, room->roomId);
+        ASSERT_FALSE(joined);
+        EXPECT_EQ(joined.error(), OnlineError::InvalidRoom);
+    }
+    EXPECT_EQ(
+        registry->leaveRoom(alice->lease->binding).error(),
+        OnlineError::InvalidRoom
+    );
+    EXPECT_EQ(
+        registry->joinRoom(alice->lease->binding, RoomId{7}).error(),
+        OnlineError::InvalidRoom
+    );
+    EXPECT_EQ(registry->roomMembers(room->roomId).size(), 2U);
+    EXPECT_FALSE(registry->snapshot(PlayerId{3})->roomId);
+    EXPECT_FALSE(registry->finishMatch(room->roomId, 46));
+    EXPECT_TRUE(registry->finishMatch(room->roomId, 45));
+    EXPECT_FALSE(registry->finishMatch(room->roomId, 45));
+    EXPECT_EQ(registry->snapshot(PlayerId{1})->roomEpoch, 2U);
+    EXPECT_FALSE(registry->snapshot(PlayerId{1})->roomId);
+    EXPECT_TRUE(registry->joinRoom(alice->lease->binding, RoomId{7}));
+}
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    DetachedCohortResumesSameAllocatedMembership
+)
+{
+    auto alice = login(1, 1), bob = login(2, 2);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    const auto resume = claims(*alice);
+    alice->lease->release();
+    auto room = registry->allocateMatch(
+        11,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{2}, bob->snapshot.sessionId}}}
+    );
+    ASSERT_TRUE(room);
+    EXPECT_EQ(
+        registry->roomMembers(room->roomId)[0].presence,
+        Presence::Detached
+    );
+    auto recovered = registry->install(
+        PlayerId{1},
+        3,
+        resume,
+        *tokens,
+        [] {}
+    );
+    ASSERT_TRUE(recovered);
+    EXPECT_EQ(
+        recovered->snapshot.sessionId,
+        alice->snapshot.sessionId
+    );
+    EXPECT_EQ(recovered->snapshot.roomId, room->roomId);
+    EXPECT_EQ(
+        recovered->snapshot.roomEpoch,
+        room->members[0].roomEpoch
+    );
+    EXPECT_EQ(
+        registry->managedRoom(room->roomId)->members,
+        room->members
+    );
+}
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    ExpiredParticipantCannotPartiallyBindPeer
+)
+{
+    auto alice = login(1, 1), bob = login(2, 2);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    alice->lease->release();
+    steadyMilliseconds = 100;
+    const auto result = registry->allocateMatch(
+        12,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{2}, bob->snapshot.sessionId}}}
+    );
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), OnlineError::NotCurrent);
+    EXPECT_FALSE(registry->snapshot(PlayerId{1}));
+    EXPECT_FALSE(registry->snapshot(PlayerId{2})->roomId);
+    EXPECT_EQ(registry->roomCount(), 0U);
+}
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    ManagedCohortOutlivesPresenceUntilOwnerCleanup
+)
+{
+    auto alice = login(1, 1), bob = login(2, 2);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    auto room = registry->allocateMatch(
+        13,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{2}, bob->snapshot.sessionId}}}
+    );
+    ASSERT_TRUE(room);
+    alice->lease->release();
+    bob->lease->release();
+    steadyMilliseconds = 100;
+    EXPECT_EQ(registry->sweep(), 2U);
+    EXPECT_TRUE(registry->roomMembers(room->roomId).empty());
+    EXPECT_EQ(registry->roomCount(), 1U);
+    const auto metadata = registry->managedRoom(room->roomId);
+    ASSERT_TRUE(metadata);
+    EXPECT_EQ(metadata->members, room->members);
+    EXPECT_TRUE(registry->finishMatch(room->roomId, room->matchId));
+    EXPECT_EQ(registry->roomCount(), 0U);
+    EXPECT_FALSE(registry->managedRoom(room->roomId));
+}
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    OldMatchCleanupCannotClearReplacementSessionRoom
+)
+{
+    auto alice = login(1, 1), bob = login(2, 2);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    auto room = registry->allocateMatch(
+        14,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{2}, bob->snapshot.sessionId}}}
+    );
+    ASSERT_TRUE(room);
+    auto replacement = login(1, 3);
+    ASSERT_TRUE(replacement);
+    ASSERT_TRUE(
+        registry->joinRoom(replacement->lease->binding, RoomId{7})
+    );
+    EXPECT_TRUE(registry->finishMatch(room->roomId, room->matchId));
+    EXPECT_EQ(registry->snapshot(PlayerId{1})->roomId, RoomId{7});
+    EXPECT_FALSE(registry->snapshot(PlayerId{2})->roomId);
+    EXPECT_EQ(registry->roomCount(), 1U);
+    EXPECT_FALSE(registry->allocateMatch(
+        15,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{2}, bob->snapshot.sessionId}}}
+    ));
+}
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    RoomAndMemberLimitsRejectWholeMatchWithoutMutation
+)
+{
+    auto settings = configuration();
+    settings.maxRoomMembers = 1;
+    registry = std::make_shared<OnlineRegistry>(settings);
+    auto alice = login(1, 1), bob = login(2, 2);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    EXPECT_EQ(
+        registry
+            ->allocateMatch(
+                16,
+                {{{PlayerId{1}, alice->snapshot.sessionId},
+                  {PlayerId{2}, bob->snapshot.sessionId}}}
+            )
+            .error(),
+        OnlineError::RoomFull
+    );
+    EXPECT_FALSE(registry->snapshot(PlayerId{1})->roomId);
+    EXPECT_FALSE(registry->snapshot(PlayerId{2})->roomId);
+    settings = configuration();
+    settings.maxRooms = 1;
+    registry = std::make_shared<OnlineRegistry>(settings);
+    alice = login(1, 1);
+    bob = login(2, 2);
+    auto third = login(3, 3);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(third);
+    ASSERT_TRUE(registry->joinRoom(third->lease->binding, RoomId{7}));
+    EXPECT_EQ(
+        registry
+            ->allocateMatch(
+                16,
+                {{{PlayerId{1}, alice->snapshot.sessionId},
+                  {PlayerId{2}, bob->snapshot.sessionId}}}
+            )
+            .error(),
+        OnlineError::Capacity
+    );
+    EXPECT_FALSE(registry->snapshot(PlayerId{1})->roomId);
+    EXPECT_FALSE(registry->snapshot(PlayerId{2})->roomId);
+    ASSERT_TRUE(registry->leaveRoom(third->lease->binding));
+    EXPECT_TRUE(registry->allocateMatch(
+        16,
+        {{{PlayerId{1}, alice->snapshot.sessionId},
+          {PlayerId{2}, bob->snapshot.sessionId}}}
+    ));
+}
+
+TEST_F(
+    OnlineRegistryPresenceTest,
+    CompetingAllocationsCannotSplitOneParticipant
+)
+{
+    auto alice = login(1, 1), bob = login(2, 2),
+         charlie = login(3, 3);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(charlie);
+    std::barrier gate(3);
+    std::optional<std::expected<ManagedRoom, OnlineError>> first,
+        second;
+    std::thread left(
+        [&]
+        {
+            gate.arrive_and_wait();
+            first.emplace(registry->allocateMatch(
+                21,
+                {{{PlayerId{1}, alice->snapshot.sessionId},
+                  {PlayerId{2}, bob->snapshot.sessionId}}}
+            ));
+        }
+    );
+    std::thread right(
+        [&]
+        {
+            gate.arrive_and_wait();
+            second.emplace(registry->allocateMatch(
+                22,
+                {{{PlayerId{1}, alice->snapshot.sessionId},
+                  {PlayerId{3}, charlie->snapshot.sessionId}}}
+            ));
+        }
+    );
+    gate.arrive_and_wait();
+    left.join();
+    right.join();
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    ASSERT_NE(first->has_value(), second->has_value());
+    const auto& winner = first->has_value() ? first->value()
+                                            : second->value();
+    EXPECT_EQ(registry->roomMembers(winner.roomId).size(), 2U);
+    EXPECT_EQ(registry->snapshot(PlayerId{1})->roomId, winner.roomId);
+    EXPECT_EQ(registry->roomCount(), 1U);
+    EXPECT_TRUE(registry->finishMatch(winner.roomId, winner.matchId));
+    for (const auto id : {1, 2, 3})
+        EXPECT_FALSE(
+            registry
+                ->snapshot(PlayerId{static_cast<std::uint64_t>(id)})
+                ->roomId
+        );
+}
 } // namespace
 } // namespace service::gateway

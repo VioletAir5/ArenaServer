@@ -15,6 +15,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include "arena/domain/Battle.h"
+#include "arena/domain/Room.h"
+
 namespace service::gateway
 {
 namespace
@@ -48,6 +51,39 @@ std::uint64_t nextIncarnation()
     return previous + 1;
 }
 
+/** @brief Uses stable diagnostic names independent of protobuf enum
+ * numbering. */
+std::string_view phaseName(RoomPhase phase) noexcept
+{
+    switch (phase)
+    {
+    case RoomPhase::Forming:
+        return "Forming";
+    case RoomPhase::Ready:
+        return "Ready";
+    case RoomPhase::Playing:
+        return "Playing";
+    case RoomPhase::Settling:
+        return "Settling";
+    case RoomPhase::Finished:
+        return "Finished";
+    }
+    return "Unknown";
+}
+std::string_view reasonName(SettlementReason reason) noexcept
+{
+    switch (reason)
+    {
+    case SettlementReason::Completed:
+        return "Completed";
+    case SettlementReason::MemberUnavailable:
+        return "MemberUnavailable";
+    case SettlementReason::ReadyTimeout:
+        return "ReadyTimeout";
+    }
+    return "Unknown";
+}
+
 /** @brief Prevents monotonic deadline overflow before changing timer
  * state. */
 ConnectionClock::time_point after(
@@ -70,7 +106,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         Command(
             SessionBinding current,
             arena::domain::SessionId logical,
-            arena::domain::RoomId target
+            std::optional<arena::domain::RoomId> target = {}
         )
             : binding(current)
             , session(logical)
@@ -82,7 +118,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         SessionBinding binding;
         /// Logical session and roster room captured with the request.
         arena::domain::SessionId session;
-        arena::domain::RoomId room;
+        std::optional<arena::domain::RoomId> room;
         /// Actor and membership fences supplied from an earlier room
         /// snapshot.
         std::uint64_t incarnation{0}, membershipEpoch{0}, sequence{0};
@@ -92,14 +128,58 @@ struct RoomService::State : std::enable_shared_from_this<State>
         /// Exactly one completion is set; neither retains connection
         /// state.
         SnapshotCompletion snapshotComplete;
+        StatusCompletion statusComplete;
+        SettlementCompletion settlementComplete;
+        std::uint64_t matchId{0};
+        bool isReady{false}, readyValue{false};
         InputCompletion inputComplete;
         /// Owner-produced replies are delivered after releasing all
         /// actor references.
         std::optional<SnapshotResult> snapshotResult;
         std::optional<InputResult> inputResult;
+        std::optional<StatusResult> statusResult;
+        std::optional<SettlementResult> settlementResult;
         ErrorCode error{arena::protocol::ERR_INTERNAL};
         bool authorized{false};
     };
+
+    struct ManagedMatch
+    {
+        explicit ManagedMatch(ManagedRoom allocation)
+            : allocation(std::move(allocation))
+            , room(this->allocation.roomId)
+            , battle(
+                  arena::domain::BattleId{this->allocation.matchId},
+                  this->allocation.roomId
+              )
+        {
+        }
+        ManagedRoom allocation;
+        arena::domain::Room room;
+        arena::domain::Battle battle;
+        RoomPhase phase{RoomPhase::Forming};
+        std::array<bool, 2> ready{false, false};
+        std::array<Presence, 2> presence{
+            Presence::Online, Presence::Online
+        };
+        std::uint64_t waitedTicks{0}, startedTick{0}, finishedTick{0},
+            playedTicks{0};
+        std::optional<RoomSettlement> result;
+        std::optional<ConnectionClock::time_point> expires;
+    };
+
+    /** @brief Applies trusted owner events through the existing
+     * domain FSM. */
+    template <class Entity>
+    static void
+    transition(Entity& entity, typename Entity::Event event)
+    {
+        const auto current = entity.snapshot();
+        if (!current || !entity.apply(event, current->revision))
+            throw std::logic_error(
+                "invalid managed room lifecycle transition"
+            );
+    }
 
     /** @brief Fixes ownership and validates finite mailbox and actor
      * policies. */
@@ -116,7 +196,13 @@ struct RoomService::State : std::enable_shared_from_this<State>
             !config.actor.maxInputsPerTick ||
             !config.actor.historyTicks ||
             config.actor.positionLimit <= 0 ||
-            config.maxPendingPerRoom > config.actor.maxInputsPerTick)
+            config.maxPendingPerRoom >
+                config.actor.maxInputsPerTick ||
+            !config.battleDurationTicks ||
+            !config.readyTimeoutTicks ||
+            config.resultRetention <=
+                std::chrono::milliseconds::zero() ||
+            config.resultRetention > std::chrono::hours(1))
             throw std::invalid_argument(
                 "invalid room service configuration"
             );
@@ -141,24 +227,29 @@ struct RoomService::State : std::enable_shared_from_this<State>
             return false;
         try
         {
-            auto [count, inserted] = pendingRooms.try_emplace(
-                command.room,
-                0
-            );
-            (void)inserted;
-            if (count->second >= config.maxPendingPerRoom)
-                return false;
-            try
+            if (command.room)
             {
+                auto [count, inserted] = pendingRooms.try_emplace(
+                    *command.room,
+                    0
+                );
+                (void)inserted;
+                if (count->second >= config.maxPendingPerRoom)
+                    return false;
+                try
+                {
+                    pending.push_back(std::move(command));
+                }
+                catch (...)
+                {
+                    if (!count->second)
+                        pendingRooms.erase(count);
+                    throw;
+                }
+                ++count->second;
+            }
+            else
                 pending.push_back(std::move(command));
-            }
-            catch (...)
-            {
-                if (!count->second)
-                    pendingRooms.erase(count);
-                throw;
-            }
-            ++count->second;
             return true;
         }
         catch (...)
@@ -178,6 +269,20 @@ struct RoomService::State : std::enable_shared_from_this<State>
                     command.snapshotResult
                         ? std::move(*command.snapshotResult)
                         : SnapshotResult(
+                              std::unexpected(command.error)
+                          )
+                );
+            else if (command.statusComplete)
+                command.statusComplete(
+                    command.statusResult
+                        ? std::move(*command.statusResult)
+                        : StatusResult(std::unexpected(command.error))
+                );
+            else if (command.settlementComplete)
+                command.settlementComplete(
+                    command.settlementResult
+                        ? std::move(*command.settlementResult)
+                        : SettlementResult(
                               std::unexpected(command.error)
                           )
                 );
@@ -211,7 +316,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
             member->epoch == command.binding.epoch &&
             member->presence == Presence::Online)
         {
-            if (command.inputComplete &&
+            if ((command.inputComplete || command.isReady) &&
                 member->roomEpoch != command.membershipEpoch)
             {
                 command.error = arena::protocol::ERR_BUSINESS_FAILURE;
@@ -246,6 +351,555 @@ struct RoomService::State : std::enable_shared_from_this<State>
         }
     }
 
+    /** @brief Checks a current transport before looking up retained
+     * logical results. */
+    std::optional<OnlineSnapshot> current(Command& command)
+    {
+        auto value = online->snapshot(command.binding.playerId);
+        if (value && value->sessionId == command.session &&
+            value->connectionId == command.binding.connectionId &&
+            value->epoch == command.binding.epoch &&
+            value->presence == Presence::Online)
+            return value;
+        command.error = arena::protocol::ERR_UNAUTHENTICATED;
+        return {};
+    }
+
+    static bool
+    participant(const ManagedMatch& match, const Command& command)
+    {
+        return std::any_of(
+            match.allocation.members.begin(),
+            match.allocation.members.end(),
+            [&](const auto& member)
+            {
+                return member.playerId == command.binding.playerId &&
+                       member.sessionId == command.session;
+            }
+        );
+    }
+
+    RoomStatus
+    view(arena::domain::RoomId id, const ManagedMatch& match) const
+    {
+        RoomStatus result{
+            actors.at(id)->snapshot(),
+            match.allocation.matchId,
+            match.phase,
+            {},
+            match.startedTick,
+            match.finishedTick,
+            match.playedTicks,
+            config.battleDurationTicks,
+            match.result
+        };
+        for (std::size_t i = 0; i != match.allocation.members.size();
+             ++i)
+        {
+            const auto& member = match.allocation.members[i];
+            result.members.push_back(
+                {{member.playerId,
+                  member.sessionId,
+                  member.roomEpoch},
+                 match.ready[i],
+                 match.presence[i]}
+            );
+        }
+        return result;
+    }
+
+    /** @brief Routes recovery queries on owner; producer threads
+     * retain only values. */
+    void resolve(Command& command)
+    {
+        if (command.room)
+            return;
+        const auto auth = current(command);
+        if (!running || !auth)
+            return;
+        if (command.settlementComplete)
+        {
+            for (const auto& [id, match] : matches)
+            {
+                (void)id;
+                if (match->allocation.matchId == command.matchId &&
+                    participant(*match, command) && match->result)
+                {
+                    command.settlementResult.emplace(*match->result);
+                    return;
+                }
+            }
+            command.error = arena::protocol::ERR_BUSINESS_FAILURE;
+            return;
+        }
+        if (auth->roomId)
+        {
+            const auto found = matches.find(*auth->roomId);
+            if (found != matches.end() &&
+                participant(*found->second, command))
+            {
+                command.room = *auth->roomId;
+                return;
+            }
+        }
+        const ManagedMatch* latest = nullptr;
+        std::optional<arena::domain::RoomId> latestId;
+        for (const auto& [id, match] : matches)
+            if (match->result && participant(*match, command) &&
+                (!latest || match->allocation.matchId >
+                                latest->allocation.matchId))
+            {
+                latest = match.get();
+                latestId = id;
+            }
+        if (latest)
+            command.statusResult.emplace(view(*latestId, *latest));
+        else
+            command.error = arena::protocol::ERR_BUSINESS_FAILURE;
+    }
+
+    /** @brief Emits correlatable lifecycle values without allowing
+     * logging to affect play. */
+    void logPhase(
+        arena::domain::RoomId id, const ManagedMatch& match
+    ) noexcept
+    {
+        try
+        {
+            const auto state = actors.at(id)->snapshot();
+            spdlog::info(
+                "event=room_phase match_id={} room_id={} phase={} "
+                "tick={} played_ticks={} checksum={}",
+                match.allocation.matchId,
+                id.value(),
+                phaseName(match.phase),
+                state.tick,
+                match.playedTicks,
+                state.checksum
+            );
+        }
+        catch (...)
+        {
+        }
+    }
+
+    /** @brief Prepares a result once before retiring registry
+     * membership. */
+    void settle(
+        arena::domain::RoomId id,
+        ManagedMatch& match,
+        SettlementReason reason
+    )
+    {
+        if (match.result)
+            return;
+        const auto snapshot = actors.at(id)->snapshot();
+        RoomSettlement result{
+            match.allocation.matchId,
+            match.allocation.matchId,
+            id,
+            snapshot.tick,
+            snapshot.checksum,
+            reason,
+            0,
+            snapshot.players
+        };
+        if (match.phase == RoomPhase::Playing)
+        {
+            transition(
+                match.battle,
+                reason == SettlementReason::Completed
+                    ? arena::domain::Battle::Event::Finish
+                    : arena::domain::Battle::Event::Abort
+            );
+            if (reason == SettlementReason::Completed)
+                transition(
+                    match.room,
+                    arena::domain::Room::Event::BattleEnded
+                );
+        }
+        else
+            transition(
+                match.battle,
+                arena::domain::Battle::Event::Abort
+            );
+        transition(
+            match.room,
+            arena::domain::Room::Event::RequestClose
+        );
+        match.result.emplace(std::move(result));
+        match.finishedTick = snapshot.tick;
+        match.phase = RoomPhase::Settling;
+        if (reason == SettlementReason::Completed)
+            ++counts.battlesCompleted;
+        else
+            ++counts.battlesAborted;
+        logPhase(id, match);
+        if (!running)
+            return;
+        try
+        {
+            spdlog::info(
+                "event=room_result result_id={} match_id={} "
+                "room_id={} reason={} final_tick={} checksum={}",
+                match.result->resultId,
+                match.allocation.matchId,
+                id.value(),
+                reasonName(reason),
+                snapshot.tick,
+                snapshot.checksum
+            );
+        }
+        catch (...)
+        {
+        }
+    }
+
+    /** @brief Freezes the completed simulation before releasing both
+     * memberships. */
+    void finish(arena::domain::RoomId id, ManagedMatch& match)
+    {
+        // No callback retains this reference. Registry release has no
+        // network side effect.
+        const auto expiry = after(
+            config.now(),
+            config.resultRetention
+        );
+        online->finishMatch(id, match.allocation.matchId);
+        if (!running)
+            return;
+        transition(
+            match.room,
+            arena::domain::Room::Event::CloseCompleted
+        );
+        finishRecording(id);
+        match.phase = RoomPhase::Finished;
+        match.expires = expiry;
+        logPhase(id, match);
+    }
+
+    /** @brief Shares archive/metrics behavior between manual and
+     * managed actors. */
+    void committed(
+        arena::domain::RoomId id, service::room::TickResult& result
+    )
+    {
+        if (const auto recording = recordings.find(id);
+            recording != recordings.end())
+            recording->second->append(std::move(result.record));
+        ++counts.ticks;
+        for (const auto status : result.results)
+        {
+            if (status == service::room::InputStatus::Applied)
+                ++counts.applied;
+            else if (status == service::room::InputStatus::Duplicate)
+                ++counts.duplicates;
+            else
+                ++counts.rejected;
+        }
+        try
+        {
+            spdlog::info(
+                "event=room_tick room_id={} incarnation={} tick={} "
+                "checksum={}",
+                id.value(),
+                result.snapshot.incarnation,
+                result.snapshot.tick,
+                result.snapshot.checksum
+            );
+        }
+        catch (...)
+        {
+        }
+    }
+
+    /** @brief Runs managed lifecycle and kernel steps without
+     * client-driven finish. */
+    void stepManaged(
+        arena::domain::RoomId id,
+        ManagedMatch& match,
+        const std::vector<OnlineSnapshot>& roster,
+        const std::vector<std::size_t>& commands,
+        std::vector<Command>& batch
+    )
+    {
+        if (match.phase == RoomPhase::Settling)
+            finish(id, match);
+        if (!running)
+            return;
+        if (match.phase == RoomPhase::Finished)
+        {
+            for (const auto index : commands)
+            {
+                auto& command = batch[index];
+                const auto auth = current(command);
+                if (!running)
+                    return;
+                if (auth && command.statusComplete &&
+                    !command.isReady && participant(match, command))
+                    command.statusResult.emplace(view(id, match));
+                else if (auth)
+                    command.error = arena::protocol::
+                        ERR_BUSINESS_FAILURE;
+            }
+            return;
+        }
+        bool complete = true;
+        std::vector<service::room::Member> members;
+        for (std::size_t i = 0; i != match.allocation.members.size();
+             ++i)
+        {
+            const auto& expected = match.allocation.members[i];
+            members.push_back(
+                {expected.playerId,
+                 expected.sessionId,
+                 expected.roomEpoch}
+            );
+            const auto found = std::find_if(
+                roster.begin(),
+                roster.end(),
+                [&](const auto& actual)
+                {
+                    return actual.playerId == expected.playerId &&
+                           actual.sessionId == expected.sessionId &&
+                           actual.roomEpoch == expected.roomEpoch;
+                }
+            );
+            if (found == roster.end())
+            {
+                complete = false;
+                match.presence[i] = Presence::Detached;
+            }
+            else
+                match.presence[i] = found->presence;
+        }
+        const auto enteringPhase = match.phase;
+        const auto
+            incarnation = actors.at(id)->snapshot().incarnation;
+        for (const auto index : commands)
+        {
+            auto& command = batch[index];
+            command.authorized = authorize(command, roster);
+            if (!running)
+                return;
+            if (!command.authorized)
+                continue;
+            if ((command.isReady || command.inputComplete) &&
+                command.incarnation != incarnation)
+            {
+                command.authorized = false;
+                command.error = arena::protocol::ERR_BUSINESS_FAILURE;
+                continue;
+            }
+            if (command.isReady)
+            {
+                if (match.phase == RoomPhase::Playing &&
+                    !command.readyValue)
+                {
+                    command.authorized = false;
+                    command.error = arena::protocol::
+                        ERR_BUSINESS_FAILURE;
+                    continue;
+                }
+                if (match.phase != RoomPhase::Playing)
+                    for (std::size_t i = 0;
+                         i != match.allocation.members.size();
+                         ++i)
+                        if (match.allocation.members[i].playerId ==
+                            command.binding.playerId)
+                            match.ready[i] = command.readyValue;
+            }
+        }
+        if (complete && match.phase != RoomPhase::Playing)
+        {
+            const bool allReady = match.ready[0] && match.ready[1];
+            if (allReady && match.phase == RoomPhase::Forming)
+            {
+                transition(
+                    match.room,
+                    arena::domain::Room::Event::MembersReady
+                );
+                match.phase = RoomPhase::Ready;
+                logPhase(id, match);
+                if (!running)
+                    return;
+            }
+            else if (!allReady && match.phase == RoomPhase::Ready)
+            {
+                transition(
+                    match.room,
+                    arena::domain::Room::Event::ReadinessLost
+                );
+                match.phase = RoomPhase::Forming;
+                logPhase(id, match);
+                if (!running)
+                    return;
+            }
+            if (enteringPhase == RoomPhase::Ready &&
+                match.phase == RoomPhase::Ready)
+            {
+                transition(
+                    match.room,
+                    arena::domain::Room::Event::StartBattle
+                );
+                transition(
+                    match.battle,
+                    arena::domain::Battle::Event::Start
+                );
+                match.phase = RoomPhase::Playing;
+                ++counts.battlesStarted;
+                logPhase(id, match);
+                if (!running)
+                    return;
+            }
+        }
+        if (!complete)
+        {
+            // Even an allocation disconnected before its first cutoff
+            // has a complete fixed cohort in its result and
+            // reproducible archive.
+            if (actors.at(id)->snapshot().players.empty())
+            {
+                auto initial = actors.at(id)->step(
+                    std::move(members),
+                    {}
+                );
+                committed(id, initial);
+                if (!running)
+                    return;
+            }
+            settle(id, match, SettlementReason::MemberUnavailable);
+        }
+        else if (match.playedTicks >= config.battleDurationTicks)
+            settle(id, match, SettlementReason::Completed);
+        else
+        {
+            std::vector<service::room::Input> inputs;
+            std::vector<std::size_t> inputCommands;
+            for (const auto index : commands)
+            {
+                auto& command = batch[index];
+                if (!command.authorized || !command.inputComplete)
+                    continue;
+                if (match.phase != RoomPhase::Playing)
+                {
+                    command.authorized = false;
+                    command.error = arena::protocol::
+                        ERR_BUSINESS_FAILURE;
+                    continue;
+                }
+                inputs.push_back(
+                    {{command.binding.playerId,
+                      command.session,
+                      command.membershipEpoch},
+                     command.sequence,
+                     command.dx,
+                     command.dy}
+                );
+                inputCommands.push_back(index);
+            }
+            auto result = actors.at(id)->step(
+                std::move(members),
+                std::move(inputs)
+            );
+            committed(id, result);
+            if (!running)
+                return;
+            if (match.phase == RoomPhase::Playing)
+            {
+                if (!match.playedTicks)
+                    match.startedTick = result.snapshot.tick;
+                ++match.playedTicks;
+                if (match.playedTicks == config.battleDurationTicks)
+                    settle(id, match, SettlementReason::Completed);
+            }
+            else if (++match.waitedTicks == config.readyTimeoutTicks)
+                settle(id, match, SettlementReason::ReadyTimeout);
+            if (!running)
+                return;
+            for (std::size_t i = 0; i != inputCommands.size(); ++i)
+                batch[inputCommands[i]].inputResult.emplace(
+                    RoomInputReply{result.snapshot, result.results[i]}
+                );
+        }
+        if (!running)
+            return;
+        for (const auto index : commands)
+        {
+            auto& command = batch[index];
+            if (!command.authorized)
+                continue;
+            if (command.snapshotComplete)
+                command.snapshotResult.emplace(
+                    actors.at(id)->snapshot()
+                );
+            if (command.statusComplete)
+                command.statusResult.emplace(view(id, match));
+            if (command.inputComplete && !command.inputResult)
+                command.error = arena::protocol::ERR_BUSINESS_FAILURE;
+        }
+    }
+
+    /** @brief Creates one actor and lifecycle together, rolling back
+     * local failure. */
+    bool openMatch(const ManagedRoom& allocation)
+    {
+        requireOwner();
+        if (!running || !allocation.matchId ||
+            actors.size() >= config.maxRooms ||
+            config.actor.maxMembers < 2 ||
+            actors.contains(allocation.roomId) ||
+            matches.contains(allocation.roomId))
+            return false;
+        const auto authority = online->managedRoom(allocation.roomId);
+        if (!running || !authority ||
+            authority->matchId != allocation.matchId ||
+            authority->members != allocation.members)
+            return false;
+        for (const auto& [id, match] : matches)
+        {
+            (void)id;
+            if (match->allocation.matchId == allocation.matchId)
+                return false;
+        }
+        auto actor = std::make_unique<service::room::RoomActor>(
+            allocation.roomId,
+            nextIncarnation(),
+            config.actor
+        );
+        auto match = std::make_unique<ManagedMatch>(allocation);
+        actors.emplace(allocation.roomId, std::move(actor));
+        try
+        {
+            matches.emplace(allocation.roomId, std::move(match));
+        }
+        catch (...)
+        {
+            actors.erase(allocation.roomId);
+            throw;
+        }
+        try
+        {
+            if (config.replays)
+            {
+                auto recording = config.replays->begin(
+                    config.actor,
+                    actors.at(allocation.roomId)->snapshot()
+                );
+                if (recording)
+                    recordings.emplace(
+                        allocation.roomId,
+                        std::move(recording)
+                    );
+            }
+        }
+        catch (...)
+        {
+        }
+        logPhase(allocation.roomId, *matches.at(allocation.roomId));
+        return running;
+    }
+
     /** @brief Reconciles and steps one room; callbacks run after all
      * rooms. */
     void stepRoom(
@@ -260,8 +914,33 @@ struct RoomService::State : std::enable_shared_from_this<State>
         // actors after retirement.
         if (!running)
             return;
+        if (const auto managed = matches.find(id);
+            managed != matches.end())
+        {
+            stepManaged(
+                id,
+                *managed->second,
+                roster,
+                commands,
+                batch
+            );
+            return;
+        }
+        if (online->managedRoom(id))
+        {
+            for (const auto index : commands)
+                batch[index].error = arena::protocol::ERR_UNAVAILABLE;
+            return;
+        }
         for (const auto index : commands)
         {
+            if (batch[index].statusComplete ||
+                batch[index].settlementComplete)
+            {
+                batch[index]
+                    .error = arena::protocol::ERR_BUSINESS_FAILURE;
+                continue;
+            }
             batch[index].authorized = authorize(batch[index], roster);
             if (!running)
                 return;
@@ -370,35 +1049,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
             std::move(members),
             std::move(inputs)
         );
-        // The canonical cutoff is prepared before actor commit; only
-        // copied values enter the bounded disk-worker queue.
-        if (const auto recording = recordings.find(id);
-            recording != recordings.end())
-            recording->second->append(std::move(result.record));
-        ++counts.ticks;
-        for (const auto status : result.results)
-        {
-            if (status == service::room::InputStatus::Applied)
-                ++counts.applied;
-            else if (status == service::room::InputStatus::Duplicate)
-                ++counts.duplicates;
-            else
-                ++counts.rejected;
-        }
-        try
-        {
-            spdlog::info(
-                "event=room_tick room_id={} incarnation={} tick={} "
-                "checksum={}",
-                id.value(),
-                incarnation,
-                result.snapshot.tick,
-                result.snapshot.checksum
-            );
-        }
-        catch (...)
-        {
-        }
+        committed(id, result);
         // Reply copies may fail after commit. A retry uses the same
         // sequence to discover Duplicate; an allocation failure never
         // rolls the simulation back.
@@ -425,6 +1076,22 @@ struct RoomService::State : std::enable_shared_from_this<State>
         }
         try
         {
+            const auto now = config.now();
+            for (auto it = matches.begin(); it != matches.end();)
+                if (it->second->expires &&
+                    now >= *it->second->expires)
+                {
+                    actors.erase(it->first);
+                    it = matches.erase(it);
+                }
+                else
+                    ++it;
+            for (auto& command : batch)
+            {
+                if (!running)
+                    break;
+                resolve(command);
+            }
             std::map<
                 arena::domain::RoomId,
                 std::vector<std::size_t>,
@@ -436,7 +1103,18 @@ struct RoomService::State : std::enable_shared_from_this<State>
                 rooms.try_emplace(id);
             }
             for (std::size_t index = 0; index < batch.size(); ++index)
-                rooms[batch[index].room].push_back(index);
+                if (batch[index].room)
+                {
+                    auto& group = rooms[*batch[index].room];
+                    if (group.size() < config.maxPendingPerRoom)
+                        group.push_back(index);
+                    else
+                    {
+                        batch[index].room.reset();
+                        batch[index]
+                            .error = arena::protocol::ERR_UNAVAILABLE;
+                    }
+                }
             for (const auto& [id, commands] : rooms)
             {
                 if (!running)
@@ -458,7 +1136,8 @@ struct RoomService::State : std::enable_shared_from_this<State>
         for (auto& command : batch)
         {
             if (!running && !command.snapshotResult &&
-                !command.inputResult)
+                !command.inputResult && !command.statusResult &&
+                !command.settlementResult)
                 command.error = arena::protocol::ERR_UNAVAILABLE;
             deliver(command);
         }
@@ -543,6 +1222,15 @@ struct RoomService::State : std::enable_shared_from_this<State>
         }
         recordings.clear();
         actors.clear();
+        for (const auto& [id, match] : matches)
+            try
+            {
+                online->finishMatch(id, match->allocation.matchId);
+            }
+            catch (...)
+            {
+            }
+        matches.clear();
         for (auto& command : abandoned)
         {
             command.error = arena::protocol::ERR_UNAVAILABLE;
@@ -582,6 +1270,13 @@ struct RoomService::State : std::enable_shared_from_this<State>
         std::unique_ptr<service::room::ReplayRecording>,
         RoomLess>
         recordings;
+    /// Domain lifecycles and retained immutable results share the
+    /// management owner.
+    std::map<
+        arena::domain::RoomId,
+        std::unique_ptr<ManagedMatch>,
+        RoomLess>
+        matches;
     RoomMetrics counts;
     ConnectionScheduler scheduler;
     ConnectionTimer timer;
@@ -631,6 +1326,56 @@ void RoomService::stop() noexcept
 {
     m_state->stop();
 }
+bool RoomService::openMatch(const ManagedRoom& allocation)
+{
+    return m_state->openMatch(allocation);
+}
+bool RoomService::ready(
+    SessionBinding binding,
+    arena::domain::SessionId session,
+    arena::domain::RoomId room,
+    std::uint64_t incarnation,
+    std::uint64_t membershipEpoch,
+    bool value,
+    StatusCompletion complete
+)
+{
+    if (!complete)
+        return false;
+    State::Command command{binding, session, room};
+    command.incarnation = incarnation;
+    command.membershipEpoch = membershipEpoch;
+    command.isReady = true;
+    command.readyValue = value;
+    command.statusComplete = std::move(complete);
+    return m_state->submit(std::move(command));
+}
+bool RoomService::status(
+    SessionBinding binding,
+    arena::domain::SessionId session,
+    StatusCompletion complete
+)
+{
+    if (!complete)
+        return false;
+    State::Command command{binding, session};
+    command.statusComplete = std::move(complete);
+    return m_state->submit(std::move(command));
+}
+bool RoomService::settlement(
+    SessionBinding binding,
+    arena::domain::SessionId session,
+    std::uint64_t matchId,
+    SettlementCompletion complete
+)
+{
+    if (!complete)
+        return false;
+    State::Command command{binding, session};
+    command.matchId = matchId;
+    command.settlementComplete = std::move(complete);
+    return m_state->submit(std::move(command));
+}
 bool RoomService::snapshot(
     SessionBinding binding,
     arena::domain::SessionId session,
@@ -672,6 +1417,14 @@ RoomMetrics RoomService::metrics() const
     m_state->requireOwner();
     auto result = m_state->counts;
     result.actors = m_state->actors.size();
+    for (const auto& [id, match] : m_state->matches)
+    {
+        (void)id;
+        if (match->phase == RoomPhase::Finished)
+            ++result.retainedResults;
+        else
+            ++result.managedMatches;
+    }
     return result;
 }
 std::int32_t RoomService::positionLimit() const noexcept

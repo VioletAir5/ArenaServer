@@ -43,6 +43,7 @@
 #include "net/WebSocketServer.h"
 #include "os/FileDescriptor.h"
 
+#include "auth/FilePasswordAccounts.h"
 #include "room/ReplayRecorder.h"
 
 using namespace service::gateway;
@@ -65,6 +66,18 @@ std::size_t positiveLimit(const char* name, std::size_t fallback)
         parsed.ptr != text.data() + text.size() || result == 0)
         throw std::invalid_argument(
             std::string(name) + " must be a positive integer"
+        );
+    return result;
+}
+
+std::size_t boundedLimit(
+    const char* name, std::size_t fallback, std::size_t maximum
+)
+{
+    const auto result = positiveLimit(name, fallback);
+    if (result > maximum)
+        throw std::invalid_argument(
+            std::string(name) + " exceeds its upper bound"
         );
     return result;
 }
@@ -265,6 +278,11 @@ void printRooms(const RoomService& rooms)
               << " applied=" << metrics.applied
               << " rejected=" << metrics.rejected
               << " duplicates=" << metrics.duplicates
+              << " managed_matches=" << metrics.managedMatches
+              << " retained_results=" << metrics.retainedResults
+              << " battles_started=" << metrics.battlesStarted
+              << " battles_completed=" << metrics.battlesCompleted
+              << " battles_aborted=" << metrics.battlesAborted
               << " skipped_wall_slots=" << metrics.skippedWallSlots
               << '\n';
 }
@@ -391,12 +409,19 @@ int main(int argc, char** argv)
         {
             try
             {
+                std::shared_ptr<const service::auth::PasswordAccounts>
+                    accounts = std::make_shared<
+                        service::auth::UnavailablePasswordAccounts>();
+                if (const auto* path = std::getenv(
+                        "ARENA_ACCOUNTS_FILE"
+                    ))
+                    accounts = std::make_shared<
+                        service::auth::FilePasswordAccounts>(path);
                 auto passwords = std::make_shared<
                     service::auth::LoginAuthenticator>(
+                    std::move(accounts),
                     std::make_shared<
-                        service::auth::UnavailablePasswordAccounts>(),
-                    std::make_shared<
-                        service::auth::UnavailablePasswordDigest>()
+                        service::auth::Pbkdf2PasswordDigest>()
                 );
                 service::auth::JwtConfig jwt;
                 jwt.key = key;
@@ -426,19 +451,25 @@ int main(int argc, char** argv)
                 matchConfig.timeout = std::chrono::milliseconds(
                     matchTimeout
                 );
-                matcher = std::make_shared<MatchmakingService>(
-                    online,
-                    [](arena::domain::PlayerId)
-                        -> std::optional<std::uint32_t>
-                    {
-                        // Every player starts with a provisional
-                        // server rating until a persistent rating
-                        // adapter is configured.
-                        return 1500;
-                    },
-                    matchConfig
-                );
                 RoomServiceConfig roomConfig;
+                roomConfig.battleDurationTicks = boundedLimit(
+                    "ARENA_BATTLE_TICKS",
+                    100,
+                    72000
+                );
+                roomConfig.readyTimeoutTicks = boundedLimit(
+                    "ARENA_READY_TIMEOUT_TICKS",
+                    600,
+                    72000
+                );
+                roomConfig
+                    .resultRetention = std::chrono::milliseconds(
+                    boundedLimit(
+                        "ARENA_RESULT_RETENTION_MS",
+                        60000,
+                        3600000
+                    )
+                );
                 if (const auto* directory = std::getenv(
                         "ARENA_REPLAY_DIR"
                     ))
@@ -454,6 +485,27 @@ int main(int argc, char** argv)
                 rooms = std::make_shared<RoomService>(
                     online,
                     std::move(roomConfig)
+                );
+                matcher = std::make_shared<MatchmakingService>(
+                    online,
+                    [](arena::domain::PlayerId)
+                        -> std::optional<std::uint32_t>
+                    {
+                        // Every player starts with a provisional
+                        // server rating until a persistent rating
+                        // adapter is configured.
+                        return 1500;
+                    },
+                    matchConfig,
+                    std::chrono::milliseconds(100),
+                    1024,
+                    [weak = std::weak_ptr<RoomService>(rooms)](
+                        const ManagedRoom& match
+                    )
+                    {
+                        const auto owner = weak.lock();
+                        return owner && owner->openMatch(match);
+                    }
                 );
                 registry = makeLoginMessageRegistry(
                     std::move(passwords),
@@ -629,6 +681,10 @@ int main(int argc, char** argv)
             }
         }
     );
+    std::cerr << "GATEWAY_READY tcp_port=" << tcpPort
+              << " ws_port=" << wsPort
+              << " authenticated=" << static_cast<bool>(online)
+              << '\n';
     context.run();
     wsServer.reset();
     server.reset();

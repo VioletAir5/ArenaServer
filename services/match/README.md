@@ -1,8 +1,9 @@
 # Matchmaking
 
 `arena_match` implements process-local 1v1 ticket queueing and assignment.
-The gateway currently embeds this library; a standalone network service,
-distributed queue, persistent ratings and room allocation remain planned.
+The gateway embeds this library and supplies a trusted automatic room allocator.
+A standalone network service, distributed queue and persistent ratings remain
+planned. The pure queue does not create or mutate room runtimes.
 
 ## Interface and ownership
 
@@ -12,6 +13,9 @@ that owner. Callers supply nondecreasing `steady_clock` time, typed PlayerId /
 SessionId identities, a nonzero join key and a trusted server MMR (0..10000).
 The gateway's `MatchmakingService` provides bounded cross-thread admission and
 periodic matching on the management owner; domain objects never cross workers.
+`advance` exports each new `PairAssignment` once as owned values. The configured
+gateway atomically binds both logical sessions in `OnlineRegistry`, then opens
+one managed `RoomService` lifecycle on that owner.
 
 Join acknowledges admission without waiting for an opponent. Pairing occurs
 on periodic `advance`, with the oldest available anchor and the nearest
@@ -45,13 +49,25 @@ at the exact deadline. Retries and reconnect do not reset admission time.
 - The availability adapter pauses a Detached session during grace. Missing,
   replaced, expired or room-bound sessions cancel waiting tickets. Logical
   SessionId survives authorized JWT recovery, so the original ticket resumes.
-- Assignment reserves both player identities until a trusted allocation
-  owner calls `release(matchId, now)`. Retry-history retention never releases
-  those fences. Release retires both fences together; repeated release is safe.
-  The current gateway exposes no client release route or room allocator.
+- Pure queue assignment reserves both player identities until a trusted owner
+  calls `release(matchId, now, roomId)`. The optional trusted RoomId is saved in
+  both Assigned histories; the queue does not allocate it. Release retires both
+  fences together; retries cannot overwrite a completed allocation. An assembly
+  without an allocator keeps explicit-release behavior.
+- Main automatically allocates a fixed two-player room, opens its lifecycle
+  and releases queue assignment fences. Managed room membership then prevents
+  another admission until completion. Hosting failure rolls back registry
+  allocation, releases assignment fences and returns unavailable instead of
+  publishing a room ID. There is no client release route.
 - Cancelled, expired and released-assignment history is retained for 60000 ms,
   then reclaimed. Idempotency is limited to this process and retention window.
   Assigned fences count toward the total capacity until explicit release.
+
+MatchTicket keeps fields 1–12 and appends `room_id` at tag 13. Successful
+allocation exposes the same room to both participants. Assigned with
+`active=false` represents retained history after the room takes ownership,
+not another active queue slot. Retry/status remains scoped to the logical
+SessionId. This is a process-local handoff, not a durable distributed transaction.
 
 ## Statistics and verification
 
@@ -73,3 +89,13 @@ ctest --test-dir build --output-on-failure -R MatchmakingTransport_
 Tests include deterministic boundary checks, seeded stateful property tests,
 concurrent mailbox requests and real epoll/Asio TCP/WebSocket paths. These
 verify process-local safety, not durable or cross-process exactly-once delivery.
+
+For the production login → lobby → match → automatic room → ready/play/result
+path, including JWT recovery and grace expiry, build both executables and run:
+
+```bash
+python3 tests/room/FullJourneyIntegrationTest.py build/services/gateway/app/ArenaServer build/services/room/arena_replay --report-dir /tmp/arena-journey
+```
+
+See [managed room protocol](../gateway/README.md#managed-room-protocol-and-recovery)
+and [room lifecycle](../room/README.md) for phases, result stubs and limits.

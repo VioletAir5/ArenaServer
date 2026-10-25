@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <expected>
@@ -73,13 +74,50 @@ struct OnlineState
     std::vector<OnlineSnapshot> members;
 };
 
+/** @brief Identifies an authenticated logical participant without a
+ * transport. */
+struct MatchParticipant
+{
+    /// Account participating in the trusted match.
+    arena::domain::PlayerId playerId;
+    /// Logical session sampled by the matching owner.
+    arena::domain::SessionId sessionId;
+    bool operator==(const MatchParticipant&) const = default;
+};
+
+/** @brief Freezes one managed-room membership independently of
+ * reconnects. */
+struct MatchRoomMember
+{
+    /// Fixed account in the allocation cohort.
+    arena::domain::PlayerId playerId;
+    /// Reconnect-stable identity; fresh password sessions differ.
+    arena::domain::SessionId sessionId;
+    /// Exact membership fence captured by atomic allocation.
+    std::uint64_t roomEpoch;
+    bool operator==(const MatchRoomMember&) const = default;
+};
+
+/** @brief Binds one server allocation to exactly two immutable
+ * memberships. */
+struct ManagedRoom
+{
+    /// Nonzero match identity allocated by the queue owner.
+    std::uint64_t matchId;
+    /// Reserved server identity, inaccessible to client room joins.
+    arena::domain::RoomId roomId;
+    /// Canonical immutable cohort retained until owner cleanup.
+    std::array<MatchRoomMember, 2> members;
+};
+
 struct OnlineRegistryConfig
 {
     /// Bounds retained Online and Detached players together.
     std::size_t maxPlayers{100000};
     /// Positive monotonic reconnect window, at most one hour.
     std::chrono::milliseconds grace{30000};
-    /// Maximum nonempty rosters retained by this process.
+    /// Maximum rosters, including managed rooms awaiting owner
+    /// cleanup.
     std::size_t maxRooms{10000};
     /// Online and Detached slots share this per-room capacity.
     std::size_t maxRoomMembers{64};
@@ -190,8 +228,8 @@ public:
     /** @brief Returns physical records; maintenance uses sweep for
      * reclamation. */
     std::size_t retainedCount() const;
-    /** @brief Returns physical rosters, including slots retained
-     * during grace. */
+    /** @brief Returns physical rosters, including managed allocations
+     * awaiting owner cleanup and slots retained during grace. */
     std::size_t roomCount() const;
     /** @brief Finds the unexpired retained authority generation. */
     std::optional<std::uint64_t>
@@ -210,6 +248,23 @@ public:
     /** @brief Clears room membership while retaining the logical
      * session. */
     std::expected<OnlineState, OnlineError> leaveRoom(SessionBinding);
+    /** @brief Atomically binds two current logical sessions to a
+     * server room. Detached sessions remain eligible until their
+     * existing grace expires. Managed IDs occupy a namespace
+     * inaccessible to ordinary room joins. Retrying the same match
+     * and cohort returns the existing allocation.
+     */
+    std::expected<ManagedRoom, OnlineError> allocateMatch(
+        std::uint64_t matchId,
+        std::array<MatchParticipant, 2> participants
+    );
+    /** @brief Copies the immutable cohort, including expired or
+     * replaced members. */
+    std::optional<ManagedRoom>
+        managedRoom(arena::domain::RoomId) const;
+    /** @brief Clears only memberships still belonging to this exact
+     * allocation. */
+    bool finishMatch(arena::domain::RoomId, std::uint64_t matchId);
     /** @brief Copies one roster after pruning expired members in that
      * room. */
     std::vector<OnlineSnapshot>

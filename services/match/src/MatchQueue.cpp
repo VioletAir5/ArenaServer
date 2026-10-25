@@ -213,6 +213,9 @@ struct MatchQueue::State
         std::optional<TicketId> opponentTicket;
         /// Waiting or assigned occupancy fence for this player.
         bool active{true};
+        /// Trusted downstream allocation, retained with released
+        /// history.
+        std::optional<arena::domain::RoomId> roomId;
     };
 
     struct Candidate
@@ -308,7 +311,8 @@ struct MatchQueue::State
             entry.matchId,
             entry.opponent,
             entry.opponentTicket,
-            entry.active
+            entry.active,
+            entry.roomId
         };
     }
 
@@ -572,8 +576,13 @@ struct MatchQueue::State
 
     /** @brief Searches complete candidate sets across ticks within a
      * hard comparison budget. */
-    void pair(Clock::time_point now)
+    std::vector<PairAssignment> pair(Clock::time_point now)
     {
+        std::vector<PairAssignment> assigned;
+        // Reserve notification storage before committing any pair.
+        // Later index allocation failure must not lose earlier
+        // committed pairs.
+        assigned.reserve(counts.queued / 2);
         std::vector<Candidate> candidates;
         candidates.reserve(counts.queued);
         for (const auto& [id, entry] : tickets)
@@ -589,7 +598,7 @@ struct MatchQueue::State
         if (candidates.size() < 2)
         {
             clearSearch();
-            return;
+            return assigned;
         }
 
         std::size_t comparisons = 0;
@@ -672,7 +681,30 @@ struct MatchQueue::State
                         --remainingReady;
                     else
                     {
-                        assign(*anchor->entry, *opponent->entry, now);
+                        try
+                        {
+                            assign(
+                                *anchor->entry,
+                                *opponent->entry,
+                                now
+                            );
+                        }
+                        catch (const std::bad_alloc&)
+                        {
+                            clearSearch();
+                            return assigned;
+                        }
+                        // Capacity was reserved and these owning
+                        // snapshots contain only nothrow-copyable
+                        // value fields.
+                        static_assert(
+                            std::is_nothrow_move_constructible_v<
+                                PairAssignment>
+                        );
+                        assigned.push_back(
+                            {snapshot(*anchor->entry, now),
+                             snapshot(*opponent->entry, now)}
+                        );
                         remainingReady -= 2;
                     }
                 }
@@ -681,6 +713,7 @@ struct MatchQueue::State
             clearSearch();
             ++completed;
         }
+        return assigned;
     }
 
     /// Immutable thread identity is checked before reading owner-only
@@ -912,15 +945,19 @@ QueueResult MatchQueue::status(
                  : state.reject(QueueError::NotFound);
 }
 
-void MatchQueue::advance(Clock::time_point now)
+std::vector<PairAssignment> MatchQueue::advance(Clock::time_point now)
 {
     auto& state = *m_state;
     state.enter(now);
     state.maintainAll(now);
-    state.pair(now);
+    return state.pair(now);
 }
 
-bool MatchQueue::release(std::uint64_t matchId, Clock::time_point now)
+bool MatchQueue::release(
+    std::uint64_t matchId,
+    Clock::time_point now,
+    std::optional<arena::domain::RoomId> room
+)
 {
     auto& state = *m_state;
     state.enter(now);
@@ -929,6 +966,7 @@ bool MatchQueue::release(std::uint64_t matchId, Clock::time_point now)
         return false;
     auto& left = *state.tickets.at(assignment->second.first);
     auto& right = *state.tickets.at(assignment->second.second);
+    left.roomId = right.roomId = room;
     left.active = right.active = false;
     left.reclaimFrom = right.reclaimFrom = now;
     state.removeActive(left);

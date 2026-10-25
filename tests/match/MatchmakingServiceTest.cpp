@@ -840,7 +840,310 @@ TEST_F(
     EXPECT_EQ(rpc(join).error().code(), wire::ERR_INVALID_REQUEST);
     EXPECT_EQ(matcher->metrics().joined, 0U);
 }
+
+TEST_F(
+    MatchmakingServiceTest,
+    OwnerAllocatesPairOnceAndRetriesRecoverSameRoom
+)
+{
+    const auto alice = login(42, 7), bob = login(43, 8);
+    std::optional<ManagedRoom> room;
+    int calls = 0;
+    matcher = std::make_shared<MatchmakingService>(
+        online,
+        [](auto) -> std::optional<std::uint32_t> { return 1000; },
+        service::match::QueueConfig{},
+        1ms,
+        1024,
+        [&](const ManagedRoom& allocated)
+        {
+            ++calls;
+            room = allocated;
+            return true;
+        }
+    );
+    matcher->start(scheduler.get());
+    std::optional<service::match::TicketSnapshot> first, second;
+    ASSERT_TRUE(matcher->join(
+        alice.lease->binding,
+        alice.snapshot.sessionId,
+        10,
+        [&](auto r)
+        {
+            ASSERT_TRUE(r);
+            first = *r;
+        }
+    ));
+    ASSERT_TRUE(matcher->join(
+        bob.lease->binding,
+        bob.snapshot.sessionId,
+        20,
+        [&](auto r)
+        {
+            ASSERT_TRUE(r);
+            second = *r;
+        }
+    ));
+    scheduler.run();
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    scheduler.fire(0);
+    ASSERT_TRUE(room);
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(matcher->metrics().assignedPlayers, 0U);
+    EXPECT_EQ(matcher->metrics().releasedPairs, 1U);
+    EXPECT_EQ(
+        online->snapshot(alice.snapshot.playerId)->roomId,
+        room->roomId
+    );
+    EXPECT_EQ(
+        online->snapshot(bob.snapshot.playerId)->roomId,
+        room->roomId
+    );
+    for (const auto& saved : {first.value(), second.value()})
+    {
+        const auto& binding = saved.playerId ==
+                                      alice.snapshot.playerId
+                                  ? alice.lease->binding
+                                  : bob.lease->binding;
+        std::optional<MatchmakingService::Result> status;
+        ASSERT_TRUE(matcher->status(
+            binding,
+            saved.sessionId,
+            saved.ticketId,
+            [&](auto r) { status.emplace(std::move(r)); }
+        ));
+        scheduler.run();
+        ASSERT_TRUE(status);
+        ASSERT_TRUE(*status);
+        EXPECT_EQ((**status).roomId, room->roomId);
+        EXPECT_FALSE((**status).active);
+    }
+    const auto claims = tokens.verify(alice.token);
+    ASSERT_TRUE(claims);
+    alice.lease->release();
+    auto resumed = online->install(
+        alice.snapshot.playerId,
+        9,
+        *claims,
+        tokens,
+        [] {}
+    );
+    ASSERT_TRUE(resumed);
+    std::optional<MatchmakingService::Result> retry;
+    ASSERT_TRUE(matcher->join(
+        resumed->lease->binding,
+        resumed->snapshot.sessionId,
+        10,
+        [&](auto r) { retry.emplace(std::move(r)); }
+    ));
+    scheduler.run();
+    ASSERT_TRUE(retry);
+    ASSERT_TRUE(*retry);
+    EXPECT_EQ((**retry).ticketId, first->ticketId);
+    EXPECT_EQ((**retry).roomId, room->roomId);
+    retry.reset();
+    ASSERT_TRUE(matcher->join(
+        resumed->lease->binding,
+        resumed->snapshot.sessionId,
+        11,
+        [&](auto r) { retry.emplace(std::move(r)); }
+    ));
+    scheduler.run();
+    ASSERT_TRUE(retry);
+    ASSERT_FALSE(*retry);
+    EXPECT_EQ(retry->error(), wire::ERR_BUSINESS_FAILURE);
+    scheduler.fire(1);
+    EXPECT_EQ(calls, 1);
+}
+
+TEST_F(
+    MatchmakingServiceTest,
+    FailedAllocatorRollsBackBothBindingsAndReleasesFences
+)
+{
+    for (const bool throwing : {false, true})
+    {
+        if (matcher)
+            matcher->stop();
+        const auto alice = login(42, 7), bob = login(43, 8);
+        const auto timer = scheduler.timers.size();
+        int calls = 0;
+        matcher = std::make_shared<MatchmakingService>(
+            online,
+            [](auto) -> std::optional<std::uint32_t> { return 1000; },
+            service::match::QueueConfig{},
+            1ms,
+            1024,
+            [&](const ManagedRoom&) -> bool
+            {
+                ++calls;
+                if (throwing)
+                    throw 7;
+                return false;
+            }
+        );
+        matcher->start(scheduler.get());
+        std::optional<service::match::TicketSnapshot> first;
+        ASSERT_TRUE(matcher->join(
+            alice.lease->binding,
+            alice.snapshot.sessionId,
+            10,
+            [&](auto r)
+            {
+                ASSERT_TRUE(r);
+                first = *r;
+            }
+        ));
+        ASSERT_TRUE(matcher->join(
+            bob.lease->binding,
+            bob.snapshot.sessionId,
+            20,
+            [](auto r) { EXPECT_TRUE(r); }
+        ));
+        scheduler.run();
+        scheduler.fire(timer);
+        ASSERT_TRUE(first);
+        EXPECT_EQ(calls, 1);
+        EXPECT_EQ(online->roomCount(), 0U);
+        EXPECT_FALSE(
+            online->snapshot(alice.snapshot.playerId)->roomId
+        );
+        EXPECT_FALSE(online->snapshot(bob.snapshot.playerId)->roomId);
+        EXPECT_EQ(matcher->metrics().assignedPlayers, 0U);
+        std::optional<MatchmakingService::Result> status;
+        ASSERT_TRUE(matcher->status(
+            alice.lease->binding,
+            alice.snapshot.sessionId,
+            first->ticketId,
+            [&](auto r) { status.emplace(std::move(r)); }
+        ));
+        scheduler.run();
+        ASSERT_TRUE(status);
+        ASSERT_FALSE(*status);
+        EXPECT_EQ(status->error(), wire::ERR_UNAVAILABLE);
+        status.reset();
+        ASSERT_TRUE(matcher->join(
+            alice.lease->binding,
+            alice.snapshot.sessionId,
+            11,
+            [&](auto r) { status.emplace(std::move(r)); }
+        ));
+        scheduler.run();
+        ASSERT_TRUE(status);
+        ASSERT_TRUE(*status);
+        EXPECT_EQ(
+            (**status).state,
+            service::match::TicketState::Queued
+        );
+    }
+}
+
+TEST_F(
+    MatchmakingServiceTest,
+    RatingCallbackStopDoesNotDestroyActiveQueueFrame
+)
+{
+    const auto alice = login();
+    matcher = std::make_shared<MatchmakingService>(
+        online,
+        [&](auto) -> std::optional<std::uint32_t>
+        {
+            matcher->stop();
+            return 1000;
+        }
+    );
+    matcher->start(scheduler.get());
+    std::optional<MatchmakingService::Result> reply;
+    ASSERT_TRUE(matcher->join(
+        alice.lease->binding,
+        alice.snapshot.sessionId,
+        1,
+        [&](auto r) { reply.emplace(std::move(r)); }
+    ));
+    EXPECT_NO_THROW(scheduler.run());
+    ASSERT_TRUE(reply);
+    ASSERT_FALSE(*reply);
+    EXPECT_EQ(reply->error(), wire::ERR_UNAVAILABLE);
+    EXPECT_EQ(matcher->metrics().retained, 0U);
+}
+
+TEST_F(
+    MatchmakingServiceTest,
+    ExpiryKickStopDefersRetirementUntilEligibilityReturns
+)
+{
+    std::int64_t wall = 1700000000;
+    service::auth::JwtConfig config;
+    config.key = "0123456789abcdef0123456789abcdef";
+    config.lifetime = 1s;
+    config.now = [&] { return wall; };
+    service::auth::JwtTokens expiring{config};
+    auto grant = online->install(
+        arena::domain::PlayerId{42},
+        7,
+        {},
+        expiring,
+        [&] { matcher->stop(); }
+    );
+    ASSERT_TRUE(grant);
+    start();
+    ASSERT_TRUE(matcher->join(
+        grant->lease->binding,
+        grant->snapshot.sessionId,
+        1,
+        [](auto r) { EXPECT_TRUE(r); }
+    ));
+    scheduler.run();
+    ++wall;
+    EXPECT_NO_THROW(scheduler.fire(0));
+    EXPECT_EQ(matcher->metrics().retained, 0U);
+    EXPECT_EQ(scheduler.timers.size(), 1U);
+    EXPECT_FALSE(matcher->join(
+        grant->lease->binding,
+        grant->snapshot.sessionId,
+        2,
+        [](auto) {}
+    ));
+}
+
+TEST_F(
+    MatchmakingServiceTest,
+    AllocatorStopRollsBackBoundRoomBeforeQueueRetirement
+)
+{
+    const auto alice = login(42, 7), bob = login(43, 8);
+    matcher = std::make_shared<MatchmakingService>(
+        online,
+        [](auto) -> std::optional<std::uint32_t> { return 1000; },
+        service::match::QueueConfig{},
+        1ms,
+        1024,
+        [&](const ManagedRoom&)
+        {
+            matcher->stop();
+            return true;
+        }
+    );
+    matcher->start(scheduler.get());
+    ASSERT_TRUE(matcher->join(
+        alice.lease->binding,
+        alice.snapshot.sessionId,
+        1,
+        [](auto r) { EXPECT_TRUE(r); }
+    ));
+    ASSERT_TRUE(matcher->join(
+        bob.lease->binding,
+        bob.snapshot.sessionId,
+        1,
+        [](auto r) { EXPECT_TRUE(r); }
+    ));
+    scheduler.run();
+    EXPECT_NO_THROW(scheduler.fire(0));
+    EXPECT_EQ(online->roomCount(), 0U);
+    EXPECT_FALSE(online->snapshot(alice.snapshot.playerId)->roomId);
+    EXPECT_FALSE(online->snapshot(bob.snapshot.playerId)->roomId);
+    EXPECT_EQ(matcher->metrics().retained, 0U);
+}
+
 } // namespace
-#include <array>
-#include <atomic>
-#include <barrier>

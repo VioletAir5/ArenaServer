@@ -23,6 +23,9 @@ public:
     using Result = std::
         expected<service::match::TicketSnapshot, ErrorCode>;
     using Completion = std::function<void(Result)>;
+    /// Trusted management-owner hook; false leaves no hosted room.
+    /// The hook must not reenter this matchmaking service.
+    using Allocation = std::function<bool(const ManagedRoom&)>;
     using RatingProvider = std::function<
         std::optional<std::uint32_t>(arena::domain::PlayerId)>;
     /** @brief Installs shared online authority and a trusted rating
@@ -33,6 +36,8 @@ public:
      * @param[in] interval Positive maintenance and matching interval.
      * @param[in] maxPending Maximum admitted commands waiting on the
      * owner.
+     * @param[in] allocate Optional room owner; false or an exception
+     * rolls back the atomic registry allocation.
      */
     MatchmakingService(
         std::shared_ptr<OnlineRegistry>,
@@ -40,7 +45,8 @@ public:
         service::match::QueueConfig = {},
         std::chrono::milliseconds interval =
             std::chrono::milliseconds(100),
-        std::size_t maxPending = 1024
+        std::size_t maxPending = 1024,
+        Allocation allocate = {}
     );
     ~MatchmakingService() noexcept;
     MatchmakingService(const MatchmakingService&) = delete;

@@ -218,12 +218,12 @@ struct RoomActor::State
         Snapshot after;
     };
 
-    /** @brief Constructs the domain Room and empty simulation on
+    /** @brief Constructs the room identity and empty simulation on
      * their fixed owner. */
     State(
         RoomId roomId, std::uint64_t incarnation, ActorConfig limits
     )
-        : room(roomId)
+        : roomId(roomId)
         , config(limits)
         , current{roomId, incarnation, 0, 0, {}}
         , checkpoint(current)
@@ -316,7 +316,7 @@ struct RoomActor::State
     const std::thread::id owner{std::this_thread::get_id()};
     /// Lifecycle remains Forming until a future battle protocol
     /// explicitly drives it.
-    arena::domain::Room room;
+    const RoomId roomId;
     /// Immutable limits bound membership, cutoff attempts and
     /// retained journal ticks.
     const ActorConfig config;
@@ -365,7 +365,7 @@ TickResult RoomActor::step(
         throw std::overflow_error("room tick identity exhausted");
 
     Snapshot working{
-        state.room.id(),
+        state.roomId,
         state.current.incarnation,
         state.current.tick + 1,
         0,

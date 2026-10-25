@@ -1,6 +1,6 @@
 /** @file
- * @brief Registers authentication, online state and bounded room
- * roster routes.
+ * @brief Registers authentication, lobby state and bounded manual
+ * roster routes before installing optional managed services.
  */
 #include "net/LoginHandler.h"
 

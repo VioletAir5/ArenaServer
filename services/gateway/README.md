@@ -18,12 +18,12 @@ documents.
 | `ArenaProtocol` | Envelope decoding, request conversion and reply encoding |
 | `RequestDispatcher` | Request admission, authentication requirements, 64 pending requests, deadlines and once-only completion |
 | `MessageRegistry` | A sealed route table shared by connection owners |
-| `OnlineRegistry` | Stable logical sessions, current auth leases, presence and bounded room rosters in one synchronized authority |
+| `OnlineRegistry` | Logical sessions, auth leases, presence, manual rosters and atomic two-player managed allocation |
 | `OnlineRegistryMaintenance` | Management-owner sweeps and shutdown, independent of a disconnected transport |
-| `MatchmakingService` | Bounded cross-thread commands, current-session fencing and management-owner matching/expiry |
+| `MatchmakingService` | Bounded commands, session fencing, matching/expiry and trusted owner-side room allocation |
 | `MatchHandler` | Authenticated join/cancel/status wire adapters; MMR comes from the server |
-| `RoomService` | Bounded tick-cutoff mailboxes and fixed-owner 20 Hz room actors |
-| `RoomHandler` | Authenticated input/snapshot adapters with actor and membership fences |
+| `RoomService` | Tick mailboxes, domain Room/Battle lifecycle, 20 Hz simulation and retained result stubs |
+| `RoomHandler` | Authenticated controls, readiness, recovery and result adapters with actor/membership fences |
 
 The input path is transport -> Host -> per-connection protocol -> packet
 policies -> Envelope -> Dispatcher -> registered handler. The reply path runs
@@ -52,16 +52,20 @@ requires binary messages and the exact configured Origin (default
 `http://localhost:3000`). Missing/different Origin is rejected before upgrade.
 
 The default route table handles Ping and returns unavailable for Login. With
-`ARENA_JWT_KEY`, main installs JWT/account-session login routes. Password
-account/digest adapters in main remain unavailable; this is not a configured
-password database or KDF. Online/session authority is process-local.
+`ARENA_JWT_KEY`, main installs JWT/session, matching and room routes. Adding
+`ARENA_ACCOUNTS_FILE` installs the file-backed password account adapter and
+OpenSSL PBKDF2 verifier; without it password login remains unavailable. See the
+[authentication contract](../auth/README.md) for the account file and KDF limits.
+Online/session authority remains process-local.
 
 ## Online sessions and reconnect
 
 The authenticated registry exposes SessionState (20/21), RoomJoin (30/31) and
 RoomLeave (32/33) request/response routes. A nonzero room ID creates a bounded
-gateway roster on first join. This is the current membership store; battle
-lifecycle, invitations and game admission rules remain planned.
+manual roster on first join. Match-created rooms use server-managed allocation:
+direct RoomJoin cannot enter that namespace or move active participants out;
+RoomLeave cannot bypass its lifecycle. Invitations and distributed membership
+authority remain planned.
 The defaults are 100000 retained players, 10000 rooms and 64 members per room.
 Room moves, leaving, session replacement and expiry update both indexes in
 one mutex transaction; snapshots own their data and include Online/Detached
@@ -80,7 +84,8 @@ logical session and room slot for grace. It retains no Host or socket.
 Repeated or old disconnects cannot extend grace or remove a replacement.
 Recovery at or after the monotonic deadline is rejected, even before the
 next maintenance tick. A management timer sweeps every 100 ms without login
-traffic, removing expired sessions/members and pruning empty rooms. JWT expiry
+traffic, removing expired sessions/members and empty manual rosters. Managed
+metadata remains until its room owner releases the allocation. JWT expiry
 also reclaims records. Application shutdown stops maintenance before draining
 owners, then clears registry state after their retirement. Reconnect restores
 session/room state; it does not replay requests cancelled by the old connection.
@@ -107,11 +112,52 @@ waiting time/deadline continue. JWT recovery retains the ticket; fresh password
 sessions cannot steal it. Expired/replaced/room-bound sessions cancel waiting
 tickets on upkeep. Authorization is rechecked when each deferred command runs.
 
-Main currently supplies a provisional rating of 1500 for every player; a real
-rating store plugs into `RatingProvider`. This produces an assignment with
-opponent/ticket identities, not a battle room. Assigned players remain fenced
-until a trusted allocation owner calls `release`; that future integration has
-no public route. See [match queue contract](../match/README.md).
+Main supplies a provisional rating of 1500; a rating store plugs into
+`RatingProvider`. Each new pair is exported once from the queue. The configured
+owner atomically binds both logical sessions to one server room in
+`OnlineRegistry`, then opens its `RoomService` lifecycle. Failed hosting rolls
+back allocation. Success releases the queue assignment fences and saves the
+same `room_id` in both retained tickets; the managed room prevents another
+admission. Allocation failure returns unavailable. Assemblies without an
+allocator keep the explicit assignment-release contract. See the
+[match queue contract](../match/README.md).
+
+## Managed room protocol and recovery
+
+Existing IDs 10–53 and their fields remain stable. The lobby uses authenticated
+SessionState: no room means lobby; LoginResponse, SessionState or assigned
+MatchTicket.room_id discovers an allocated room.
+
+| Request / response | IDs | Contract |
+| --- | --- | --- |
+| RoomInput | 50 / 51 | Existing actor/member fences, contiguous sequence and integer control |
+| RoomSnapshot | 52 / 53 | Existing committed kernel snapshot; manual rooms may initialize lazily |
+| RoomReady | 54 / 55 | bool ready, actor incarnation and membership epoch; returns managed status |
+| RoomStatus | 56 / 57 | Current managed status or this logical session's latest retained result |
+| Settlement | 58 / 59 | Nonzero match ID; immutable result for the same participant/session |
+
+RoomStatus contains the kernel snapshot, match ID, phase, both members' readiness
+and presence, start/finish tick, played/duration ticks and optional result.
+Incarnation, membership epoch and last applied input sequence allow authorized
+JWT recovery to continue with the next sequence. The room owner rechecks the
+transport generation and logical session after admission; callbacks retain
+values and completion handles rather than a raw connection.
+
+Managed phases are Forming → Ready → Playing → Settling → Finished. Both ready
+flags produce Ready at a cutoff; a following cutoff starts Playing. Input
+applies only during Playing. After the configured successful Playing ticks,
+the owner creates one draw result stub and freezes simulation; the next cutoff
+releases registry membership. Result ID equals match ID; both participants see
+the same final tick/checksum and winner zero. Missing/replaced members, grace
+expiry and readiness timeout settle with a typed reason. Clients cannot finish
+a match or choose a winner.
+
+Detached members remain in the fixed cohort during grace. JWT recovery retains
+actor incarnation, membership, readiness and input sequence. Fresh or expired
+logical sessions cannot query old results. Finished status and settlement remain
+queryable after room unbinding for bounded retention. These are in-memory
+stubs without economy, ranking or restart recovery; general combat rules remain
+future work.
 
 The service mailbox admits at most 1024 pending commands. Capacity/history
 limits fail closed. Shutdown closes command admission, completes accepted
@@ -122,8 +168,8 @@ histograms and cumulative sums, with no per-player metric labels.
 
 ## Capacity and shutdown
 
-Authenticated RoomSnapshot (52/53) lazily initializes an `arena_room` actor for
-an existing roster. RoomInput (50/51) carries its incarnation, membership epoch,
+For a manual roster, authenticated RoomSnapshot (52/53) lazily initializes an
+`arena_room` actor. RoomInput (50/51) carries its incarnation, membership epoch,
 contiguous sequence and integer controls. Actors run on the management owner
 at an absolute 50 ms cadence. Connection workers enqueue bounded value commands;
 only a tick cutoff changes room state. JWT recovery preserves member sequence;
@@ -132,8 +178,12 @@ tick has a canonical checksum and a bounded replay record. See the
 [room runtime contract](../room/README.md) for input ordering, catch-up,
 reclamation, replay schema and the reference integer update rule.
 
-All rooms currently share one management owner. This implements room execution
-in process; match-to-room allocation and Battle simulation remain planned.
+All rooms share one management owner. Managed matches create actors during
+allocation; manual rosters still initialize lazily. The service owns domain
+Room/Battle lifecycle entities; `RoomActor` owns deterministic reference
+simulation and replay state. Finished actors retain their last snapshot/result
+until bounded retention expires. General combat rules and a standalone Room
+network process remain planned.
 Shutdown stops room ticking and command admission before connection drain,
 then prints final `ROOM_COUNTS` with zero actors after owner reclamation.
 
@@ -147,6 +197,11 @@ then prints final `ROOM_COUNTS` with zero actors after owner reclamation.
 | `ARENA_MATCH_MAX_QUEUED` | `1024` | Maximum waiting players in the process-local queue |
 | `ARENA_MATCH_MAX_TICKETS` | `4096` | Waiting, pinned assignment and retry-history records; at least max queued |
 | `ARENA_MATCH_TIMEOUT_MS` | `30000` | Queue deadline, 1..3600000 milliseconds |
+| `ARENA_JWT_KEY` | unset | Enables authenticated session/match/room assembly with an explicit signing key |
+| `ARENA_ACCOUNTS_FILE` | unset | File-backed password accounts, used with authenticated assembly |
+| `ARENA_BATTLE_TICKS` | `100` | Successful Playing ticks before the result stub, 1..72000 |
+| `ARENA_READY_TIMEOUT_TICKS` | `600` | Managed pre-start tick limit, 1..72000 |
+| `ARENA_RESULT_RETENTION_MS` | `60000` | Finished status/result retention, 1..3600000 milliseconds |
 
 Limits must be positive representable integers. Listener constructors still
 accept an optional shared controller; omitting it creates a listener-local
@@ -234,6 +289,19 @@ factory exception isolation, foreign replies, stale posters and bounded queues.
 and signals. ASan/UBSan are separate build checks; two legacy epoll FD-exhaustion
 cases can conflict with the installed UBSan runtime's own pipe allocation and
 must be reported separately from a passing non-UBSan verification.
+
+The real-main journey harness creates temporary PBKDF2 account files and runs
+TCP/WebSocket bots through login/lobby/match/automatic allocation, readiness,
+fixed-tick input, result lookup and replay, with RST recovery and grace expiry.
+After rebuilding both executables, run:
+
+```bash
+python3 tests/room/FullJourneyIntegrationTest.py build/services/gateway/app/ArenaServer build/services/room/arena_replay --report-dir /tmp/arena-journey
+```
+
+This is an acceptance procedure, not a claim that a particular run passed.
+It uses the production application/account adapter; reports and logs go to the
+supplied directory.
 
 Multi-instance session authority, load-balancer readiness integration, a
 connection login deadline and distributed business idempotency remain planned.

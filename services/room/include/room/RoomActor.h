@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "arena/domain/Room.h"
+#include "arena/domain/Identity.h"
 
 namespace service::room
 {
@@ -182,8 +182,8 @@ struct ReplayResult
     std::vector<std::uint64_t> checksums;
 };
 
-/** @brief Owns a domain Room and a deterministic integer reference
- * simulation. All state access and destruction require its
+/** @brief Owns room simulation state and a deterministic integer
+ * reference simulation. All state access and destruction require its
  * construction thread. The gateway mailbox supplies roster/input
  * values; no network or wall clock enters this core.
  */
@@ -222,7 +222,7 @@ public:
 
 private:
     struct State;
-    /// Domain entity, simulation and journal are accessed only on the
+    /// Room identity, simulation and journal are accessed only on the
     /// fixed owner.
     std::unique_ptr<State> m_state;
 };

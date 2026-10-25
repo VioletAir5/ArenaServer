@@ -6,8 +6,9 @@ This is an implemented library, with no independent Room process yet.
 
 ## Ownership and mailbox
 
-An actor and its domain `Room` are constructed, stepped and destroyed on one
-fixed management owner. Foreign access to mutable actor state throws before
+`RoomActor` owns room identity, deterministic simulation and replay state.
+`RoomService` separately owns the managed domain `Room` and `Battle` lifecycle
+entities on the same fixed management owner. Foreign access to actor state throws before
 reading it; foreign destruction terminates. An actor needs no simulation mutex.
 The gateway currently uses one base owner for all rooms, separately from its
 connection workers. Moving a live actor between threads is unsupported.
@@ -30,7 +31,8 @@ once with unavailable. A ready timer from before cancellation has no effect.
 
 The interval is exactly 50 ms. The next deadline is advanced from the previous
 absolute deadline, so callback duration does not accumulate as timer drift.
-Every active room advances even without client traffic. Each tick uses the
+Every active simulation advances without client traffic; retained Finished
+results stay frozen. Each simulation tick uses the
 same integer update rule; the clock determines only when to run it.
 
 After a stall, the service runs at most four catch-up steps per timer callback.
@@ -42,11 +44,14 @@ failure stops the service and closes admission.
 
 ## Membership and recovery
 
-RoomJoin/RoomLeave still manipulate the bounded gateway roster. An authenticated
-RoomSnapshot request (52/53) lazily initializes an actor for that existing room;
-it can fail when the runtime actor limit is reached. Input (50/51) requires a
-snapshot's actor incarnation and membership epoch, and never recreates an actor.
-No client identity or target room is trusted from an input packet.
+Manual RoomJoin/RoomLeave still manipulate bounded legacy rosters. Their
+RoomSnapshot (52/53) lazily initializes an actor and can fail at the runtime
+limit. Server-managed rooms instead come from atomic two-player matchmaking
+allocation and open their actor/lifecycle immediately. Manual joins cannot
+enter managed room IDs or move managed participants; leave cannot bypass an
+active managed lifecycle. Input (50/51) requires snapshot incarnation and
+membership epoch and never recreates an actor. No input trusts client identity
+or a target room.
 
 At each cutoff the owner copies the complete `OnlineRegistry::roomMembers`
 roster, including Detached members in grace. Applied commands must match the
@@ -55,8 +60,10 @@ membership epoch. JWT recovery changes the transport fence but preserves the
 logical member and input sequence. A real move/leave increments `roomEpoch`;
 rejoining the same room after leaving resets that player's simulation state.
 An idempotent same-room join does not reset it. Fresh password login also resets
-the logical membership. When a room's roster becomes empty, its actor and
-journal are reclaimed on the next tick without requiring new traffic.
+the logical membership. Empty manual rooms reclaim their actors on the next
+tick without new traffic. Managed rooms keep their fixed two-member cohort
+through grace; missing/replaced/expired membership ends the match with a typed
+result. Finished actors retain their frozen state until result retention ends.
 
 A recreated actor receives a process-local, nonwrapping incarnation. Old inputs
 cannot address its replacement. This fence is not persistent across process
@@ -90,10 +97,58 @@ advance that sequence. Other attempts check validity, membership, then sequence.
 Exact same-batch duplicates apply once. Results map back to caller input order.
 Sequence and tick identities never wrap. A rejection does not consume sequence.
 
-The domain Room remains `Forming`. Preparation/start/battle/settlement protocols,
-CombatEngine, room allocation from a match assignment and autonomous movement
-from held controls are future work. Integer movement here is an explicit
-reference update rule for verifying ownership and deterministic execution.
+The kernel does not own a domain lifecycle entity. Managed `RoomService`
+instances drive domain Room/Battle transitions on their owner. Integer movement
+remains an explicit reference update rule, not general combat logic or autonomous
+movement from held controls.
+
+## Managed readiness, play and result
+
+The production owner receives one committed pair, binds both logical sessions
+atomically in `OnlineRegistry`, and opens a fixed two-player managed room.
+Both MatchTickets append the same `room_id` at field 13. The queue releases its
+assignment fences after this handoff; registry room membership prevents another
+match admission. A failed room opening rolls back allocation.
+
+The visible lifecycle is Forming → Ready → Playing → Settling → Finished.
+Both ready flags produce Ready at a tick cutoff; a following cutoff starts
+Playing. Only Playing accepts controls. The owner counts successful Playing
+ticks independently of forming ticks and wall-clock delay. At the duration
+limit it creates one immutable result and freezes simulation; the next cutoff
+releases both registry memberships and seals recording. It also settles on a
+missing/replaced/expired cohort member or readiness timeout. No client finish
+or winner command exists.
+
+| Request / response | IDs | Authenticated value contract |
+| --- | --- | --- |
+| RoomReady | 54 / 55 | ready flag, actor incarnation, membership epoch; managed status reply |
+| RoomStatus | 56 / 57 | current managed state or the same logical session's latest retained result |
+| Settlement | 58 / 59 | nonzero match ID; immutable result for the same player/session participant |
+
+Status includes the canonical snapshot, phase, match ID, readiness/presence,
+start/finish tick, played/duration ticks and optional settlement. The snapshot
+restores incarnation/member fences, position and last sequence. Connection
+owners capture authenticated values; management rechecks transport generation
+and logical membership before mutation. A late command from the old connection,
+actor or membership cannot ready or control a replacement.
+
+JWT recovery during grace preserves the actor, readiness and last input
+sequence while replacing transport authority. Detached members stay in the
+fixed cohort and cannot submit input until recovered. After Finished clears
+room membership, status/result queries still work for that current logical
+session within retention; a fresh password session cannot claim the old result.
+
+Result ID equals match ID. Both participants observe the same final tick,
+checksum and full player state. The stub always returns winner zero (draw),
+with reason Completed (1), MemberUnavailable (2) or ReadyTimeout (3). It has no
+currency, ranking, external persistence or restart recovery. Retained finished
+actors/results consume the same bounded room capacity until expiry or stop.
+
+| Gateway environment | Default | Bound |
+| --- | --- | --- |
+| `ARENA_BATTLE_TICKS` | `100` | 1..72000 successful Playing ticks |
+| `ARENA_READY_TIMEOUT_TICKS` | `600` | 1..72000 pre-start ticks |
+| `ARENA_RESULT_RETENTION_MS` | `60000` | 1..3600000 milliseconds |
 
 ## Checksums and replay
 
@@ -115,6 +170,9 @@ for each player in ascending PlayerId:
 Signed values use their modulo-2^32 unsigned conversion. The hash excludes
 timestamps, addresses, padding, STL container order and the checksum field.
 It is a deterministic diagnostic checksum, not cryptographic integrity.
+Readiness, presence, lifecycle phase and result metadata are not part of this
+version-one kernel hash/archive schema. Offline replay validates kernel state;
+it does not independently recompute the managed lifecycle or an economic effect.
 
 The bounded journal retains 200 ticks (10 seconds at an unstalled 20 Hz),
 including the full canonical roster, **all** attempted inputs and checksum
@@ -237,3 +295,15 @@ permutation invariance, bounded checkpoint replay, malformed logs, owner checks,
 32 simultaneous producers, stop races, deadline/catch-up behavior and real
 epoll/Asio timers. Network tests cover TCP with 0/4 workers and WebSocket,
 JWT recovery, membership and actor replacement fences and resource reclamation.
+
+The production-main journey procedure uses real file-backed PBKDF2 accounts,
+TCP/WebSocket bots, automatic allocation, ready/start, controls, RST recovery,
+grace expiry, idempotent result queries and saved-kernel replay. After building
+the application and tool, run:
+
+```bash
+python3 tests/room/FullJourneyIntegrationTest.py build/services/gateway/app/ArenaServer build/services/room/arena_replay --report-dir /tmp/arena-journey
+```
+
+This command documents the acceptance procedure; actual pass/failure evidence
+belongs to its generated report and task verification record.

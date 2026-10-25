@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "arena/domain/Ticket.h"
 
@@ -101,8 +102,21 @@ struct TicketSnapshot
     /// Queued or assigned and not explicitly released by the
     /// allocation owner.
     bool active{true};
+    /// Trusted room allocation retained with both assignment
+    /// histories.
+    std::optional<arena::domain::RoomId> roomId;
 };
 using QueueResult = std::expected<TicketSnapshot, QueueError>;
+
+/** @brief Exports each newly committed pair once to its allocation
+ * owner. */
+struct PairAssignment
+{
+    /// First participant committed by the deterministic search.
+    TicketSnapshot first;
+    /// Reciprocal participant; shares the first ticket's match ID.
+    TicketSnapshot second;
+};
 
 /** @brief Stores cumulative counts and fixed histograms without
  * sample growth. */
@@ -189,14 +203,19 @@ public:
      * logical session. */
     QueueResult
     status(PlayerId, SessionId, TicketId, Clock::time_point now);
-    /** @brief Expires/reclaims records and pairs eligible players
-     * within a bounded budget. */
-    void advance(Clock::time_point now);
+    /** @brief Expires records and returns newly committed pairs once,
+     * within the configured comparison budget. */
+    std::vector<PairAssignment> advance(Clock::time_point now);
     /** @brief Releases both assignment fences after the allocation
      * owner finishes. Retry is harmless; assigned history remains for
-     * the configured retention.
+     * the configured retention. A trusted room value is stored in
+     * both released histories without allocating or mutating a room.
      */
-    bool release(std::uint64_t matchId, Clock::time_point now);
+    bool release(
+        std::uint64_t matchId,
+        Clock::time_point now,
+        std::optional<arena::domain::RoomId> room = {}
+    );
     /** @brief Returns owner-consistent cumulative metrics and
      * physical gauges. */
     QueueMetrics metrics() const;

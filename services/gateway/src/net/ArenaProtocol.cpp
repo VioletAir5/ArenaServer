@@ -58,6 +58,18 @@ std::uint32_t payloadMsgId(const arena::protocol::Envelope& value)
         return arena::protocol::MSG_ROOM_SNAPSHOT_REQUEST;
     case arena::protocol::Envelope::kRoomSnapshotResponse:
         return arena::protocol::MSG_ROOM_SNAPSHOT_RESPONSE;
+    case arena::protocol::Envelope::kRoomReadyRequest:
+        return arena::protocol::MSG_ROOM_READY_REQUEST;
+    case arena::protocol::Envelope::kRoomReadyResponse:
+        return arena::protocol::MSG_ROOM_READY_RESPONSE;
+    case arena::protocol::Envelope::kRoomStatusRequest:
+        return arena::protocol::MSG_ROOM_STATUS_REQUEST;
+    case arena::protocol::Envelope::kRoomStatusResponse:
+        return arena::protocol::MSG_ROOM_STATUS_RESPONSE;
+    case arena::protocol::Envelope::kSettlementRequest:
+        return arena::protocol::MSG_SETTLEMENT_REQUEST;
+    case arena::protocol::Envelope::kSettlementResponse:
+        return arena::protocol::MSG_SETTLEMENT_RESPONSE;
     default:
         return arena::protocol::MSG_UNSPECIFIED;
     }
@@ -91,6 +103,12 @@ bool requestPayloadMatches(
         return envelope.has_room_input_request();
     case arena::protocol::MSG_ROOM_SNAPSHOT_REQUEST:
         return envelope.has_room_snapshot_request();
+    case arena::protocol::MSG_ROOM_READY_REQUEST:
+        return envelope.has_room_ready_request();
+    case arena::protocol::MSG_ROOM_STATUS_REQUEST:
+        return envelope.has_room_status_request();
+    case arena::protocol::MSG_SETTLEMENT_REQUEST:
+        return envelope.has_settlement_request();
     default:
         return true;
     }
@@ -124,6 +142,12 @@ bool responseMatches(std::uint32_t request, std::uint32_t response)
     case arena::protocol::MSG_ROOM_SNAPSHOT_REQUEST:
         return response ==
                arena::protocol::MSG_ROOM_SNAPSHOT_RESPONSE;
+    case arena::protocol::MSG_ROOM_READY_REQUEST:
+        return response == arena::protocol::MSG_ROOM_READY_RESPONSE;
+    case arena::protocol::MSG_ROOM_STATUS_REQUEST:
+        return response == arena::protocol::MSG_ROOM_STATUS_RESPONSE;
+    case arena::protocol::MSG_SETTLEMENT_REQUEST:
+        return response == arena::protocol::MSG_SETTLEMENT_RESPONSE;
     default:
         // Custom routes retain the existing supported reply contract.
         return response == arena::protocol::MSG_LOGIN_RESPONSE ||

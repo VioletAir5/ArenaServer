@@ -2,10 +2,15 @@
 
 `arena_auth` now implements the authentication interface used by Gateway:
 
-- `PasswordDigest`: replaceable `hash/verify` interface; the supplied stub returns
-  `Unavailable`. No plaintext or fast-hash fallback is provided.
-- `PasswordAccounts`: replaceable account/digest lookup; the supplied stub returns
-  `Unavailable`. Database account storage remains planned.
+- `PasswordDigest`: replaceable hash/verify interface. `Pbkdf2PasswordDigest`
+  uses OpenSSL PBKDF2-HMAC-SHA256, a random 16-byte salt, a 32-byte key and
+  600000 rounds when creating digests. Verification accepts 100000..2000000
+  stored rounds and uses constant-time key equality. Malformed digests fail closed.
+- `PasswordAccounts`: replaceable account/digest lookup. `FilePasswordAccounts`
+  loads a read-only startup snapshot of tab-separated account, nonzero player ID
+  and versioned digest. Duplicate accounts/players and malformed rows reject
+  startup. Bounds are 8 MiB, 10000 accounts, 128 ASCII account bytes and 512 bytes
+  per row. Database storage and live reload remain planned.
 - `LoginAuthenticator`: bounded password verification through these adapters.
 - `JwtTokens`: OpenSSL 3 HMAC-SHA256 issuing and verification with a closed JWT profile.
 
@@ -39,9 +44,28 @@ OpenSSL primitives: [EVP_MAC](https://docs.openssl.org/3.0/man3/EVP_MAC/) and
 `ArenaServer asio handshake` reads `ARENA_JWT_KEY` once. It requires at least 32
 random key bytes and has no default key. Missing configuration retains the previous
 login-unavailable behavior; invalid configured keys fail startup.
-The in-process credential adapters remain stubs, so password login cannot succeed in
-the application until real account/KDF adapters are supplied. Test doubles are
-confined to tests and are never selected by the application.
+Set `ARENA_ACCOUNTS_FILE=/safe/local/accounts.tsv` to enable password login.
+Without this setting the account adapter remains unavailable. Configured unreadable
+or invalid account files reject startup. Test doubles are never selected by main.
+The file is immutable after loading; no file I/O occurs during lookup. Password
+KDF work is synchronous on the connection owner, so this local adapter is intended
+for the current bounded development deployment; an executor-backed credential
+service is needed before handling large login bursts.
+
+Create two real account rows without putting passwords in shell arguments:
+
+```sh
+umask 077
+python3 tools/password_account.py alice 42 > /safe/local/accounts.tsv
+python3 tools/password_account.py bob 43 >> /safe/local/accounts.tsv
+export ARENA_ACCOUNTS_FILE=/safe/local/accounts.tsv
+export ARENA_JWT_KEY="$(openssl rand -hex 32)"
+./build/services/gateway/app/ArenaServer asio handshake
+```
+
+The helper prompts twice per password. Its output contains salted digests, not
+plaintext passwords. The file and JWT key must stay outside the repository.
+Transport encryption is not implemented by these loopback TCP/WS listeners.
 
 `makeLoginMessageRegistry` accepts actual adapters and one shared `OnlineRegistry`
 directory for all workers/listeners. Protobuf `LoginRequest.credential_kind` tag 4

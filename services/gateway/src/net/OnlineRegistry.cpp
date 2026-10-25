@@ -19,6 +19,9 @@ namespace service::gateway
 {
 namespace
 {
+// Ordinary clients cannot reserve a future managed-room identity.
+constexpr std::uint64_t managedRoomBit = std::uint64_t{1} << 63;
+
 OnlineRegistryConfig withMaximum(std::size_t maximum)
 {
     OnlineRegistryConfig config;
@@ -45,6 +48,16 @@ struct OnlineRegistry::State
         std::int64_t expiresAt;
         std::function<std::int64_t()> wallNow;
         std::shared_ptr<SessionLease> active;
+    };
+
+    struct Room
+    {
+        /// Live and detached members, pruned independently of the
+        /// cohort.
+        std::unordered_set<std::uint64_t> players;
+        /// Immutable allocation survives expiry until its owner
+        /// retires it.
+        std::optional<ManagedRoom> managed;
     };
 
     // Declare this before the transaction lock. Its destructor runs
@@ -92,8 +105,11 @@ struct OnlineRegistry::State
         const auto found = rooms.find(entry.snapshot.roomId->value());
         if (found != rooms.end())
         {
-            found->second.erase(entry.snapshot.playerId.value());
-            if (found->second.empty())
+            found->second.players.erase(
+                entry.snapshot.playerId.value()
+            );
+            if (found->second.players.empty() &&
+                !found->second.managed)
                 rooms.erase(found);
         }
         entry.snapshot.roomId.reset();
@@ -159,8 +175,8 @@ struct OnlineRegistry::State
         // The bounded copy survives removal of the last member/room.
         // Never scan unrelated players on a room request.
         const std::vector<std::uint64_t> members(
-            found->second.begin(),
-            found->second.end()
+            found->second.players.begin(),
+            found->second.players.end()
         );
         for (const auto player : members)
             prunePlayer(player, now, kicks);
@@ -204,8 +220,8 @@ struct OnlineRegistry::State
         const auto found = rooms.find(room.value());
         if (found == rooms.end())
             return result;
-        result.reserve(found->second.size());
-        for (const auto player : found->second)
+        result.reserve(found->second.players.size());
+        for (const auto player : found->second.players)
             result.push_back(players.at(player).snapshot);
         std::sort(
             result.begin(),
@@ -228,10 +244,7 @@ struct OnlineRegistry::State
     const OnlineRegistryConfig config;
     mutable std::mutex mutex;
     std::unordered_map<std::uint64_t, Entry> players;
-    std::unordered_map<
-        std::uint64_t,
-        std::unordered_set<std::uint64_t>>
-        rooms;
+    std::unordered_map<std::uint64_t, Room> rooms;
     std::uint64_t epoch{0};
     std::uint64_t sessionId{0};
     bool stopped{false};
@@ -540,7 +553,9 @@ std::expected<OnlineState, OnlineError> OnlineRegistry::joinRoom(
     auto* entry = m_state->prepare(binding, now, kicks);
     if (!entry)
         return std::unexpected(OnlineError::NotCurrent);
-    if (!room.value())
+    if ((room.value() & managedRoomBit) ||
+        (entry->snapshot.roomId &&
+         m_state->rooms.at(entry->snapshot.roomId->value()).managed))
         return std::unexpected(OnlineError::InvalidRoom);
     m_state->pruneRoom(room, now, kicks);
     entry = m_state->prepare(binding, now, kicks);
@@ -553,7 +568,8 @@ std::expected<OnlineState, OnlineError> OnlineRegistry::joinRoom(
         return std::unexpected(OnlineError::Capacity);
     auto target = m_state->rooms.find(room.value());
     if (target != m_state->rooms.end() &&
-        target->second.size() >= m_state->config.maxRoomMembers)
+        target->second.players.size() >=
+            m_state->config.maxRoomMembers)
         return std::unexpected(OnlineError::RoomFull);
     const auto atRoomCapacity = [&]
     {
@@ -561,7 +577,7 @@ std::expected<OnlineState, OnlineError> OnlineRegistry::joinRoom(
                                 m_state->rooms
                                         .at(entry->snapshot.roomId
                                                 ->value())
-                                        .size() == 1;
+                                        .players.size() == 1;
         return target == m_state->rooms.end() &&
                m_state->rooms.size() >= m_state->config.maxRooms &&
                !retiresOld;
@@ -598,7 +614,7 @@ std::expected<OnlineState, OnlineError> OnlineRegistry::joinRoom(
     );
     try
     {
-        destination->second.insert(binding.playerId.value());
+        destination->second.players.insert(binding.playerId.value());
     }
     catch (...)
     {
@@ -626,6 +642,8 @@ OnlineRegistry::leaveRoom(SessionBinding binding)
         return std::unexpected(OnlineError::NotCurrent);
     if (!entry->snapshot.roomId)
         return m_state->view(*entry);
+    if (m_state->rooms.at(entry->snapshot.roomId->value()).managed)
+        return std::unexpected(OnlineError::InvalidRoom);
     if (entry->snapshot.roomEpoch ==
         std::numeric_limits<std::uint64_t>::max())
         return std::unexpected(OnlineError::Capacity);
@@ -636,6 +654,145 @@ OnlineRegistry::leaveRoom(SessionBinding binding)
     m_state->removeRoom(*entry);
     entry->snapshot.roomEpoch = next.roomEpoch;
     return result;
+}
+
+std::expected<ManagedRoom, OnlineError> OnlineRegistry::allocateMatch(
+    std::uint64_t matchId,
+    std::array<MatchParticipant, 2> participants
+)
+{
+    if (!matchId || (matchId & managedRoomBit) ||
+        participants[0].playerId == participants[1].playerId)
+        return std::unexpected(OnlineError::InvalidRoom);
+    if (participants[1].playerId.value() <
+        participants[0].playerId.value())
+        std::swap(participants[0], participants[1]);
+    const arena::domain::RoomId room{managedRoomBit | matchId};
+    State::Kicks kicks;
+    std::lock_guard lock(m_state->mutex);
+    if (m_state->stopped)
+        return std::unexpected(OnlineError::NotCurrent);
+    const auto now = m_state->config.now();
+    for (const auto& participant : participants)
+        m_state
+            ->prunePlayer(participant.playerId.value(), now, kicks);
+    if (m_state->rooms.size() >= m_state->config.maxRooms &&
+        !m_state->rooms.contains(room.value()))
+        m_state->prune(now, kicks);
+    const auto existing = m_state->rooms.find(room.value());
+    std::array<State::Entry*, 2> entries{};
+    for (std::size_t index = 0; index < participants.size(); ++index)
+    {
+        const auto& participant = participants[index];
+        const auto found = m_state->players.find(
+            participant.playerId.value()
+        );
+        if (found == m_state->players.end() ||
+            found->second.snapshot.sessionId !=
+                participant.sessionId ||
+            m_state->expired(found->second, now) ||
+            (found->second.snapshot.presence == Presence::Online &&
+             (!found->second.active ||
+              !found->second.active->current())))
+            return std::unexpected(OnlineError::NotCurrent);
+        entries[index] = &found->second;
+    }
+    if (existing != m_state->rooms.end())
+    {
+        if (!existing->second.managed ||
+            existing->second.managed->matchId != matchId)
+            return std::unexpected(OnlineError::InvalidRoom);
+        const auto& saved = *existing->second.managed;
+        for (std::size_t index = 0; index < participants.size();
+             ++index)
+        {
+            const auto& member = saved.members[index];
+            const auto& current = entries[index]->snapshot;
+            if (member.playerId != participants[index].playerId ||
+                member.sessionId != participants[index].sessionId ||
+                current.roomId != room ||
+                current.roomEpoch != member.roomEpoch)
+                return std::unexpected(OnlineError::InvalidRoom);
+        }
+        return saved;
+    }
+    if (m_state->config.maxRoomMembers < 2)
+        return std::unexpected(OnlineError::RoomFull);
+    if (m_state->rooms.size() >= m_state->config.maxRooms)
+        return std::unexpected(OnlineError::Capacity);
+    for (const auto* entry : entries)
+    {
+        if (entry->snapshot.roomId)
+            return std::unexpected(OnlineError::InvalidRoom);
+        // Reserve one further generation for unconditional owner
+        // cleanup.
+        if (entry->snapshot.roomEpoch >= UINT64_MAX - 1)
+            return std::unexpected(OnlineError::Capacity);
+    }
+    const ManagedRoom allocation{
+        matchId,
+        room,
+        {{{participants[0].playerId,
+           participants[0].sessionId,
+           entries[0]->snapshot.roomEpoch + 1},
+          {participants[1].playerId,
+           participants[1].sessionId,
+           entries[1]->snapshot.roomEpoch + 1}}}
+    };
+    State::Room prepared;
+    prepared.players.reserve(2);
+    for (const auto& participant : participants)
+        prepared.players.insert(participant.playerId.value());
+    prepared.managed = allocation;
+    // All allocation happens before either participant changes. A
+    // failure cannot leave one player bound or consume the old room
+    // indexes.
+    m_state->rooms.emplace(room.value(), std::move(prepared));
+    for (std::size_t index = 0; index < entries.size(); ++index)
+    {
+        entries[index]->snapshot.roomId = room;
+        entries[index]->snapshot.roomEpoch = allocation.members[index]
+                                                 .roomEpoch;
+    }
+    return allocation;
+}
+
+std::optional<ManagedRoom>
+OnlineRegistry::managedRoom(arena::domain::RoomId room) const
+{
+    std::lock_guard lock(m_state->mutex);
+    const auto found = m_state->rooms.find(room.value());
+    return found == m_state->rooms.end() ? std::nullopt
+                                         : found->second.managed;
+}
+
+bool OnlineRegistry::finishMatch(
+    arena::domain::RoomId room, std::uint64_t matchId
+)
+{
+    std::lock_guard lock(m_state->mutex);
+    const auto found = m_state->rooms.find(room.value());
+    if (found == m_state->rooms.end() || !found->second.managed ||
+        found->second.managed->matchId != matchId)
+        return false;
+    for (const auto& member : found->second.managed->members)
+    {
+        const auto player = m_state->players.find(
+            member.playerId.value()
+        );
+        if (player == m_state->players.end())
+            continue;
+        auto& current = player->second.snapshot;
+        if (current.sessionId == member.sessionId &&
+            current.roomId == room &&
+            current.roomEpoch == member.roomEpoch)
+        {
+            current.roomId.reset();
+            ++current.roomEpoch;
+        }
+    }
+    m_state->rooms.erase(found);
+    return true;
 }
 
 std::vector<OnlineSnapshot>

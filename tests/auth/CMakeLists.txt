@@ -1,4 +1,4 @@
-add_executable(arena_auth_tests AuthSessionTest.cpp
+add_executable(arena_auth_tests AuthSessionTest.cpp PasswordAdaptersTest.cpp
     OnlineRegistryTest.cpp OnlineRegistryMaintenanceTest.cpp OnlineProtocolTest.cpp)
 target_link_libraries(arena_auth_tests PRIVATE arena_gateway GTest::gtest_main)
 target_compile_options(arena_auth_tests PRIVATE -Wall -Wextra -Wpedantic
