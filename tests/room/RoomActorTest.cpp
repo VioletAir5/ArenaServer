@@ -484,7 +484,7 @@ TEST(
     log.ticks[1].checksum ^= 1;
     auto tampered = RoomActor::replay(log);
     ASSERT_FALSE(tampered);
-    EXPECT_EQ(tampered.error(), ReplayError::ChecksumMismatch);
+    EXPECT_EQ(tampered.error().code, ReplayError::ChecksumMismatch);
 }
 
 TEST(
@@ -597,6 +597,249 @@ TEST(RoomActorTest, ReplayRejectsInvalidCheckpointAndTickOverflow)
         log.config
     );
     EXPECT_FALSE(RoomActor::replay(log));
+}
+
+TEST(
+    RoomActorTest, TickResultOwnsCanonicalCutoffAfterJournalRollsOver
+)
+{
+    ActorConfig config;
+    config.historyTicks = 1;
+    RoomActor actor(RoomId{7}, 9, config);
+    const auto checkpoint = actor.snapshot();
+    auto first = actor.step(
+        {member(2), member(1)},
+        {{member(2), 0, 2, 0},
+         {member(1), 1, -1, 0},
+         {member(1), 1, -1, 0}}
+    );
+    EXPECT_EQ(first.record.tick, first.snapshot.tick);
+    EXPECT_EQ(first.record.checksum, first.snapshot.checksum);
+    EXPECT_EQ(
+        first.record.members,
+        (std::vector{member(1), member(2)})
+    );
+    EXPECT_EQ(
+        first.record.inputs,
+        (std::vector<Input>{
+            {member(1), 1, -1, 0},
+            {member(1), 1, -1, 0},
+            {member(2), 0, 2, 0}
+        })
+    );
+    actor.step({}, {});
+    EXPECT_EQ(actor.replayLog().checkpoint.tick, 1U);
+    ReplayLog archived{config, checkpoint, {first.record}};
+    auto replayed = RoomActor::replay(archived);
+    ASSERT_TRUE(replayed);
+    EXPECT_EQ(replayed->snapshot, first.snapshot);
+}
+
+TEST(
+    RoomActorTest,
+    FullArchiveReplaysBeyondRollingHistoryWithEveryTickChecksum
+)
+{
+    ActorConfig config;
+    config.historyTicks = 2;
+    RoomActor actor(RoomId{7}, 9, config);
+    ReplayLog archive{config, actor.snapshot(), {}};
+    std::vector<std::uint64_t> expected;
+    std::uint64_t sequence = 0;
+    for (std::uint64_t tick = 1; tick <= 12; ++tick)
+    {
+        std::vector<Input> inputs;
+        if (tick % 3)
+            inputs.push_back({member(1), ++sequence, 1, -1});
+        auto result = actor.step({member(1)}, std::move(inputs));
+        expected.push_back(result.snapshot.checksum);
+        archive.ticks.push_back(std::move(result.record));
+    }
+    EXPECT_EQ(actor.replayLog().ticks.size(), 2U);
+    EXPECT_EQ(actor.replayLog().checkpoint.tick, 10U);
+    auto replayed = RoomActor::replay(archive);
+    ASSERT_TRUE(replayed);
+    EXPECT_EQ(replayed->checksums, expected);
+    EXPECT_EQ(replayed->snapshot, actor.snapshot());
+}
+
+TEST(RoomActorTest, CheckpointDesyncReportsAbsoluteTickAndBothHashes)
+{
+    ActorConfig config;
+    config.historyTicks = 2;
+    RoomActor actor(RoomId{7}, 9, config);
+    for (std::uint64_t sequence = 1; sequence <= 5; ++sequence)
+        actor.step({member(1)}, {{member(1), sequence, 1, 0}});
+    auto log = actor.replayLog();
+    ASSERT_EQ(log.checkpoint.tick, 3U);
+    const auto actual = log.checkpoint.checksum;
+    log.checkpoint.checksum ^= 1;
+    auto replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    const auto& failure = replayed.error();
+    EXPECT_EQ(failure.code, ReplayError::ChecksumMismatch);
+    EXPECT_EQ(failure.tick, 3U);
+    EXPECT_EQ(failure.expectedChecksum, log.checkpoint.checksum);
+    EXPECT_EQ(failure.actualChecksum, actual);
+    EXPECT_NE(failure.reason.find("checkpoint"), std::string::npos);
+}
+
+TEST(RoomActorTest, FirstInputDesyncPrecedesLaterMalformedRecord)
+{
+    ActorConfig config;
+    config.historyTicks = 4;
+    RoomActor actor(RoomId{7}, 9, config);
+    for (std::uint64_t sequence = 1; sequence <= 8; ++sequence)
+        actor.step({member(1)}, {{member(1), sequence, 1, 0}});
+    auto log = actor.replayLog();
+    ASSERT_EQ(log.checkpoint.tick, 4U);
+    log.ticks[1].inputs[0].dx = -1;
+    log.ticks.back().tick = 0;
+    auto expectedActual = log.checkpoint;
+    expectedActual.tick = 6;
+    expectedActual.players[0].sequence = 6;
+    expectedActual.players[0].lastDx = -1;
+    // Tick five adds one, then the modified tick six subtracts one.
+    expectedActual.checksum = referenceChecksum(
+        expectedActual,
+        config
+    );
+    auto replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    const auto& failure = replayed.error();
+    EXPECT_EQ(failure.code, ReplayError::ChecksumMismatch);
+    EXPECT_EQ(failure.tick, 6U);
+    EXPECT_EQ(failure.expectedChecksum, log.ticks[1].checksum);
+    EXPECT_EQ(failure.actualChecksum, expectedActual.checksum);
+    EXPECT_FALSE(failure.reason.empty());
+}
+
+TEST(
+    RoomActorTest,
+    ZeroExpectedHashIsPresentAndLocatesFirstMismatchedTick
+)
+{
+    RoomActor actor(RoomId{7}, 9);
+    actor.step({member(1)}, {});
+    actor.step({member(1)}, {{member(1), 0, 0, 0}});
+    actor.step({}, {});
+    auto log = actor.replayLog();
+    const auto actual = log.ticks[1].checksum;
+    log.ticks[1].checksum = 0;
+    log.ticks[2].checksum ^= 1;
+    auto replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    const auto& failure = replayed.error();
+    EXPECT_EQ(failure.code, ReplayError::ChecksumMismatch);
+    EXPECT_EQ(failure.tick, 2U);
+    ASSERT_TRUE(failure.expectedChecksum);
+    EXPECT_EQ(*failure.expectedChecksum, 0U);
+    EXPECT_EQ(failure.actualChecksum, actual);
+}
+
+TEST(RoomActorTest, InvalidConfigAndCheckpointAreNotReportedAsDesync)
+{
+    ActorConfig config;
+    config.historyTicks = 1;
+    RoomActor actor(RoomId{7}, 9, config);
+    actor.step({member(1)}, {});
+    actor.step({member(1)}, {});
+    auto log = actor.replayLog();
+    ASSERT_EQ(log.checkpoint.tick, 1U);
+    log.config.positionLimit = 0;
+    auto replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, 1U);
+    EXPECT_FALSE(replayed.error().expectedChecksum);
+    EXPECT_FALSE(replayed.error().actualChecksum);
+    EXPECT_FALSE(replayed.error().reason.empty());
+    log = actor.replayLog();
+    log.checkpoint.players[0].x = config.positionLimit + 1;
+    replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, 1U);
+    EXPECT_FALSE(replayed.error().expectedChecksum);
+    EXPECT_FALSE(replayed.error().actualChecksum);
+}
+
+TEST(
+    RoomActorTest,
+    MalformedTickUsesExpectedAbsoluteTickWithoutHashValues
+)
+{
+    ActorConfig config;
+    config.historyTicks = 2;
+    RoomActor actor(RoomId{7}, 9, config);
+    for (std::uint64_t tick = 0; tick < 6; ++tick)
+        actor.step({}, {});
+    auto log = actor.replayLog();
+    ASSERT_EQ(log.checkpoint.tick, 4U);
+    log.ticks[1].tick = 900;
+    auto replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, 6U);
+    EXPECT_FALSE(replayed.error().expectedChecksum);
+    EXPECT_FALSE(replayed.error().actualChecksum);
+    EXPECT_FALSE(replayed.error().reason.empty());
+    log = actor.replayLog();
+    log.checkpoint.tick = UINT64_MAX;
+    log.checkpoint.checksum = referenceChecksum(
+        log.checkpoint,
+        config
+    );
+    log.ticks = {{0, {}, {}, 0}};
+    replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, UINT64_MAX);
+}
+
+TEST(RoomActorTest, MalformedCanonicalRecordWinsOverItsHashMismatch)
+{
+    RoomActor actor(RoomId{7}, 9);
+    actor.step({member(1), member(2)}, {});
+    actor.step(
+        {member(1), member(2)},
+        {{member(1), 1, 1, 0}, {member(2), 1, 0, 1}}
+    );
+    auto original = actor.replayLog();
+    auto log = original;
+    std::reverse(
+        log.ticks[1].inputs.begin(),
+        log.ticks[1].inputs.end()
+    );
+    log.ticks[1].checksum ^= 1;
+    auto replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, 2U);
+    EXPECT_FALSE(replayed.error().expectedChecksum);
+    EXPECT_FALSE(replayed.error().actualChecksum);
+    log = original;
+    log.ticks[1].members[1] = log.ticks[1].members[0];
+    replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, 2U);
+    log = original;
+    log.config.maxInputsPerTick = 1;
+    replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, 2U);
+    log = original;
+    log.config.maxMembers = 1;
+    log.checkpoint.checksum = referenceChecksum(
+        log.checkpoint,
+        log.config
+    );
+    replayed = RoomActor::replay(log);
+    ASSERT_FALSE(replayed);
+    EXPECT_EQ(replayed.error().code, ReplayError::InvalidLog);
+    EXPECT_EQ(replayed.error().tick, 1U);
 }
 
 TEST(RoomActorTest, ForeignOwnerAccessRejectsBeforeMutation)

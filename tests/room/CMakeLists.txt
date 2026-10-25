@@ -1,4 +1,5 @@
-add_executable(arena_room_tests RoomActorTest.cpp RoomServiceTest.cpp)
+add_executable(arena_room_tests RoomActorTest.cpp RoomServiceTest.cpp
+    ReplayFileTest.cpp ReplayAcceptanceTest.cpp ReplayRecorderTest.cpp)
 target_link_libraries(arena_room_tests PRIVATE arena_gateway arena_room GTest::gtest_main)
 target_compile_options(arena_room_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
@@ -31,3 +32,11 @@ add_test(NAME RoomTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(RoomTransport_ws PROPERTIES
     TIMEOUT 40 RUN_SERIAL TRUE LABELS "integration;network;room;websocket")
+
+add_dependencies(arena_room_tests arena_replay)
+add_test(NAME ReplayToolAcceptance
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ReplayToolTest.py"
+        "$<TARGET_FILE:arena_room_tests>" "$<TARGET_FILE:arena_replay>")
+set_tests_properties(ReplayToolAcceptance PROPERTIES
+    TIMEOUT 180 RUN_SERIAL TRUE LABELS "integration;replay;determinism")

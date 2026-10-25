@@ -8,6 +8,7 @@
 #include "net/MessageRegistry.h"
 #include "net/OnlineRegistry.h"
 
+#include "room/ReplayRecorder.h"
 #include "room/RoomActor.h"
 
 namespace service::gateway
@@ -26,6 +27,9 @@ struct RoomServiceConfig
     /// Immutable simulation and journal limits shared by hosted
     /// actors.
     service::room::ActorConfig actor;
+    /// Optional full-session archive sink; disk I/O runs off the
+    /// owner.
+    std::shared_ptr<service::room::ReplayRecorder> replays;
     /// Injectable monotonic clock; only the management owner calls
     /// it.
     std::function<ConnectionClock::time_point()> now{

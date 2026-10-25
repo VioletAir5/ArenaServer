@@ -426,7 +426,7 @@ TickResult RoomActor::step(
     // Prepare every externally visible copy and rollover allocation
     // before the journal insertion. The following state swaps and
     // deque eviction cannot throw.
-    TickResult result{working, std::move(results)};
+    TickResult result{working, std::move(results), record};
     State::JournalEntry entry{std::move(record), working};
     std::optional<Snapshot> checkpoint;
     if (state.journal.size() == state.config.historyTicks)
@@ -457,59 +457,125 @@ ReplayLog RoomActor::replayLog() const
     return result;
 }
 
-std::expected<ReplayResult, ReplayError>
+std::expected<ReplayResult, ReplayFailure>
 RoomActor::replay(const ReplayLog& log)
 {
+    const auto invalid = [](std::uint64_t tick, const char* reason)
+    {
+        return std::unexpected(
+            ReplayFailure{
+                ReplayError::InvalidLog,
+                tick,
+                {},
+                {},
+                reason
+            }
+        );
+    };
+    const auto mismatch = [](std::uint64_t tick,
+                             std::uint64_t expected,
+                             std::uint64_t actual,
+                             const char* reason)
+    {
+        return std::unexpected(
+            ReplayFailure{
+                ReplayError::ChecksumMismatch,
+                tick,
+                expected,
+                actual,
+                reason
+            }
+        );
+    };
     try
     {
         validateConfig(log.config);
     }
     catch (const std::invalid_argument&)
     {
-        return std::unexpected(ReplayError::InvalidLog);
+        return invalid(
+            log.checkpoint.tick,
+            "invalid actor configuration"
+        );
     }
-    if (!validSnapshot(log.checkpoint, log.config) ||
-        log.ticks.size() > log.config.historyTicks)
-        return std::unexpected(ReplayError::InvalidLog);
-    if (stateChecksum(log.checkpoint, log.config) !=
-        log.checkpoint.checksum)
-        return std::unexpected(ReplayError::ChecksumMismatch);
+    if (!validSnapshot(log.checkpoint, log.config))
+        return invalid(
+            log.checkpoint.tick,
+            "invalid canonical checkpoint state"
+        );
+    const auto checkpointHash = stateChecksum(
+        log.checkpoint,
+        log.config
+    );
+    if (checkpointHash != log.checkpoint.checksum)
+        return mismatch(
+            log.checkpoint.tick,
+            log.checkpoint.checksum,
+            checkpointHash,
+            "checkpoint checksum mismatch"
+        );
 
-    auto previous = log.checkpoint.tick;
-    for (const auto& record : log.ticks)
-    {
-        if (previous == UINT64_MAX || record.tick != previous + 1 ||
-            !validRoster(record.members, log.config) ||
-            record.inputs.size() > log.config.maxInputsPerTick ||
-            !std::is_sorted(
-                record.inputs.begin(),
-                record.inputs.end(),
-                inputLess
-            ))
-            return std::unexpected(ReplayError::InvalidLog);
-        previous = record.tick;
-    }
-
+    // Retention affects neither controls nor checksums. Full archives
+    // may span many rolling journals, so replay only retains its
+    // current working cutoff.
+    auto workingConfig = log.config;
+    workingConfig.historyTicks = 1;
     RoomActor actor(
         log.checkpoint.roomId,
         log.checkpoint.incarnation,
-        log.config
+        workingConfig
     );
     actor.m_state->current = log.checkpoint;
     actor.m_state->checkpoint = log.checkpoint;
     ReplayResult result{log.checkpoint, {}};
     result.checksums.reserve(log.ticks.size());
+    auto previous = log.checkpoint.tick;
     for (const auto& record : log.ticks)
     {
+        if (previous == UINT64_MAX)
+            return invalid(previous, "tick counter overflow");
+        const auto expectedTick = previous + 1;
+        if (record.tick != expectedTick)
+            return invalid(
+                expectedTick,
+                "non-contiguous tick sequence"
+            );
+        if (record.members.size() > log.config.maxMembers)
+            return invalid(
+                expectedTick,
+                "roster exceeds member limit"
+            );
+        if (!validRoster(record.members, log.config))
+            return invalid(expectedTick, "invalid canonical roster");
+        if (record.inputs.size() > log.config.maxInputsPerTick)
+            return invalid(
+                expectedTick,
+                "input batch exceeds tick limit"
+            );
+        if (!std::is_sorted(
+                record.inputs.begin(),
+                record.inputs.end(),
+                inputLess
+            ))
+            return invalid(expectedTick, "non-canonical input order");
+
+        // Check each cutoff immediately: a later malformed record
+        // must not hide an earlier state divergence in an otherwise
+        // valid prefix.
         auto tick = actor.step(record.members, record.inputs);
         if (tick.snapshot.checksum != record.checksum)
-            return std::unexpected(ReplayError::ChecksumMismatch);
+            return mismatch(
+                expectedTick,
+                record.checksum,
+                tick.snapshot.checksum,
+                "tick checksum mismatch"
+            );
         result.checksums.push_back(tick.snapshot.checksum);
         result.snapshot = std::move(tick.snapshot);
+        previous = expectedTick;
     }
     return result;
 }
-
 std::uint64_t RoomActor::checksum(
     const Snapshot& snapshot, const ActorConfig& config
 )

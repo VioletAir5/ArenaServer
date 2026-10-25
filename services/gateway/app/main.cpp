@@ -43,6 +43,8 @@
 #include "net/WebSocketServer.h"
 #include "os/FileDescriptor.h"
 
+#include "room/ReplayRecorder.h"
+
 using namespace service::gateway;
 
 namespace
@@ -266,8 +268,20 @@ void printRooms(const RoomService& rooms)
               << " skipped_wall_slots=" << metrics.skippedWallSlots
               << '\n';
 }
-/** @brief Exports cumulative wait/quality distributions and final
- * resource gauges. */
+/** @brief Reports archive completion, admission and storage failures.
+ */
+void printReplays(const service::room::ReplayRecorder& recorder)
+{
+    const auto stats = recorder.metrics();
+    std::cerr << "REPLAY_COUNTS completed=" << stats.completed
+              << " failed=" << stats.failed
+              << " rejected=" << stats.rejected
+              << " active=" << stats.active
+              << " queued=" << stats.queued
+              << " directory=" << recorder.directory().string()
+              << " last_error=" << stats.lastError << '\n';
+}
+/** @brief Exports cumulative matchmaking wait and quality metrics. */
 void printMatch(const MatchmakingService& matcher)
 {
     const auto metrics = matcher.metrics();
@@ -320,6 +334,7 @@ int main(int argc, char** argv)
     std::shared_ptr<OnlineRegistry> online;
     std::shared_ptr<MatchmakingService> matcher;
     std::shared_ptr<RoomService> rooms;
+    std::shared_ptr<service::room::ReplayRecorder> replays;
     OnlineRegistryConfig onlineConfig;
     std::uint16_t tcpPort = 8888;
     std::uint16_t wsPort = 8889;
@@ -423,7 +438,23 @@ int main(int argc, char** argv)
                     },
                     matchConfig
                 );
-                rooms = std::make_shared<RoomService>(online);
+                RoomServiceConfig roomConfig;
+                if (const auto* directory = std::getenv(
+                        "ARENA_REPLAY_DIR"
+                    ))
+                {
+                    service::room::ReplayRecorderConfig archive;
+                    archive.directory = directory;
+                    replays = std::make_shared<
+                        service::room::ReplayRecorder>(
+                        std::move(archive)
+                    );
+                    roomConfig.replays = replays;
+                }
+                rooms = std::make_shared<RoomService>(
+                    online,
+                    std::move(roomConfig)
+                );
                 registry = makeLoginMessageRegistry(
                     std::move(passwords),
                     std::move(tokens),
@@ -434,7 +465,8 @@ int main(int argc, char** argv)
             }
             catch (const std::exception&)
             {
-                std::cerr << "Invalid authentication configuration\n";
+                std::cerr << "Invalid authentication or replay "
+                             "configuration\n";
                 return 2;
             }
         }
@@ -499,6 +531,11 @@ int main(int argc, char** argv)
         {
             rooms->stop();
             printRooms(*rooms);
+        }
+        if (replays)
+        {
+            replays->stop();
+            printReplays(*replays);
         }
         if (matcher)
         {
@@ -599,6 +636,11 @@ int main(int argc, char** argv)
     {
         rooms->stop();
         printRooms(*rooms);
+    }
+    if (replays)
+    {
+        replays->stop();
+        printReplays(*replays);
     }
     if (matcher)
     {

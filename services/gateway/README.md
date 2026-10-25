@@ -239,3 +239,26 @@ Multi-instance session authority, load-balancer readiness integration, a
 connection login deadline and distributed business idempotency remain planned.
 This architecture supports their placement but does not claim deployed high
 availability or automatic recovery of in-flight business operations.
+
+## Persistent room replay
+
+Set `ARENA_REPLAY_DIR=/safe/local/replays` when starting the authenticated
+handshake configuration to archive active rooms. The management owner copies
+an initial snapshot and every committed canonical tick to `ReplayRecorder`;
+a bounded private disk worker writes the complete stream independently of the
+actor's rolling in-memory history. Empty ticks and rejected simulation input
+attempts remain in the archive.
+
+Each run uses its own directory. Explicit room retirement/service stop seals
+accepted jobs; only a flushed, closed archive with its footer is renamed to
+`.areplay`. Queue/storage failures invalidate that recording and leave any
+partial file as `.part`, while simulation continues. Shutdown reports
+`REPLAY_COUNTS` with completed, failed and rejected counts. Recording does not
+promise fsync-level durability, unlimited disk retention or crash recovery.
+
+Run `build/services/room/arena_replay <file.areplay> --report <desync.json>`.
+Exit 0 means every recorded tick matched; 1 reports the first absolute desync
+tick and expected/actual checksum; 2 means malformed, unsupported, bounded-out
+or unreadable input/report output. The JSON also exposes every successful
+replay tick, with 64-bit integers as decimal strings. See
+[room replay format and tools](../room/README.md) for limits and examples.

@@ -125,11 +125,98 @@ step, and checks every checksum. Same initial checkpoint, configuration,
 incarnation and tick input records produce the same checksum sequence.
 This does not promise the same cutoffs for arbitrary network arrival timing.
 
-The journal is an in-memory diagnostic window, not a disk input-log store.
-Tick commit prepares throwing allocations before changing live state; a failed
-core step leaves its state/journal unchanged. A reply allocation failure or
-connection timeout can happen after commit: retry the same sequence and inspect
-the returned state. A later input may make an older retry Stale.
+The rolling journal remains an in-memory diagnostic window. Each successful
+`TickResult` also owns its complete canonical `record`; optional archive output
+retains the initial checkpoint and every committed record independently of
+`historyTicks`. Offline replay accepts archives longer than that rolling limit,
+retains only one working journal tick, and reports the first failing absolute
+tick with recorded and computed checksums. A later malformed record does not
+hide an earlier deterministic mismatch in an already decoded log.
+
+Tick commit prepares throwing allocations, including the exported record,
+before changing live state; a failed core step leaves state/journal unchanged.
+A reply allocation failure or connection timeout can happen after commit:
+retry the same sequence and inspect the returned state. A later input may make
+an older retry Stale. Archive admission/storage failure likewise does not roll
+back a simulation commit.
+
+## Persistent archive and offline CLI
+
+`ReplayWriter::create(path, config, checkpoint)` writes an initial header;
+`append(record)` writes the next complete cutoff, including empty ticks and
+rejected attempts. `finish()` writes the required completion footer, flushes
+and closes. Destruction alone never writes a footer. A failed append/write is
+terminal; an interrupted or failed stream must not be advertised as complete.
+`writeReplayFile` and `readReplayFile` provide owned-log convenience APIs.
+
+The version-one `.areplay` format has no native structs, host endianness,
+timestamps or external JSON/protobuf dependency. Every integer is little
+endian; signed 32-bit fields use their exact two's-complement bit pattern.
+
+| Section | Fields in order |
+| --- | --- |
+| File identity | 8 bytes `AREPLAY\0`; u32 format version `1`; u32 checksum version `1` |
+| ActorConfig | u64 maxMembers, maxInputsPerTick, historyTicks; i32 positionLimit |
+| Initial checkpoint | u64 roomId, incarnation, tick, checksum; u32 player count; complete canonical players |
+| Checkpoint player | u64 playerId, sessionId, membershipEpoch; i32 x, y; u64 lastSequence; i32 lastDx, lastDy |
+| Tick frame | u32 tag `0x4b434954` (`TICK`), u32 payload bytes; u64 tick, checksum; u32 member count, input count; full members then ordered inputs |
+| Member | u64 playerId, sessionId, membershipEpoch |
+| Input attempt | member; u64 sequence; i32 dx, dy, including values rejected by simulation |
+| Completion frame | u32 tag `0x21444e45` (`END!`), u32 payload bytes `16`; u64 record count, final absolute tick |
+
+The fixed header is 80 bytes before 48-byte checkpoint players. Tick payload
+length is exactly `24 + 24*memberCount + 40*inputCount`; the completion frame
+is 24 bytes. The reader checks versions, frame lengths and bounded counts
+before allocation, requires the footer, and rejects trailing bytes. Defaults
+bound a file to 64 MiB, 1000000 ticks, 4096 configured members, 65536 attempts
+per tick and 1000000 configured rolling-history ticks. Actual cutoffs must also
+fit the recorded ActorConfig. Callers may supply stricter `ReplayFileLimits`.
+Decoded ownership containers and the checksum report remain bounded by these
+limits; this is a diagnostic archive rather than a cryptographic audit log.
+
+```bash
+cmake --build build --target arena_replay -j2
+./build/services/room/arena_replay /safe/local/path/session.areplay
+./build/services/room/arena_replay /safe/local/path/session.areplay --report /safe/local/path/report.json
+```
+
+The tool always writes one valid JSON object to stdout and optionally the same
+report to the requested file. Exit `0` means validated; `1` means the first
+checkpoint/tick checksum mismatch; `2` means invalid input/arguments, a resource
+bound or I/O failure. A report path aliasing the input is rejected. Report-file
+write failure also returns `2` with an `io` report on stdout. Fields are:
+
+```json
+{"status":"ok","reason":"replay validated","failed_tick":null,"expected_checksum":null,"actual_checksum":null,"checkpoint_tick":"0","final_tick":"1","final_checksum":"123","checksums":[{"tick":"1","checksum":"123"}]}
+```
+
+The numeric values above only illustrate the JSON schema. All uint64 values
+are decimal strings, including zero, so JavaScript consumers do not lose
+precision. `checksums` contains every successfully replayed tick, excluding
+the checkpoint; on failure it is empty. `failed_tick`, `expected_checksum` and
+`actual_checksum` identify the first semantic failure where available; file
+header/framing failures may have no tick or state hashes. `status` is `ok`,
+`desync`, `invalid` or `io`.
+
+## Optional live recording
+
+Set `ARENA_REPLAY_DIR=/safe/local/path` before starting the gateway to enable
+recording for its authenticated `RoomService`. Each run creates a separate
+subdirectory. The management owner submits owned initial state and full
+committed records to `ReplayRecorder`; one private writer thread performs disk
+I/O without accessing actors or network connections. Queue count/bytes, active
+streams and per-file limits are bounded. Room reclamation and service stop seal
+the accepted stream; recorder stop drains accepted work and joins outside the
+latency-sensitive simulation step.
+
+Only streams successfully finished and closed are renamed from `.part` to
+`.areplay`. Queue rejection or disk error invalidates that archive, retains a
+failure indication and does not roll back the room. Inspect recorder completed,
+failed, rejected, active/queued bytes and last-error metrics; a missing archive
+is not proof that no simulation ran. An incomplete `.part` is never accepted
+as a complete recording merely because its filename exists. Flush/close do
+not issue `fsync`, so this does not promise power-loss durability or persistent
+room/session recovery after a server restart.
 
 ## Observability and verification
 

@@ -235,8 +235,19 @@ struct RoomService::State : std::enable_shared_from_this<State>
         return false;
     }
 
-    /** @brief Reconciles and steps one room; callbacks run only after
-     * all rooms finish. */
+    /** @brief Seals accepted archive jobs before actor retirement. */
+    void finishRecording(arena::domain::RoomId id) noexcept
+    {
+        const auto found = recordings.find(id);
+        if (found != recordings.end())
+        {
+            found->second->finish();
+            recordings.erase(found);
+        }
+    }
+
+    /** @brief Reconciles and steps one room; callbacks run after all
+     * rooms. */
     void stepRoom(
         arena::domain::RoomId id,
         const std::vector<std::size_t>& commands,
@@ -258,6 +269,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         auto found = actors.find(id);
         if (roster.empty())
         {
+            finishRecording(id);
             if (found != actors.end())
                 actors.erase(found);
             return;
@@ -266,6 +278,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         {
             // A smaller simulation policy cannot silently drop
             // authoritative members.
+            finishRecording(id);
             if (found != actors.end())
                 actors.erase(found);
             for (const auto index : commands)
@@ -286,6 +299,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
                 }
             );
             if (requested && actors.size() < config.maxRooms)
+            {
                 found = actors
                             .emplace(
                                 id,
@@ -297,6 +311,16 @@ struct RoomService::State : std::enable_shared_from_this<State>
                                 )
                             )
                             .first;
+                if (config.replays)
+                {
+                    auto recording = config.replays->begin(
+                        config.actor,
+                        found->second->snapshot()
+                    );
+                    if (recording)
+                        recordings.emplace(id, std::move(recording));
+                }
+            }
             else
             {
                 for (const auto index : commands)
@@ -346,6 +370,11 @@ struct RoomService::State : std::enable_shared_from_this<State>
             std::move(members),
             std::move(inputs)
         );
+        // The canonical cutoff is prepared before actor commit; only
+        // copied values enter the bounded disk-worker queue.
+        if (const auto recording = recordings.find(id);
+            recording != recordings.end())
+            recording->second->append(std::move(result.record));
         ++counts.ticks;
         for (const auto status : result.results)
         {
@@ -507,6 +536,12 @@ struct RoomService::State : std::enable_shared_from_this<State>
         }
         timer.reset();
         scheduler = {};
+        for (auto& [id, recording] : recordings)
+        {
+            (void)id;
+            recording->finish();
+        }
+        recordings.clear();
         actors.clear();
         for (auto& command : abandoned)
         {
@@ -540,6 +575,13 @@ struct RoomService::State : std::enable_shared_from_this<State>
         std::unique_ptr<service::room::RoomActor>,
         RoomLess>
         actors;
+    /// Owner-only admission endpoints, never disk streams or actors
+    /// shared with the writer thread.
+    std::map<
+        arena::domain::RoomId,
+        std::unique_ptr<service::room::ReplayRecording>,
+        RoomLess>
+        recordings;
     RoomMetrics counts;
     ConnectionScheduler scheduler;
     ConnectionTimer timer;

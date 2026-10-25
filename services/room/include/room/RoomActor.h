@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "arena/domain/Room.h"
@@ -145,11 +147,32 @@ struct TickResult
     /// One outcome per input, returned in the caller's original
     /// order.
     std::vector<InputStatus> results;
+    /// Owning canonical cutoff prepared before the tick commits,
+    /// ready to archive.
+    TickRecord record;
 };
 enum class ReplayError
 {
     InvalidLog,
     ChecksumMismatch
+};
+/** @brief Locates the first invalid record or state divergence in
+ * absolute ticks. */
+struct ReplayFailure
+{
+    /// Invalid structure/configuration is distinct from a valid
+    /// record that desyncs.
+    ReplayError code;
+    /// Affected absolute tick; checkpoint/configuration failures use
+    /// checkpoint.tick.
+    std::uint64_t tick;
+    /// Stored and computed hashes are present only for
+    /// ChecksumMismatch.
+    std::optional<std::uint64_t> expectedChecksum;
+    std::optional<std::uint64_t> actualChecksum;
+    /// Short English diagnostic; it does not contain input payloads
+    /// or credentials.
+    std::string reason;
 };
 struct ReplayResult
 {
@@ -190,7 +213,7 @@ public:
     ReplayLog replayLog() const;
     /** @brief Replays a self-contained log and checks every recorded
      * checksum. */
-    static std::expected<ReplayResult, ReplayError>
+    static std::expected<ReplayResult, ReplayFailure>
     replay(const ReplayLog&);
     /** @brief Computes the documented canonical state hash without
      * raw-struct hashing. */
