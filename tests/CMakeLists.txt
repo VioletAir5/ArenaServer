@@ -59,6 +59,7 @@ add_subdirectory(domain)
 add_subdirectory(auth)
 add_subdirectory(match)
 add_subdirectory(room)
+add_subdirectory(storage)
 
 include(GoogleTest)
 gtest_discover_tests(arena_tests)
