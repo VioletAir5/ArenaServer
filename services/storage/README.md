@@ -1,6 +1,6 @@
 # PostgreSQL storage model
 
-This module provides the reviewed PostgreSQL 14+ schema and one migration CLI.
+This module provides the reviewed PostgreSQL 14+ schema, ordered migrations and a synchronous Python asset-transfer entry point.
 It does not yet provide a C++ database adapter, connection pool, settlement worker
 or outbox publisher. Gateway still uses its file account snapshot and in-memory
 session, match and room services. Applying this schema does not make those paths
@@ -12,14 +12,17 @@ persistent.
   tables, indexes and four integrity/state guards.
 - `migrations/001_initial.down.sql`: destructive rollback in explicit dependency
   order, including functions, domains and the schema. It uses no `CASCADE`.
+- `migrations/002_asset_transfer.up.sql` / `.down.sql`: additive immutable transfer receipts and explicit rollback.
+- `assets.py`: synchronous atomic transfers and bounded SERIALIZABLE retries.
 - `migrate.py`: Python standard-library orchestration of one `psql` process.
-  Only version 001 is supported; it does not discover arbitrary migrations.
+  Only reviewed versions 001 and 002 are supported; it does not discover arbitrary migrations.
 - `fixtures/seed.sql`: separate, deterministic test data. It is not run by `up`
   and must not be treated as production accounts or runtime settlement output.
 
 SQL files contain no `BEGIN` or `COMMIT`: the runner owns the transaction. They
-are trusted, reviewed artifacts, not user-supplied SQL. No ORM or Python database
-package is needed.
+are trusted, reviewed artifacts, not user-supplied SQL. Migrations use the Python
+standard library and psql. Asset transfers use Python 3.10+, Psycopg and libpq
+(install `services/storage/requirements.txt` in a virtual environment).
 
 ## Durable model
 
@@ -32,6 +35,7 @@ package is needed.
 | `game_match` | One authoritative battle ID and room ID; `forming`/`running`/`completed`/`aborted` with consistent nullable result fields and finite timestamps; winner must be a participant. |
 | `match_player` | Composite `(match_id, player_id)` PK; unique slot 1 or 2; FKs to match/player; logical session and membership epoch; initial MMR, last input sequence and final integer position. |
 | `settlement` | One settlement per terminal match; unique nonzero UUID idempotency key; 32-byte request hash; bounded object payload; consistent attempt/retry/commit/failure fields. |
+| `asset_transfer` | Nonzero UUID PK; source/destination player and item FKs; distinct players; positive bigint quantity; finite creation time; immutable successful command identity. |
 | `outbox` | Nonzero UUID event ID; FK to a committed settlement; one global `settlement.committed` event per source; bounded object payload; pending/published delivery fields. |
 
 `arena.uint64` is an unconstrained-typmod `numeric` domain whose CHECK requires
@@ -82,7 +86,7 @@ Outbox inserts start pending/unattempted; each update records at
 most one attempt, and published events retain immutable identity and payload.
 A publication timestamp must not precede the event's `available_at`.
 A future write transaction must compare the stored request hash and outcome before reporting idempotent
-success. There is no asset ledger, reward distribution, durable retry worker,
+success. The successful-transfer receipt journal is separate from settlement. There is no reward distribution, durable retry worker,
 per-recipient outbox or exactly-once delivery implementation in this change.
 
 The JSONB payload checks require an object of at most 65536 bytes in PostgreSQL's
@@ -148,21 +152,24 @@ The runner owns `public.arena_schema_migrations` with these five columns:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `version` | `smallint` PK, positive | The sole supported value is 1. |
-| `name` | `text NOT NULL` | Must be `001_initial`. |
+| `version` | `smallint` PK, positive | Ordered supported versions 1 and 2. |
+| `name` | `text NOT NULL` | `001_initial` or `002_asset_transfer`, matching the version. |
 | `up_sha256` | `text NOT NULL` | SHA256 of the exact up-file bytes. |
 | `down_sha256` | `text NOT NULL` | SHA256 of the exact down-file bytes. |
 | `applied_at` | `timestamptz NOT NULL` | Database application time. |
 
 Both checksums must be 64 lowercase hexadecimal characters. Existing column
 order/types/NOT NULL properties and the version PK are checked before history is
-used. Unknown versions, extra history rows, renamed migrations and changed up
-**or down** bytes fail closed, including for `status`. The only accepted history
-states are no ledger/empty ledger with no `arena` schema, or one matching 001 row
-with the schema present. A schema without matching history is not adopted or
-automatically dropped. These checks detect migration history/artifact drift;
-they do not fingerprint every business table against arbitrary manual DDL edits.
-Once applied, preserve the reviewed 001 files rather than editing them in place.
+used. Unknown versions, gaps, renamed migrations and changed up **or down** bytes
+fail closed, including for `status`. Accepted history is empty with no `arena`
+schema, or a matching ordered prefix `[1]` or `[1,2]` with the schema present.
+An existing 001 deployment can be upgraded without rewriting its reviewed files
+or data: `up` applies only 002. From an empty database, `up` applies both in one
+transaction. `down` rolls every applied migration back in reverse order (002,
+then 001), including the migration ledger; it is not a one-version downgrade.
+These checks detect migration history/artifact drift; they do not fingerprint
+every live business object against arbitrary manual DDL edits. Preserve all
+applied migration bytes and add a new reviewed version for future changes.
 
 DDL and the history insert are committed together. An intermediate error leaves
 neither a partially applied schema nor a new history table. `status` creates no
@@ -184,12 +191,12 @@ Success returns exit code **0** and one JSON object on stdout, after psql confir
 COMMIT. For example:
 
 ```json
-{"action":"up","state":"applied","version":1,"changed":true,"up_sha256":"<64 hex>","down_sha256":"<64 hex>"}
+{"action":"up","state":"applied","version":2,"changed":true,"up_sha256":"<64 hex>","down_sha256":"<64 hex>"}
 ```
 
-`state` is `applied` or `unapplied`; `version` is 1 or null. `changed` is false for
-`status` and repeated no-ops. After `down`, the reported hashes still identify the
-local reviewed files, while `version` is null. Failure returns **2**, writes a
+`state` is `applied` or `unapplied`; `version` is 1, 2 or null. `changed` is false for
+`status` and repeated no-ops. Hashes identify the applied head; when unapplied (including after `down`), they
+identify the latest local supported migration (002), while `version` is null. Failure returns **2**, writes a
 short diagnostic to stderr and emits no success JSON. Server errors include a
 SQLSTATE when available, without query text, credentials or connection details.
 
@@ -201,7 +208,7 @@ match, session and idempotency identities. Local counters/random boot seeds do
 not establish durable global uniqueness across restarts. Never hide an ID
 collision with `ON CONFLICT DO NOTHING` and call it a successful retry.
 
-Authentication lookups, inventory mutation, match result capture, settlement and
+Authentication lookups, gateway inventory commands, match result capture, settlement and
 outbox delivery remain unwired. The migration CLI performs maintenance DDL only;
 it must not be called from a connection owner or the fixed room tick loop.
 
@@ -214,9 +221,10 @@ bin directory (`PG_BIN` must be a directory for this CMake option):
 
 ```sh
 cmake -S . -B build -DARENA_ENABLE_POSTGRES_TESTS=ON \
-  -DARENA_POSTGRES_BIN="$PG_BIN"
+  -DARENA_POSTGRES_BIN="$PG_BIN" \
+  -DARENA_POSTGRES_TEST_PYTHON="$PWD/.cache/storage-venv/bin/python"
 # Relocated installations may also need -DARENA_POSTGRES_SHARE=/safe/local/pg-share
-ctest --test-dir build -R '^PostgresStorageMigrations$' --output-on-failure
+ctest --test-dir build -R '^(PostgresStorageMigrations|AssetTransferConcurrency)$' --output-on-failure
 ```
 
 Or run the same harness directly:
@@ -233,3 +241,112 @@ and cleanup of tables, sequences, functions, triggers and domains while preservi
 an unrelated `public` sentinel. Fixture mutation for fault injection occurs only
 in a copied storage directory and the isolated cluster. Current measurements and
 executed results belong in the task's verification report, not this contract.
+
+## Atomic asset transfers
+
+`assets.transfer(connect, TransferRequest(...), RetryBudget(...))` is a storage
+primitive for moving one item quantity between distinct players. The trusted
+caller must authorize the source identity. It does not mint rewards, charge
+fees, update settlement, or publish events. It has no implicit database target;
+`connect()` must return a new, idle, non-autocommit Psycopg connection with the
+default tuple row factory and bounded connection establishment. Each worker owns
+its connection; no connection or transaction is shared across concurrent calls.
+Do not invoke this synchronous path on a network owner or room tick thread.
+
+The transaction inserts a successful-command receipt first using a stable UUID
+and `ON CONFLICT DO NOTHING`. A visible existing receipt must match source,
+destination, item and quantity exactly before returning `replayed=True`; a
+payload mismatch is `idempotency_conflict`. An invisible concurrent conflict at
+SERIALIZABLE is retried as a whole transaction. The adapter then ensures both
+inventory rows exist and locks them in ascending player-ID order, independent of
+transfer direction. It checks source funds, destination signed-bigint capacity
+and both revisions before atomically debiting, crediting and incrementing each
+revision. No process mutex is needed: PostgreSQL row locks and SERIALIZABLE
+isolation protect competing processes as well as threads.
+
+Only acknowledged COMMIT returns a `TransactionResult`. Before COMMIT the runner
+requires an active healthy transaction; a callback that swallowed a SQL failure
+is rejected as `database_error` / `25P02`, since COMMIT on an aborted transaction
+can acknowledge ROLLBACK without raising a driver error. An error rolls back the
+receipt, any zero-row creation and both balance changes together. Successful
+receipts are immutable, including deletion, so a UUID cannot be reused after a
+successful transfer. Rejections are not durably remembered: the same command may
+succeed after balances change. A replay returns the original fact of success,
+not current balances. The table is a successful-command journal, not a complete
+inventory ledger: authorized direct inventory writes are outside this adapter's
+conservation guarantee. Direct receipt inserts are trusted maintenance SQL, not
+a public business interface. Privileged DDL/TRUNCATE or disabled triggers are
+outside the ordinary DML guard boundary.
+
+```python
+from uuid import UUID
+import psycopg
+from services.storage.assets import RetryBudget, TransferRequest, transfer
+
+# Use explicit parameters and a private password file/TLS policy as appropriate.
+def connect():
+    return psycopg.connect(host="/safe/local/socket", dbname="arena_development",
+                           user="arena_worker", connect_timeout=2)
+
+result = transfer(connect, TransferRequest(
+    UUID("58393cde-9450-49b4-973d-5b788172ecda"), 42, 43, 1, 10), RetryBudget())
+```
+
+### Retry budget
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `max_attempts` | 8 | Includes the initial execution; supported range 1..64. |
+| `max_elapsed` | 15 seconds | Monotonic retry-admission window, including connection, SQL, cleanup and sleeps; maximum 120 seconds. |
+| `base_delay` | 10 ms | Exponential full-jitter base. |
+| `max_delay` | 500 ms | Per-sleep cap; supported maximum 5 seconds. |
+| `lock_timeout_ms` | 1000 | Server lock wait per statement, also clipped to remaining budget. |
+| `statement_timeout_ms` | 2000 | Server statement time, also clipped to remaining budget. |
+
+After failed attempt `n` (starting at 1), sleep uniformly in
+`[0, min(max_delay, base_delay * 2^(n-1), remaining_budget)]`. Close the failed
+connection before sleeping and recheck the monotonic budget before connecting
+again. The same immutable request/UUID is reused on every attempt. No nested
+retry layer or durable scheduler is provided; callers must not reset this budget
+inside an unbounded outer retry loop. This is a per-command budget, not a global
+admission/concurrency limiter.
+
+`max_elapsed` prevents new attempts after expiry; it is **not a hard cancellation
+deadline** for synchronous libpq, DNS, COMMIT or a callback containing many SQL
+statements. The factory must separately bound connection/network waits. Server
+lock/statement and idle-in-transaction timeouts are local to each attempt and
+must never round down to PostgreSQL's unlimited value zero. An already
+acknowledged commit is success even if the admission window has elapsed.
+
+Only `40001` (serialization) and `40P01` (deadlock) retry the complete callback in
+a fresh SERIALIZABLE transaction, including errors reported by COMMIT. Never
+resume a failed statement or retry external side effects. Internal callbacks may
+only execute transactional SQL and must not commit, notify external services or
+mutate application state that survives rollback. `run_transaction` exposes this
+same boundary for internal storage operations; it is not a sandbox for untrusted
+callbacks.
+
+| Failure category | Handling |
+| --- | --- |
+| `invalid_request` | Bad UUID, IDs, quantity or self-transfer; rejected before connecting. |
+| `not_found` | The receipt's player/item FK is missing; unrelated FK failures remain integrity errors. |
+| `insufficient_assets`, `quantity_overflow`, `revision_overflow` | Business rejection, entire transaction rolled back; no automatic retry. |
+| `idempotency_conflict` | Existing successful UUID has different command fields; no retry. |
+| `retry_exhausted` | Attempt limit reached; `last_failure_category` and `sqlstate` retain serialization/deadlock cause. |
+| `budget_exhausted` | Admission window elapsed; no new attempt. |
+| `lock_timeout` (`55P03`), `statement_timeout` (`57014`) | No automatic retry. The latter also covers server query cancellation. |
+| `integrity_error` (class 23), `database_error`, `invalid_connection` | Fail closed; no automatic retry. |
+| `connection_error` | Transport/server failure before COMMIT; no automatic retry. |
+| `outcome_unknown` | Transport loss while committing; do not assume rollback. Resubmit the same UUID/request to resolve success safely. |
+
+Results and errors expose attempts, monotonic elapsed time, failed SQLSTATEs and
+scheduled jitter delays, without forwarding raw SQL/connection diagnostics.
+Timeouts and exhausted budgets are observable failures, never hidden success.
+
+`AssetTransferConcurrency` runs real private PostgreSQL transfers, exact balance
+oracles and controlled serialization/deadlock sessions. It also tests budget and
+jitter boundaries with a deterministic clock. Lost COMMIT acknowledgment is
+simulated after a real successful commit, explicitly distinguished from a real
+transport fault. See the generated `asset-transfer-report.json` for the executed
+counts and failure evidence. Install the pinned driver before enabling storage
+tests; missing dependencies cause configure failure rather than a silent skip.

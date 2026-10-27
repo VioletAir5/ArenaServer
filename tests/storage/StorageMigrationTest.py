@@ -16,8 +16,8 @@ import time
 sys.dont_write_bytecode = True
 from storage_cases import negative_cases
 
-TABLES = ("account", "player", "item", "inventory", "game_match", "match_player", "settlement", "outbox")
-COUNTS = dict(zip(TABLES, (5,4,3,5,6,11,4,2)))
+TABLES = ("account", "player", "item", "inventory", "game_match", "match_player", "settlement", "outbox", "asset_transfer")
+COUNTS = dict(zip(TABLES, (5,4,3,5,6,11,4,2,0)))
 CATALOG = """
 SELECT jsonb_build_object(
  'schemas',(SELECT jsonb_agg(jsonb_build_array(nspname,nspacl::text) ORDER BY nspname)
@@ -104,6 +104,8 @@ class Session:
 
 class Cluster:
     """Owns one private data directory and Unix socket; never accepts an external DSN."""
+    max_connections = 16
+
     def __init__(self,args):
         self.args=args
         self.tmp=tempfile.TemporaryDirectory(prefix="arena-pg-",dir="/tmp")
@@ -145,7 +147,7 @@ class Cluster:
             cmd+=["-L",self.args.pg_share]
         result=run(cmd,self.base,timeout=40)
         require(result.returncode==0,"private initdb failed: "+result.stderr[:1500])
-        options=f"-c listen_addresses='' -c unix_socket_directories='{self.socket}' -c unix_socket_permissions=0700 -c port=5432 -c max_connections=16 -c log_min_messages=warning -c timezone=UTC"
+        options=f"-c listen_addresses='' -c unix_socket_directories='{self.socket}' -c unix_socket_permissions=0700 -c port=5432 -c max_connections={self.max_connections} -c log_min_messages=warning -c timezone=UTC"
         result=run([self.tool("pg_ctl"),"-D",self.data,"-l",self.log,"-w","-t","30","-o",options,"start"],self.base,timeout=40)
         require(result.returncode==0,"private pg_ctl start failed: "+result.stderr[:1500])
         self.create("arena_migration_test")
@@ -165,7 +167,7 @@ class Acceptance:
         self.storage=args.repository_root/"services"/"storage"
         self.fixture=(self.storage/"fixtures"/"seed.sql").read_text()
         self.report=dict(passed=False,cycles=[],negative_cases=[],migration_cases=[],concurrency=[])
-    def migrate(self,action,database="arena_migration_test",storage=None,expected=0,changed=None,environment=None):
+    def migrate(self,action,database="arena_migration_test",storage=None,expected=0,changed=None,environment=None,version=None):
         result=run([sys.executable,(storage or self.storage)/"migrate.py",action],
                    environment if environment is not None else self.cluster.environment(database),timeout=95)
         require(result.returncode==expected,f"migration {action} exit {result.returncode}, expected {expected}: {result.stderr[:1000]}")
@@ -173,8 +175,17 @@ class Acceptance:
             return result
         value=json.loads(result.stdout)
         require(value["action"]==action and value["state"] in ("applied","unapplied"),"migration JSON mismatch")
-        for key in ("up_sha256","down_sha256"):
-            require(re.fullmatch("[0-9a-f]{64}",value[key]),"bad migration hash")
+        if value["state"] == "applied":
+            require(value["version"] in (1,2),"bad applied migration version")
+        else:
+            require(value["version"] is None,"unapplied migration has a version")
+        if version is not None:
+            require(value["version"] == version,"unexpected migration head version")
+        head = "001_initial" if value["version"] == 1 else "002_asset_transfer"
+        for key,direction in (("up_sha256","up"),("down_sha256","down")):
+            artifact=(storage or self.storage)/"migrations"/(head+"."+direction+".sql")
+            require(value[key] == hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                    "bad migration head hash")
         if changed is not None:
             require(value["changed"] is changed,"unexpected changed flag for "+action)
         return value
@@ -186,8 +197,11 @@ class Acceptance:
     def catalog(self,database="arena_migration_test"):
         return json.loads(self.cluster.sql(CATALOG,database).stdout)
     def data(self,database="arena_migration_test"):
-        names=[f"arena.{t}" for t in TABLES]+["public.arena_schema_migrations","public.unrelated_guard"]
-        parts=[f"'{n}',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM {n} t)" for n in names]
+        names=json.loads(self.cluster.sql("""SELECT coalesce(jsonb_agg(
+          format('%I.%I',schemaname,tablename) ORDER BY tablename),'[]'::jsonb)
+          FROM pg_catalog.pg_tables WHERE schemaname='arena';""",database).stdout)
+        names += ["public.arena_schema_migrations","public.unrelated_guard"]
+        parts=[f"'{n.replace(chr(39),chr(39)*2)}',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM {n} t)" for n in names]
         return json.loads(self.cluster.sql("SELECT jsonb_build_object("+",".join(parts)+")::text;",database).stdout)
     def same(self,actual,expected,label):
         require(actual==expected,f"{label} changed: actual={digest(actual)}, expected={digest(expected)}")
@@ -227,21 +241,36 @@ class Acceptance:
             require(raw.count(anchor)==1,"down fault anchor changed")
             faulty=raw.replace(anchor,b"SELECT 1/0;\n"+anchor)
             down.write_bytes(faulty)
-            self.cluster.sql("UPDATE public.arena_schema_migrations SET down_sha256='"+hashlib.sha256(faulty).hexdigest()+"';")
+            self.cluster.sql("UPDATE public.arena_schema_migrations SET down_sha256='"+
+                             hashlib.sha256(faulty).hexdigest()+"' WHERE version=1;")
             injected_data=self.data()
             result=self.migrate("down",storage=copy,expected=2)
             require("22012" in result.stderr,"down fault rejected before late DDL injection")
-            self.same(self.schema(),schema,"failed down schema")
-            self.same(self.catalog(),catalog,"failed down catalog")
-            self.same(self.data(),injected_data,"failed down data")
-            self.report["migration_cases"].append("mid-down-DDL-22012-atomic")
-            self.cluster.sql("UPDATE public.arena_schema_migrations SET down_sha256='"+hashlib.sha256(raw).hexdigest()+"';")
+            self.same(self.schema(),schema,"failed reverse-version down schema")
+            self.same(self.catalog(),catalog,"failed reverse-version down catalog")
+            self.same(self.data(),injected_data,"failed reverse-version down data")
+            self.report["migration_cases"].append("mid-down-DDL-22012-atomic-across-002-001")
+            self.cluster.sql("UPDATE public.arena_schema_migrations SET down_sha256='"+
+                             hashlib.sha256(raw).hexdigest()+"' WHERE version=1;")
             self.same(self.data(),data,"down fault restoration")
+        original=data["public.arena_schema_migrations"]
+        def restore_history():
+            statements=["DELETE FROM public.arena_schema_migrations;"]
+            for row in original:
+                values=[str(row["version"])]+[
+                    "'"+row[key].replace("'","''")+"'"
+                    for key in ("name","up_sha256","down_sha256","applied_at")]
+                statements.append("INSERT INTO public.arena_schema_migrations "
+                                  "(version,name,up_sha256,down_sha256,applied_at) VALUES("
+                                  +",".join(values)+");")
+            self.cluster.sql("\n".join(statements),single=True)
         for label,mutate in (
-            ("checksum","UPDATE public.arena_schema_migrations SET up_sha256=repeat('0',64);"),
-            ("version","UPDATE public.arena_schema_migrations SET version=2;"),
-            ("name","UPDATE public.arena_schema_migrations SET name='002_other';"),
-            ("order","INSERT INTO public.arena_schema_migrations(version,name,up_sha256,down_sha256) SELECT 2,'002_other',up_sha256,down_sha256 FROM public.arena_schema_migrations WHERE version=1;"),
+            ("checksum-001","UPDATE public.arena_schema_migrations SET up_sha256=repeat('0',64) WHERE version=1;"),
+            ("checksum-002","UPDATE public.arena_schema_migrations SET down_sha256=repeat('0',64) WHERE version=2;"),
+            ("version","UPDATE public.arena_schema_migrations SET version=3 WHERE version=2;"),
+            ("name","UPDATE public.arena_schema_migrations SET name='002_other' WHERE version=2;"),
+            ("order","INSERT INTO public.arena_schema_migrations(version,name,up_sha256,down_sha256) SELECT 3,'003_other',up_sha256,down_sha256 FROM public.arena_schema_migrations WHERE version=2;"),
+            ("gap","DELETE FROM public.arena_schema_migrations WHERE version=1;"),
             ("shape","ALTER TABLE public.arena_schema_migrations ADD COLUMN extra integer;")):
             self.cluster.sql(mutate)
             before=self.schema(),self.catalog(),self.data()
@@ -250,16 +279,78 @@ class Acceptance:
                 self.same((self.schema(),self.catalog(),self.data()),before,label+" drift refusal")
             if label=="shape":
                 self.cluster.sql("ALTER TABLE public.arena_schema_migrations DROP COLUMN extra;")
-            elif label=="order":
-                self.cluster.sql("DELETE FROM public.arena_schema_migrations WHERE version=2;")
-            elif label=="checksum":
-                value=hashlib.sha256((self.storage/"migrations"/"001_initial.up.sql").read_bytes()).hexdigest()
-                self.cluster.sql(f"UPDATE public.arena_schema_migrations SET up_sha256='{value}';")
-            elif label=="version":
-                self.cluster.sql("UPDATE public.arena_schema_migrations SET version=1;")
             else:
-                self.cluster.sql("UPDATE public.arena_schema_migrations SET name='001_initial';")
+                restore_history()
+            self.same(self.data(),data,label+" drift restoration")
             self.report["migration_cases"].append(label+"-drift-refused")
+        for name in ("001_initial","002_asset_transfer"):
+            for direction in ("up","down"):
+                with tempfile.TemporaryDirectory(prefix="arena-artifact-drift-") as directory:
+                    copy=Path(directory)/"storage"
+                    shutil.copytree(self.storage,copy)
+                    artifact=copy/"migrations"/(name+"."+direction+".sql")
+                    artifact.write_bytes(artifact.read_bytes()+b"\n-- changed reviewed bytes\n")
+                    before=self.schema(),self.catalog(),self.data()
+                    for action in ("status","up","down"):
+                        self.migrate(action,storage=copy,expected=2)
+                        self.same((self.schema(),self.catalog(),self.data()),before,
+                                  name+" "+direction+" artifact refusal")
+                    self.report["migration_cases"].append(name+"-"+direction+"-artifact-drift-refused")
+
+    def legacy_prefix(self):
+        """Deploy the previous five-column 001 history independently of the new CLI."""
+        db="arena_legacy_upgrade"
+        self.cluster.create(db)
+        self.cluster.sql("CREATE TABLE public.unrelated_guard(id integer PRIMARY KEY,value text NOT NULL);"
+                         "INSERT INTO public.unrelated_guard VALUES(1,'preserve me');",db)
+        empty=self.schema(db),self.catalog(db)
+        up=self.storage/"migrations"/"001_initial.up.sql"
+        down=self.storage/"migrations"/"001_initial.down.sql"
+        legacy=up.read_text()+"""
+          CREATE TABLE public.arena_schema_migrations (
+            version smallint NOT NULL PRIMARY KEY CHECK(version>0),
+            name text NOT NULL,
+            up_sha256 text NOT NULL CHECK(up_sha256 ~ '^[0-9a-f]{64}$'),
+            down_sha256 text NOT NULL CHECK(down_sha256 ~ '^[0-9a-f]{64}$'),
+            applied_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp());
+        """+("INSERT INTO public.arena_schema_migrations(version,name,up_sha256,down_sha256) "
+             "VALUES(1,'001_initial','"+hashlib.sha256(up.read_bytes()).hexdigest()+"','"
+             +hashlib.sha256(down.read_bytes()).hexdigest()+"');")
+        self.cluster.sql(legacy,db,single=True)
+        self.cluster.sql(self.fixture,db,single=True)
+        before=self.schema(db),self.catalog(db),self.data(db)
+        self.migrate("status",db,changed=False,version=1)
+        self.same((self.schema(db),self.catalog(db),self.data(db)),before,
+                  "legacy prefix status is read-only")
+        with tempfile.TemporaryDirectory(prefix="arena-upgrade-fault-") as directory:
+            copy=Path(directory)/"storage"
+            shutil.copytree(self.storage,copy)
+            artifact=copy/"migrations"/"002_asset_transfer.up.sql"
+            artifact.write_bytes(artifact.read_bytes()+b"\nSELECT 1/0;\n")
+            result=self.migrate("up",db,storage=copy,expected=2)
+            require("22012" in result.stderr,"002 upgrade fault was not reached")
+            self.same((self.schema(db),self.catalog(db),self.data(db)),before,
+                      "failed 002 upgrade preserves deployed 001 and data")
+        self.migrate("up",db,changed=True,version=2)
+        after=self.data(db)
+        for table,rows in before[2].items():
+            if table=="public.arena_schema_migrations":
+                rows_after=[row for row in after[table] if row["version"]==1]
+            else:
+                rows_after=after[table]
+            self.same(rows_after,rows,"001 data/history survives additive upgrade: "+table)
+        self.same(after["arena.asset_transfer"],[],"new transfer receipt table")
+        self.migrate("status",db,changed=False,version=2)
+        self.migrate("up",db,changed=False,version=2)
+        self.migrate("down",db,changed=True)
+        self.same((self.schema(db),self.catalog(db)),empty,"upgraded prefix down to empty")
+        self.cluster.sql(legacy,db,single=True)
+        self.cluster.sql(self.fixture,db,single=True)
+        self.migrate("down",db,changed=True)
+        self.same((self.schema(db),self.catalog(db)),empty,"001-only prefix down to empty")
+        self.report["migration_cases"] += ["deployed-001-prefix-readonly-status",
+            "failed-002-upgrade-preserves-001", "001-to-002-preserves-data-and-history",
+            "001-only-prefix-reverse-down"]
 
     def concurrency(self):
         setup="""INSERT INTO arena.game_match(match_id,room_id,created_at)
@@ -324,6 +415,7 @@ class Acceptance:
             self.migrate("up",expected=2,environment=environment)
         self.report["migration_cases"].append("explicit-connection-required")
         self.migrate("down",changed=False)
+        self.legacy_prefix()
         schema=catalog=None
         for cycle in range(self.args.cycles):
             self.migrate("up",changed=True)
@@ -366,6 +458,16 @@ class Acceptance:
             require("22012" in result.stderr,"up failure injection missed late DDL point")
             self.same((self.schema(),self.catalog()),(empty_schema,empty_catalog),"mid-up DDL rollback")
             self.report["migration_cases"].append("mid-up-DDL-22012-atomic")
+        with tempfile.TemporaryDirectory(prefix="arena-002-up-fault-") as directory:
+            copy=Path(directory)/"storage"
+            shutil.copytree(self.storage,copy)
+            artifact=copy/"migrations"/"002_asset_transfer.up.sql"
+            artifact.write_bytes(artifact.read_bytes()+b"\nSELECT 1/0;\n")
+            result=self.migrate("up",storage=copy,expected=2)
+            require("22012" in result.stderr,"002 empty-database fault was not reached")
+            self.same((self.schema(),self.catalog()),(empty_schema,empty_catalog),
+                      "002 failure rolls back the preceding 001 in the same up")
+            self.report["migration_cases"].append("002-failure-rolls-back-001-in-same-up")
         command=[sys.executable,str(self.storage/"migrate.py"),"up"]
         processes=[subprocess.Popen(command,env=c.environment(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(4)]
         values=[]
@@ -379,7 +481,7 @@ class Acceptance:
         self.migrate("down",changed=True)
         self.same((self.schema(),self.catalog()),(empty_schema,empty_catalog),"post-concurrent down")
         self.concurrency()
-        self.report.update(passed=True,hard_acceptance=self.args.cycles>=20,cycle_count=len(self.report["cycles"]),schema_sha256=digest(schema),catalog_sha256=digest(catalog))
+        self.report.update(passed=True,supported_migrations=[1,2],hard_acceptance=self.args.cycles>=20,cycle_count=len(self.report["cycles"]),schema_sha256=digest(schema),catalog_sha256=digest(catalog))
         if self.args.report:
             self.args.report.with_suffix(".schema.sql").write_text(schema)
             self.args.report.with_suffix(".catalog.json").write_text(json.dumps(catalog,indent=2,sort_keys=True)+"\n")
