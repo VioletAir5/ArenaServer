@@ -1,7 +1,8 @@
 # PostgreSQL storage model
 
 This module provides the reviewed PostgreSQL 14+ schema, ordered migrations and a synchronous Python asset-transfer entry point.
-It does not yet provide a C++ database adapter, connection pool, settlement worker
+It includes transaction-scoped Account/Match repositories and a bounded Python connection pool.
+It does not yet provide a C++ database adapter, settlement worker
 or outbox publisher. Gateway still uses its file account snapshot and in-memory
 session, match and room services. Applying this schema does not make those paths
 persistent.
@@ -13,7 +14,11 @@ persistent.
 - `migrations/001_initial.down.sql`: destructive rollback in explicit dependency
   order, including functions, domains and the schema. It uses no `CASCADE`.
 - `migrations/002_asset_transfer.up.sql` / `.down.sql`: additive immutable transfer receipts and explicit rollback.
-- `assets.py`: synchronous atomic transfers and bounded SERIALIZABLE retries.
+- `assets.py`: atomic transfer SQL; the fresh and pooled paths share one transaction executor.
+- `transactions.py`: retry budget, stable storage errors, single COMMIT owner and exact loan release.
+- `database.py`: bounded Psycopg pool and transaction-scoped UnitOfWork.
+- `repositories.py`: parameterized Account/Player and Match persistence, immutable records.
+- `application.py`: SQL-free atomic account/player registration workflow.
 - `migrate.py`: Python standard-library orchestration of one `psql` process.
   Only reviewed versions 001 and 002 are supported; it does not discover arbitrary migrations.
 - `fixtures/seed.sql`: separate, deterministic test data. It is not run by `up`
@@ -224,7 +229,7 @@ cmake -S . -B build -DARENA_ENABLE_POSTGRES_TESTS=ON \
   -DARENA_POSTGRES_BIN="$PG_BIN" \
   -DARENA_POSTGRES_TEST_PYTHON="$PWD/.cache/storage-venv/bin/python"
 # Relocated installations may also need -DARENA_POSTGRES_SHARE=/safe/local/pg-share
-ctest --test-dir build -R '^(PostgresStorageMigrations|AssetTransferConcurrency)$' --output-on-failure
+ctest --test-dir build -R '^(PostgresStorageMigrations|AssetTransferConcurrency|RepositoryTransactionBoundary)$' --output-on-failure
 ```
 
 Or run the same harness directly:
@@ -350,3 +355,93 @@ simulated after a real successful commit, explicitly distinguished from a real
 transport fault. See the generated `asset-transfer-report.json` for the executed
 counts and failure evidence. Install the pinned driver before enabling storage
 tests; missing dependencies cause configure failure rather than a silent skip.
+
+## Repository and pooled transaction interface
+
+Install the pinned `psycopg` and `psycopg_pool` versions in `requirements.txt`.
+This is a synchronous Python storage interface; the C++ gateway remains unwired.
+Call it from a storage worker, not a connection owner or room tick thread.
+
+```python
+from services.storage.database import Database
+from services.storage.application import register_player
+
+with Database(kwargs={"host": "/safe/local/socket", "dbname": "arena_development",
+                      "user": "arena_worker", "connect_timeout": 2},
+              max_size=4, acquire_timeout=.25, max_waiting=16) as database:
+    result = register_player(database, account_id=7, account_name="alice7",
+                             password_digest=prepared_digest, player_id=47,
+                             display_name="Alice", mmr=1500)
+    account, player = result.value
+    found = database.run(lambda work: work.accounts.find_by_name("alice7")).value
+```
+
+`Database.run(callback, budget)` acquires one loan per attempt, starts the same
+SERIALIZABLE executor used by asset transfers, invokes the callback with a
+UnitOfWork, verifies the transaction is healthy and commits once. Account,
+Player, Match and optional `work.transfer(request)` operations within that
+callback share one transaction. Repositories never acquire, commit or roll back
+independently; business callers do not build SQL or receive a connection/cursor.
+Account and Match records are detached frozen dataclasses; match rosters are
+ordered immutable tuples. Inputs retain the schema's full uint64 identities.
+
+Repositories are valid only in their callback and owning thread. They are revoked
+before COMMIT and on every exception or retry; retained references fail with
+`scope_closed`, cross-thread access with `scope_thread`. Nested runs on the same
+Database fail with `nested_transaction`, and async/generator callbacks or results
+with `invalid_operation`. Python private attributes are an ownership contract,
+not a sandbox against hostile introspection. Callback side effects outside SQL
+remain prohibited because an entire callback can run again.
+
+AccountRepository supports create/get/find_by_name, state changes, player
+creation and lookup. MatchRepository supports create/get/start/finish/abort; it
+locks the parent before reading or modifying a roster, uses explicit transitions
+and preserves the database guards. Use create's optional `created_at` for a
+historical event so a later `started_at` does not precede database creation time.
+Missing lookups return None; missing mutation targets raise `not_found`.
+
+The default pool has min_size=0, max_size=4, max_waiting=16 and a 250 ms checkout
+queue timeout. Both capacity and queue length are finite. Checkout timeout is
+clipped to the transaction's remaining retry-admission budget, which is checked
+again after checkout. It bounds waiting for pool capacity, not hard cancellation
+of libpq/health-check I/O; connection establishment and server SQL have separate
+timeouts. Connections have a checkout health check; a broken idle connection is
+discarded. Timeouts/overload do not trigger automatic business transaction retry.
+
+- `pool_timeout`: no healthy loan obtained within the checkout waiting limit.
+  It may indicate saturation or an unavailable database; it does not assert the
+  database is down.
+- `pool_overloaded`: the SDK waiting queue reached max_waiting.
+- `pool_closed`: explicit shutdown or a poisoned pool after an SDK return error.
+- Other business, SQLSTATE, commit-unknown and retry errors follow the shared
+  transaction contract above; `StorageError` is the common error type, also
+  exported as the existing `assets.TransferError` name.
+
+After a longer outage Psycopg 3.2.8 can retain expired waiters after its reconnect
+attempt gives up. A failed checkout on an empty pool calls public `check()` to
+restart background growth, retaining the original failure classification. This
+allows later calls to recover with the same Database without manipulating SDK
+queue internals or retrying a failed business command invisibly.
+
+Successful loans return IDLE with connection properties reset. Failed attempts
+roll back before return; broken connections and commit failures are quarantined.
+Each successful getconn has one putconn attempt. Cleanup errors never replace an
+acknowledged commit or the original failure. If SDK return itself fails, the
+connection is quarantined, `return_failures` increments and the pool closes to
+new work instead of silently losing capacity. Normal shutdown wakes waiters and
+rejects new requests; active callbacks finish and close their loans on return.
+Join those callers before asserting that all resources are gone.
+
+`Database.stats` combines SDK counters with `checked_out`, `return_failures` and
+`closed`. Samples during concurrent mutation are observational; assert exact
+capacity invariants after work quiesces. `_lease` is for internal infrastructure
+and fault tests only. Public pool recovery does not reset the business retry
+budget or add a second commit owner.
+
+The `RepositoryTransactionBoundary` CTest target owns a private PostgreSQL
+cluster and covers repository roundtrips, cross-repository rollback, scoped
+access, bounded pool saturation and shutdown, repeated database stop/restart,
+real deferred COMMIT failures, real COMMIT serialization conflict and simulated
+lost acknowledgment after a real commit. Cleanup injections are explicitly
+labeled. Generated reports live under `build/tests/storage/`; no external
+database is accepted by these tests.

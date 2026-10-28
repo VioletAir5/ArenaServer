@@ -39,12 +39,12 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
     endif()
     execute_process(
         COMMAND "${asset_test_python}" -c
-            "import psycopg; import psycopg.pq; assert psycopg.__version__ == '3.2.13'; print(psycopg.__version__, psycopg.pq.version(), psycopg.pq.__impl__)"
+            "import psycopg; import psycopg.pq; import psycopg_pool; assert psycopg.__version__ == '3.2.13'; assert psycopg_pool.__version__ == '3.2.8'; print(psycopg.__version__, psycopg_pool.__version__, psycopg.pq.version(), psycopg.pq.__impl__)"
         RESULT_VARIABLE asset_driver_status OUTPUT_VARIABLE asset_driver_version
         ERROR_VARIABLE asset_driver_error OUTPUT_STRIP_TRAILING_WHITESPACE)
     if(NOT asset_driver_status STREQUAL "0")
         message(FATAL_ERROR
-            "Asset transfer tests require psycopg==3.2.13. Install services/storage/requirements.txt "
+            "Storage transaction tests require psycopg==3.2.13 and psycopg_pool==3.2.8. Install services/storage/requirements.txt "
             "and set ARENA_POSTGRES_TEST_PYTHON to that interpreter. ${asset_driver_error}")
     endif()
     message(STATUS "Asset transfer PostgreSQL driver: ${asset_driver_version}")
@@ -59,4 +59,16 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
             ${asset_test_arguments})
     set_tests_properties(AssetTransferConcurrency PROPERTIES
         TIMEOUT 300 RUN_SERIAL TRUE LABELS "integration;storage;postgresql;assets;concurrency")
+
+    set(repository_test_arguments --repository-root "${PROJECT_SOURCE_DIR}"
+        --pg-bin "${ARENA_POSTGRES_BIN}"
+        --report "${CMAKE_CURRENT_BINARY_DIR}/repository-boundary-report.json")
+    if(ARENA_POSTGRES_SHARE)
+        list(APPEND repository_test_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+    endif()
+    add_test(NAME RepositoryTransactionBoundary
+        COMMAND "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/RepositoryBoundaryTest.py"
+            ${repository_test_arguments})
+    set_tests_properties(RepositoryTransactionBoundary PROPERTIES
+        TIMEOUT 300 RUN_SERIAL TRUE LABELS "integration;storage;postgresql;repository;pool")
 endif()

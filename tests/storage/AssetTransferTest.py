@@ -675,8 +675,8 @@ def main():
         if name.startswith("PG"):
             os.environ.pop(name)
     import psycopg
-    sys.path.insert(0,str(args.repository_root/"services"/"storage"))
-    import assets
+    sys.path.insert(0,str(args.repository_root))
+    from services.storage import assets
     signal.signal(signal.SIGTERM,lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     cluster=AssetCluster(args)
     acceptance=Acceptance(args,cluster,psycopg,assets)
