@@ -12,6 +12,9 @@ from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout, TooManyRequest
 
 from .transactions import RetryBudget, StorageError, _Lease, _run_transaction
 from .repositories import AccountRepository, MatchRepository
+from .settlement import SettlementRepository
+from .outbox import OutboxRepository
+from .ids import IdRepository
 
 
 class _Session:
@@ -39,6 +42,9 @@ class UnitOfWork:
         self._session = session
         self.accounts = AccountRepository(session)
         self.matches = MatchRepository(session)
+        self.settlements = SettlementRepository(session)
+        self.outbox = OutboxRepository(session)
+        self.ids = IdRepository(session)
 
     def transfer(self, request):
         from .assets import _apply, _validate
@@ -180,7 +186,7 @@ class Database:
         finally:
             loan.release()
 
-    def run(self, operation, budget=RetryBudget(), **retry_options):
+    def run(self, operation, budget=RetryBudget(), *, _connection_observer=None, **retry_options):
         if getattr(self._local, "running", False):
             raise StorageError("nested_transaction")
         if (not callable(operation) or inspect.iscoroutinefunction(operation)
@@ -199,7 +205,26 @@ class Database:
                 session.revoke()
         self._local.running = True
         try:
-            return _run_transaction(self._borrow, invoke, budget, **retry_options)
+            def acquire(timeout):
+                loan = self._borrow(timeout)
+                if _connection_observer is None:
+                    return loan
+                def release(discard):
+                    try:
+                        # Detach synchronizes with an in-progress cancellation;
+                        # the next borrower must never receive its target.
+                        _connection_observer.detach(loan.connection)
+                    except Exception:
+                        discard = True
+                    finally:
+                        loan.release(discard=discard)
+                try:
+                    _connection_observer.attach(loan.connection)
+                except BaseException:
+                    release(True)
+                    raise
+                return _Lease(loan.connection, release)
+            return _run_transaction(acquire, invoke, budget, **retry_options)
         finally:
             self._local.running = False
 

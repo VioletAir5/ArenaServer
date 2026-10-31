@@ -74,3 +74,6 @@ local-notes
 .clang-format
 .clangd
 AGENTS.md
+# Python runtime caches
+__pycache__/
+*.py[cod]

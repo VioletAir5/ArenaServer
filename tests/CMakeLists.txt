@@ -60,6 +60,7 @@ add_subdirectory(auth)
 add_subdirectory(match)
 add_subdirectory(room)
 add_subdirectory(storage)
+add_subdirectory(shared/rpc)
 
 include(GoogleTest)
 gtest_discover_tests(arena_tests)

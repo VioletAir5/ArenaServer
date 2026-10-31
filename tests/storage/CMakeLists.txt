@@ -71,4 +71,57 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
             ${repository_test_arguments})
     set_tests_properties(RepositoryTransactionBoundary PROPERTIES
         TIMEOUT 300 RUN_SERIAL TRUE LABELS "integration;storage;postgresql;repository;pool")
+    set(settlement_test_arguments --repository-root "${PROJECT_SOURCE_DIR}"
+        --pg-bin "${ARENA_POSTGRES_BIN}"
+        --report "${CMAKE_CURRENT_BINARY_DIR}/settlement-outbox-report.json")
+    if(ARENA_POSTGRES_SHARE)
+        list(APPEND settlement_test_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+    endif()
+    add_test(NAME SettlementOutboxAcceptance
+        COMMAND "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/SettlementOutboxTest.py"
+            ${settlement_test_arguments})
+    set_tests_properties(SettlementOutboxAcceptance PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
+        LABELS "integration;storage;postgresql;settlement;outbox")
+    if(ARENA_ENABLE_RPC_TESTS)
+        set(storage_rpc_arguments --repository-root "${PROJECT_SOURCE_DIR}"
+            --pg-bin "${ARENA_POSTGRES_BIN}"
+            --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
+            --native-probe "$<TARGET_FILE:arena_storage_probe>"
+            --report "${CMAKE_CURRENT_BINARY_DIR}/storage-rpc-report.json")
+        if(ARENA_POSTGRES_SHARE)
+            list(APPEND storage_rpc_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+        endif()
+        add_test(NAME StorageRpcAcceptance COMMAND "${asset_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/StorageRpcTest.py" ${storage_rpc_arguments})
+        set_tests_properties(StorageRpcAcceptance PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+            LABELS "integration;storage;postgresql;rpc")
+    endif()
+endif()
+option(ARENA_ENABLE_REDIS_TESTS "Run isolated Redis cache acceptance" OFF)
+set(ARENA_REDIS_SERVER "" CACHE FILEPATH "redis-server used only for private test fixtures")
+if(ARENA_ENABLE_REDIS_TESTS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    if(NOT ARENA_REDIS_SERVER)
+        find_program(ARENA_REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+        set(ARENA_REDIS_SERVER "${ARENA_REDIS_SERVER_EXECUTABLE}")
+    endif()
+    if(NOT EXISTS "${ARENA_REDIS_SERVER}")
+        message(FATAL_ERROR "ARENA_REDIS_SERVER must name an existing redis-server")
+    endif()
+    set(redis_python "${Python3_EXECUTABLE}")
+    if(ARENA_POSTGRES_TEST_PYTHON)
+        set(redis_python "${ARENA_POSTGRES_TEST_PYTHON}")
+    endif()
+    execute_process(COMMAND "${redis_python}" -c
+        "import redis, async_timeout; assert redis.__version__ == '5.2.1'; assert async_timeout.__version__ == '5.0.1'"
+        RESULT_VARIABLE redis_driver_status ERROR_VARIABLE redis_driver_error)
+    if(NOT redis_driver_status STREQUAL "0")
+        message(FATAL_ERROR "Install services/storage/requirements.txt and set ARENA_POSTGRES_TEST_PYTHON. ${redis_driver_error}")
+    endif()
+    add_test(NAME RedisCacheAcceptance COMMAND "${redis_python}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/RedisCacheTest.py"
+        --repository-root "${PROJECT_SOURCE_DIR}" --redis-server "${ARENA_REDIS_SERVER}"
+        --report "${CMAKE_CURRENT_BINARY_DIR}/redis-cache-report.json")
+    set_tests_properties(RedisCacheAcceptance PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
+        LABELS "integration;storage;redis;cache")
 endif()

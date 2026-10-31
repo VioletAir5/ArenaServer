@@ -3,12 +3,14 @@
 #include <sys/signalfd.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <system_error>
 
 #include "net/Channel.h"
 #include "net/ConnectionSchedulers.h"
@@ -156,6 +158,33 @@ int main(int argc, char** argv)
             handlerFactory
         );
         serverPtr = &server;
+        if (std::getenv("ARENA_TEST_WARM_RESOURCE_ERROR"))
+        {
+            // UBSan checks a new dynamic type using a pipe on GCC.
+            // Warm the valid error path while descriptors are free,
+            // before real EMFILE.
+            try
+            {
+                throw std::system_error(
+                    EMFILE,
+                    std::generic_category(),
+                    "resource-test warmup"
+                );
+            }
+            catch (const std::system_error& error)
+            {
+                if (error.code().value() != EMFILE ||
+                    !error.what()[0])
+                    return 5;
+            }
+            // The first stop also checks this base-interface dynamic
+            // type. A read-only query primes it without stopping the
+            // real listener.
+            if (serverPtr->stopped())
+                return 6;
+            std::cerr << "TEST_HOST_RESOURCE_ERROR_WARMED"
+                      << std::endl;
+        }
         std::cerr << "TEST_HOST_READY" << std::endl;
         loop.loop();
     }

@@ -128,6 +128,27 @@ class Acceptance:
         self.query("CREATE TABLE public.asset_probe(id integer PRIMARY KEY,value integer NOT NULL CHECK(value>=0));"
                    "INSERT INTO public.asset_probe VALUES(1,0),(2,0)")
 
+    def _bounded_serialization_rejection(self, error, budget):
+        require(error.category in ("retry_exhausted", "budget_exhausted") and error.sqlstate == "40001",
+                "unexpected bounded rejection: " + str(self.error_details(error)))
+        require(error.last_failure_category == "serialization" and error.failures
+                and all(state == "40001" for state in error.failures),
+                "bounded rejection lost serialization history")
+        require(1 <= error.attempts <= budget.max_attempts
+                and len(error.failures) == error.attempts
+                and len(error.delays) <= error.attempts,
+                "bounded rejection exceeded attempt accounting")
+        if error.category == "retry_exhausted":
+            require(error.attempts == budget.max_attempts and len(error.delays) == error.attempts-1,
+                    "attempt cap was not enforced exactly")
+        else:
+            require(error.elapsed >= budget.max_elapsed,
+                    "budget rejected before its elapsed limit")
+        require(all(math.isfinite(delay) and 0 <= delay <= min(
+            budget.max_delay, budget.base_delay*(2**index))
+            for index, delay in enumerate(error.delays)),
+            "bounded rejection exceeded full-jitter ceiling")
+
     def bulk(self):
         self.query("INSERT INTO arena.account(account_id,account_name,password_digest) "
                    "SELECT n,'asset_player_'||n,'$arena-pbkdf2-sha256$100000$'||repeat('00',16)||'$'||repeat('11',32) "
@@ -167,31 +188,121 @@ class Acceptance:
                 return connection
             results = []
             for request in group:
-                result = self.api.transfer(factory,request,self.budget)
-                results.append((request,result))
+                try:
+                    result = self.api.transfer(factory,request,self.budget)
+                except self.api.TransferError as error:
+                    results.append((request,error))
+                else:
+                    results.append((request,result))
             return results
         completed = []
         with ThreadPoolExecutor(max_workers=100) as workers:
             futures = [workers.submit(worker, group) for group in requests]
             for future in as_completed(futures, timeout=120):
                 completed.extend(future.result())
-        require(len(first_pids)==100 and len(completed)==1000, "did not execute 100 concurrent workers/1000 transfers")
-        expected = {(p,i):100000 for p in range(10000,10100) for i in (100,101,102)}
-        for request,result in completed:
+        successful = [(request,result) for request,result in completed
+                      if not isinstance(result,self.api.TransferError)]
+        rejected = [(request,error) for request,error in completed
+                    if isinstance(error,self.api.TransferError)]
+        summary = dict(workers=100, simultaneous_initial_connections=len(first_pids),
+            submitted=1000, concurrent_acknowledged=len(successful),
+            concurrent_rejected=len(rejected), quiescent_resolutions=0,
+            rejected_requests=[dict(transfer_id=str(request.transfer_id),
+                source_player_id=request.source_player_id,
+                destination_player_id=request.destination_player_id,
+                item_id=request.item_id, quantity=request.quantity, **self.error_details(error))
+                for request,error in rejected], seed="0xA55E7000+worker")
+        self.report["funded_concurrency"] = summary
+        require(len(first_pids)==100 and len(completed)==1000
+                and {request.transfer_id for request,_ in completed} ==
+                    {request.transfer_id for group in requests for request in group},
+                "did not classify all 100 workers/1000 command identities")
+        for request,error in rejected:
+            self.record(error)
+            self._bounded_serialization_rejection(error,self.budget)
+        for request,result in successful:
             self.record(result)
-            require(not result.value.replayed and result.attempts <= 32, "unique funded transfer failed/replayed")
-            expected[request.source_player_id,request.item_id] -= request.quantity
-            expected[request.destination_player_id,request.item_id] += request.quantity
-        actual = {(int(p),int(i)):int(q) for p,i,q in self.query(
-            "SELECT player_id,item_id,quantity FROM arena.inventory WHERE item_id BETWEEN 100 AND 102")}
-        require(actual==expected and min(actual.values())>=0, "bulk balances diverged from independent successful-command oracle")
-        rows = self.query("SELECT source_player_id,destination_player_id,item_id,quantity FROM arena.asset_transfer WHERE item_id BETWEEN 100 AND 102")
-        receipts = Counter(tuple(map(int,row)) for row in rows)
-        oracle = Counter((r.source_player_id,r.destination_player_id,r.item_id,r.quantity) for group in requests for r in group)
-        require(receipts==oracle, "bulk successful receipts disagree with requests")
-        require(all(sum(q for (p,i),q in actual.items() if i==item)==10000000 for item in (100,101,102)),
-                "per-item conservation failed")
-        return dict(workers=100, simultaneous_initial_connections=100, transfers=1000, seed="0xA55E7000+worker")
+            require(not result.value.replayed and result.value.transfer_id == request.transfer_id
+                    and 1 <= result.attempts <= self.budget.max_attempts
+                    and len(result.delays) == result.attempts-1
+                    and all(state == "40001" for state in result.failures),
+                    "unique funded transfer returned invalid success/retry accounting")
+
+        def verify(acknowledged, rejected_requests):
+            expected = {(p,i):[100000,0] for p in range(10000,10100) for i in (100,101,102)}
+            for request,_ in acknowledged:
+                for player,delta in ((request.source_player_id,-request.quantity),
+                                     (request.destination_player_id,request.quantity)):
+                    row = expected[player,request.item_id]
+                    row[0] += delta
+                    row[1] += 1
+            actual = {(int(p),int(i)):(int(q),int(revision)) for p,i,q,revision in self.query(
+                "SELECT player_id,item_id,quantity,revision FROM arena.inventory WHERE item_id BETWEEN 100 AND 102")}
+            require(actual == {key:tuple(value) for key,value in expected.items()},
+                    "funded balances/revisions diverged from acknowledged-command oracle")
+            require(min(quantity for quantity,_ in actual.values()) >= 0,
+                    "funded commands created negative inventory")
+            rows = self.query("SELECT transfer_id,source_player_id,destination_player_id,item_id,quantity "
+                              "FROM arena.asset_transfer WHERE item_id BETWEEN 100 AND 102")
+            receipts = Counter((identity,*map(int,fields)) for identity,*fields in rows)
+            oracle = Counter((request.transfer_id,request.source_player_id,
+                request.destination_player_id,request.item_id,request.quantity) for request,_ in acknowledged)
+            require(receipts == oracle, "funded receipt UUID/payload disagrees with acknowledged commands")
+            stored_ids = {row[0] for row in rows}
+            require(all(request.transfer_id not in stored_ids for request in rejected_requests),
+                    "bounded rejection retained a successful receipt")
+            require(all(sum(quantity for (player,identity),(quantity,_) in actual.items()
+                            if identity == item) == 10000000 for item in (100,101,102)),
+                    "funded per-item conservation failed")
+            return len(rows)
+
+        summary["concurrent_verified_receipts"] = verify(successful,[r for r,_ in rejected])
+        # One explicit resolution per rejected UUID after all concurrent work has
+        # joined. This is a distinct phase, never an unbounded retry-until-green.
+        resolved = []
+        for request,_ in rejected:
+            result = self.api.transfer(self.connect,request,self.budget)
+            self.record(result)
+            require(not result.value.replayed and result.value.transfer_id == request.transfer_id,
+                    "a rejected funded command had already committed")
+            resolved.append((request,result))
+        summary["quiescent_resolutions"] = len(resolved)
+        summary["final_verified_receipts"] = verify(successful+resolved,[])
+        require(len(successful)+len(resolved)==1000, "funded final completion lost command identities")
+        summary["transfers"] = 1000
+        return summary
+
+    def funded_bounded_resolution(self):
+        self.item(214,{42:10,43:0})
+        request = self.request(item=214,quantity=3)
+        raced = False
+        acceptance = self
+        class SnapshotRaceConnection(ConnectionProxy):
+            def execute(self, statement, parameters=None):
+                nonlocal raced
+                cursor = self.connection.execute(statement, parameters)
+                if not raced and statement.startswith("SELECT set_config"):
+                    raced = True
+                    # The transfer already has a SERIALIZABLE snapshot. A real
+                    # concurrent row version now invalidates its later lock.
+                    acceptance.query("UPDATE arena.inventory SET quantity=quantity "
+                                     "WHERE player_id=42 AND item_id=214")
+                return cursor
+        def factory():
+            return SnapshotRaceConnection(self.connect(),lambda connection:connection.commit())
+        budget = replace(self.budget,max_attempts=1)
+        error = self.error(lambda:self.api.transfer(factory,request,budget),
+                           "retry_exhausted","40001",1)
+        self._bounded_serialization_rejection(error,budget)
+        require(raced and self.balances(214)=={42:(10,0),43:(0,0)}
+                and self.receipt_count(request.transfer_id)==0,
+                "funded bounded rejection retained writes or a successful receipt")
+        result = self.transfer(request)
+        require(not result.value.replayed and self.balances(214)=={42:(7,1),43:(3,1)}
+                and self.receipt_count(request.transfer_id)==1,
+                "same rejected UUID did not resolve exactly once after contention ceased")
+        return dict(real_concurrent_snapshot_conflict=True,
+                    rejection=self.error_details(error),quiescent_resolutions=1)
 
     def concurrent_idempotency(self):
         self.item(210,{42:10000,43:0})
@@ -640,6 +751,7 @@ class Acceptance:
         self.setup()
         for name,action in [
             ("100_workers_1000_funded_transfers",self.bulk),
+            ("funded_bounded_rejection_and_resolution",self.funded_bounded_resolution),
             ("same_uuid_and_conflicting_payload",self.concurrent_idempotency),
             ("hot_pair_and_opposite_directions",self.hot_and_opposite),
             ("business_failures_and_unsigned64",self.business_failures),

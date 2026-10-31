@@ -2,8 +2,7 @@
 
 This module provides the reviewed PostgreSQL 14+ schema, ordered migrations and a synchronous Python asset-transfer entry point.
 It includes transaction-scoped Account/Match repositories and a bounded Python connection pool.
-It does not yet provide a C++ database adapter, settlement worker
-or outbox publisher. Gateway still uses its file account snapshot and in-memory
+The storage process now provides settlement and outbox workers through internal RPC. Gateway still uses its file account snapshot and in-memory
 session, match and room services. Applying this schema does not make those paths
 persistent.
 
@@ -20,7 +19,7 @@ persistent.
 - `repositories.py`: parameterized Account/Player and Match persistence, immutable records.
 - `application.py`: SQL-free atomic account/player registration workflow.
 - `migrate.py`: Python standard-library orchestration of one `psql` process.
-  Only reviewed versions 001 and 002 are supported; it does not discover arbitrary migrations.
+  Only reviewed versions 001 through 004 are supported; it does not discover arbitrary migrations.
 - `fixtures/seed.sql`: separate, deterministic test data. It is not run by `up`
   and must not be treated as production accounts or runtime settlement output.
 
@@ -157,8 +156,8 @@ The runner owns `public.arena_schema_migrations` with these five columns:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `version` | `smallint` PK, positive | Ordered supported versions 1 and 2. |
-| `name` | `text NOT NULL` | `001_initial` or `002_asset_transfer`, matching the version. |
+| `version` | `smallint` PK, positive | Ordered supported versions 1 through 4. |
+| `name` | `text NOT NULL` | The reviewed migration name matching versions 001 through 004. |
 | `up_sha256` | `text NOT NULL` | SHA256 of the exact up-file bytes. |
 | `down_sha256` | `text NOT NULL` | SHA256 of the exact down-file bytes. |
 | `applied_at` | `timestamptz NOT NULL` | Database application time. |
@@ -167,11 +166,11 @@ Both checksums must be 64 lowercase hexadecimal characters. Existing column
 order/types/NOT NULL properties and the version PK are checked before history is
 used. Unknown versions, gaps, renamed migrations and changed up **or down** bytes
 fail closed, including for `status`. Accepted history is empty with no `arena`
-schema, or a matching ordered prefix `[1]` or `[1,2]` with the schema present.
+schema, or a matching nonempty ordered prefix of `[1,2,3,4]` with the schema present.
 An existing 001 deployment can be upgraded without rewriting its reviewed files
-or data: `up` applies only 002. From an empty database, `up` applies both in one
-transaction. `down` rolls every applied migration back in reverse order (002,
-then 001), including the migration ledger; it is not a one-version downgrade.
+or data: `up` applies its missing suffix through 004. From an empty database,
+`up` applies all four in one transaction. `down` rolls every applied migration
+back in reverse order (004, 003, 002, then 001), including the migration ledger; it is not a one-version downgrade.
 These checks detect migration history/artifact drift; they do not fingerprint
 every live business object against arbitrary manual DDL edits. Preserve all
 applied migration bytes and add a new reviewed version for future changes.
@@ -196,26 +195,26 @@ Success returns exit code **0** and one JSON object on stdout, after psql confir
 COMMIT. For example:
 
 ```json
-{"action":"up","state":"applied","version":2,"changed":true,"up_sha256":"<64 hex>","down_sha256":"<64 hex>"}
+{"action":"up","state":"applied","version":4,"changed":true,"up_sha256":"<64 hex>","down_sha256":"<64 hex>"}
 ```
 
-`state` is `applied` or `unapplied`; `version` is 1, 2 or null. `changed` is false for
+`state` is `applied` or `unapplied`; `version` is 1, 2, 3, 4 or null. `changed` is false for
 `status` and repeated no-ops. Hashes identify the applied head; when unapplied (including after `down`), they
-identify the latest local supported migration (002), while `version` is null. Failure returns **2**, writes a
+identify the latest local supported migration (004), while `version` is null. Failure returns **2**, writes a
 short diagnostic to stderr and emits no success JSON. Server errors include a
 SQLSTATE when available, without query text, credentials or connection details.
 
 ## Runtime integration still required
 
-Before adding an adapter, define durable allocation for IDs that are currently
-process-generated, and bind each owner transaction to stable account/player,
-match, session and idempotency identities. Local counters/random boot seeds do
-not establish durable global uniqueness across restarts. Never hide an ID
-collision with `ON CONFLICT DO NOTHING` and call it a successful retry.
+The gateway must reserve durable match-ID blocks from Storage and retain stable
+session and idempotency identities across handoff. `work.ids` supplies the durable
+allocator; a local counter or random boot seed does not establish uniqueness.
+A conflicting existing match must pass canonical payload comparison before it
+can be called a replay.
 
-Authentication lookups, gateway inventory commands, match result capture, settlement and
-outbox delivery remain unwired. The migration CLI performs maintenance DDL only;
-it must not be called from a connection owner or the fixed room tick loop.
+C++ gateway authentication/result hooks and a production outbox transport still
+need wiring. The migration CLI performs maintenance DDL only; never call it from
+a connection owner or room tick loop.
 
 ## Verification
 
@@ -359,7 +358,7 @@ tests; missing dependencies cause configure failure rather than a silent skip.
 ## Repository and pooled transaction interface
 
 Install the pinned `psycopg` and `psycopg_pool` versions in `requirements.txt`.
-This is a synchronous Python storage interface; the C++ gateway remains unwired.
+The repository interface is synchronous Python; the separate RPC process uses bounded workers. The C++ gateway remains unwired.
 Call it from a storage worker, not a connection owner or room tick thread.
 
 ```python
@@ -445,3 +444,48 @@ real deferred COMMIT failures, real COMMIT serialization conflict and simulated
 lost acknowledgment after a real commit. Cleanup injections are explicitly
 labeled. Generated reports live under `build/tests/storage/`; no external
 database is accepted by these tests.
+
+## Cache, settlement and storage process
+
+`redis_store.py` owns a finite async Redis pool, epoch-fenced session TTLs,
+bounded leaderboards and ordered pipeline reads. `cache.py` adds singleflight,
+positive/negative entries, explicit invalidation, TTL jitter and finite origin
+concurrency/rate admission. Instances belong to one asyncio loop. Loaders accept
+an absolute monotonic deadline and must cooperate with cancellation. Cache and
+session projections never authorize inventory writes. Redis failures can reject
+excess reads instead of flooding PG. `RedisCacheAcceptance` uses a private Redis
+process; enable it with `ARENA_ENABLE_REDIS_TESTS` and the storage test Python.
+
+`work.settlements.commit` atomically credits inventory and writes an immutable
+ledger, settlement receipt and outbox event. Stable command/event identities and
+canonical hashes reject conflicting replays. Aborted matches award nothing.
+`work.outbox` provides finite expiring lease batches and fenced acknowledgments.
+Publisher delivery runs outside SQL and is at least once. Consumers deduplicate
+an event ID/hash with their audit projection; they do not mint assets again.
+Retries use bounded jitter; exhausted/permanent failures become dead letters.
+`SettlementOutboxAcceptance` covers repeated delivery and six SIGKILL crash points.
+
+Additive migration 003 owns ledger/outbox support; 004 owns monotonic durable
+match-ID block reservations. Gaps are allowed; reserved IDs cannot be reused.
+Install both storage and `shared/runtime/requirements.txt`, build
+`arena_rpc_proto`, apply all migrations, and launch:
+
+```sh
+# Explicit PGHOST/PGPORT/PGDATABASE/PGUSER and private libpq credentials required.
+# ARENA_INTERNAL_TOKEN must contain a private shared credential of 32..256 bytes.
+python -m services.storage.server --descriptor build/shared/generated/rpc.desc \
+  --port 7105 --workers 4
+```
+
+The authenticated loopback process exposes account/player lookup, ID reservation,
+atomic terminal match/settlement writes and queries. The typed contract is
+`shared/proto/storage.proto`. The current server reward policy grants 10 units of
+item 1 to each completed-match participant; aborts award nothing. Redis projection
+runs only after acknowledged PG commit. The C++ gateway still needs this process
+wired into its existing in-memory journey.
+
+Worker cancellation retains admission until SQL and cancellation actually finish.
+A loan observer detaches before pool return so stale cancellation cannot target
+the next borrower. SQL timeouts use the request budget. Before libpq 17, remote
+cancel network I/O is not hard bounded; local Unix-socket functional acceptance
+does not establish remote outage deadlines or production performance SLOs.

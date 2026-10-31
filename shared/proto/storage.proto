@@ -1,0 +1,43 @@
+syntax = "proto3";
+package arena.storage;
+// Internal storage contract; credentials remain within the loopback Auth boundary.
+message AccountRecord { uint64 account_id = 1; string account_name = 2; string password_digest = 3; string state = 4; }
+message PlayerRecord { uint64 player_id = 1; uint64 account_id = 2; string display_name = 3; string state = 4; uint32 mmr = 5; uint64 revision = 6; }
+message FindAccountRequest { string account_name = 1; }
+message FindAccountReply { AccountRecord account = 1; PlayerRecord player = 2; }
+message PlayerGetRequest { uint64 player_id = 1; }
+message PlayerGetReply { PlayerRecord player = 1; }
+message AllocateIdsRequest { uint32 count = 1; }
+message AllocateIdsReply { uint64 first = 1; uint64 last = 2; }
+message Participant {
+  uint64 player_id = 1;
+  uint32 slot = 2;
+  uint64 session_id = 3;
+  uint64 membership_epoch = 4;
+  uint32 initial_mmr = 5;
+  uint64 last_input_seq = 6;
+  sint32 final_x = 7;
+  sint32 final_y = 8;
+}
+message MatchRecord {
+  uint64 match_id = 1;
+  uint64 room_id = 2;
+  string state = 3;
+  uint32 result_version = 4;
+  uint64 winner_player_id = 5;
+  uint64 final_tick = 6;
+  uint64 final_checksum = 7;
+  string finish_reason = 8;
+  repeated Participant participants = 9;
+  // Zero timestamps let Storage assign receipt time on the initial write.
+  uint64 created_unix_ms = 10;
+  uint64 started_unix_ms = 11;
+  uint64 finished_unix_ms = 12;
+}
+message SaveResultRequest { MatchRecord match = 1; }
+message SettlementRecord { uint64 settlement_id = 1; uint64 match_id = 2; string event_id = 3; bool replayed = 4; }
+message SaveResultReply { MatchRecord match = 1; SettlementRecord settlement = 2; bool replayed = 3; }
+message MatchGetRequest { uint64 match_id = 1; }
+message MatchGetReply { MatchRecord match = 1; }
+message SettlementGetRequest { uint64 settlement_id = 1; }
+message SettlementGetReply { SettlementRecord settlement = 1; }

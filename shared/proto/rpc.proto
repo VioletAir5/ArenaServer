@@ -1,0 +1,32 @@
+syntax = "proto3";
+package arena.rpc;
+// One request and response per bounded length-prefixed TCP connection.
+message Request {
+  uint64 request_id = 1;
+  string correlation_id = 2;
+  uint64 deadline_unix_ms = 3;
+  string method = 4;
+  string idempotency_key = 5;
+  bytes payload = 6;
+  string service_token = 7;
+}
+enum Status {
+  OK = 0;
+  INVALID_ARGUMENT = 1;
+  NOT_FOUND = 2;
+  UNAVAILABLE = 3;
+  OVERLOADED = 4;
+  DEADLINE_EXCEEDED = 5;
+  CANCELLED = 6;
+  CONFLICT = 7;
+  INTERNAL = 8;
+  OUTCOME_UNKNOWN = 9;
+  UNAUTHENTICATED = 10;
+}
+message Response {
+  uint64 request_id = 1;
+  string correlation_id = 2;
+  Status status = 3;
+  bool retryable = 4;
+  bytes payload = 5;
+}

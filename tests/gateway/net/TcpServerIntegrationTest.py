@@ -51,6 +51,11 @@ def run(binary, scenario, worker_count=0):
         prefix="arena-tcp-integration-", suffix=".log", delete=False
     )
     environment = os.environ.copy()
+    # Resource-error warmup is optional for test hosts. Every backend must
+    # still pass the same real EMFILE, backoff, recovery and stop checks.
+    environment.pop("ARENA_TEST_WARM_RESOURCE_ERROR", None)
+    if scenario.startswith("fd_limit"):
+        environment["ARENA_TEST_WARM_RESOURCE_ERROR"] = "1"
     environment.setdefault(
         "ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1:abort_on_error=1"
     )
@@ -78,7 +83,10 @@ def run(binary, scenario, worker_count=0):
             if os.path.getsize(log.name) > 1024 * 1024:
                 raise AssertionError("server produced excessive startup log")
             with open(log.name, errors="replace") as stream:
-                return "TEST_HOST_READY" in stream.read(4096)
+                output = stream.read(4096)
+            if "TEST_HOST_READY" not in output:
+                return False
+            return True
 
         wait_until(server, ready, "server startup")
         baseline = fd_count(server)
@@ -399,7 +407,7 @@ def run(binary, scenario, worker_count=0):
         if ("ERROR: AddressSanitizer" in output or "LeakSanitizer" in output
                 or "AddressSanitizer:DEADLYSIGNAL" in output
                 or "WARNING: ThreadSanitizer" in output
-                or "runtime error:" in output):
+                or "runtime error:" in output or "SanitizerTool:" in output):
             raise AssertionError(f"sanitizer error: {output[-2000:]}")
         if scenario == "limit" and "connection limit reached" not in output:
             raise AssertionError("missing explicit connection-limit log")

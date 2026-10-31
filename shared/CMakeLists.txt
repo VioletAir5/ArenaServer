@@ -42,3 +42,26 @@ target_link_libraries(arena_shared PUBLIC protobuf::libprotobuf)
 add_subdirectory(src/os)
 add_subdirectory(src/concurrent)
 add_subdirectory(src/protocol)
+
+# Emit a descriptor set for Python without checking generated bindings into Git.
+add_custom_command(
+    OUTPUT "${ARENA_PROTO_OUT}/rpc.pb.cc" "${ARENA_PROTO_OUT}/rpc.pb.h"
+           "${ARENA_PROTO_OUT}/rpc.desc"
+           "${ARENA_PROTO_OUT}/storage.pb.cc" "${ARENA_PROTO_OUT}/storage.pb.h"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${ARENA_PROTO_OUT}"
+    COMMAND ${Protobuf_PROTOC_EXECUTABLE} --cpp_out "${ARENA_PROTO_OUT}"
+            --descriptor_set_out "${ARENA_PROTO_OUT}/rpc.desc"
+            --proto_path "${ARENA_PROTO_DIR}" "${ARENA_PROTO_DIR}/rpc.proto"
+            "${ARENA_PROTO_DIR}/storage.proto"
+    DEPENDS "${ARENA_PROTO_DIR}/rpc.proto" "${ARENA_PROTO_DIR}/storage.proto"
+    VERBATIM)
+add_custom_target(arena_rpc_proto DEPENDS "${ARENA_PROTO_OUT}/rpc.pb.cc"
+    "${ARENA_PROTO_OUT}/rpc.pb.h" "${ARENA_PROTO_OUT}/rpc.desc")
+add_dependencies(arena_shared arena_rpc_proto)
+target_sources(arena_shared PRIVATE "${ARENA_PROTO_OUT}/rpc.pb.cc"
+    "${ARENA_PROTO_OUT}/storage.pb.cc")
+find_package(Boost 1.74 REQUIRED CONFIG)
+find_package(Threads REQUIRED)
+target_sources(arena_shared PRIVATE src/rpc/Client.cpp)
+target_link_libraries(arena_shared PUBLIC Boost::boost Threads::Threads)
+target_compile_definitions(arena_shared PUBLIC BOOST_ERROR_CODE_HEADER_ONLY)

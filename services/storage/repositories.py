@@ -270,6 +270,17 @@ class AccountRepository:
             return None if row is None else _player(row)
 
 
+    def find_player_by_account(self, account_id: int) -> Player | None:
+        """Read the account's canonical player without exposing a live cursor."""
+        connection = self._session.connection()
+        _integer(account_id, 1, _UINT64_MAX)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT " + _PLAYER_FIELDS + " FROM arena.player "
+                           "WHERE account_id = %s", (account_id,))
+            row = cursor.fetchone()
+            return None if row is None else _player(row)
+
+
 class MatchRepository:
     """Match lifecycle SQL with one parent lock protecting each roster snapshot."""
 
@@ -295,20 +306,32 @@ class MatchRepository:
 
     def create(self, match_id: int, room_id: int,
                participants: tuple[MatchParticipant, ...], result_version: int = 1,
-               *, created_at: datetime | None = None) -> Match:
+               *, created_at: datetime | None = None, if_absent: bool = False) -> Match:
         """Assemble Forming plus two members before exposing a complete result."""
         connection = self._session.connection()
         _integer(match_id, 1, _UINT64_MAX)
         _integer(room_id, 1, _UINT64_MAX)
         _integer(result_version, 1, _INT32_MAX)
         participants = _participants(participants)
+        if type(if_absent) is not bool:
+            raise StorageError("invalid_request")
         if created_at is not None:
             created_at = _timestamp(created_at)
         with connection.cursor() as cursor:
-            cursor.execute("INSERT INTO arena.game_match "
-                           "(match_id, room_id, result_version, created_at) "
-                           "VALUES (%s, %s, %s, coalesce(%s::timestamptz, CURRENT_TIMESTAMP))",
+            statement = ("INSERT INTO arena.game_match "
+                         "(match_id, room_id, result_version, created_at) "
+                         "VALUES (%s, %s, %s, coalesce(%s::timestamptz, CURRENT_TIMESTAMP))")
+            if if_absent:
+                # An invisible concurrent conflict raises PostgreSQL's real
+                # SERIALIZABLE error; the shared boundary retries the whole UoW.
+                statement += " ON CONFLICT (match_id) DO NOTHING"
+            cursor.execute(statement + " RETURNING match_id",
                            (match_id, room_id, result_version, created_at))
+            if cursor.fetchone() is None:
+                existing = self._get_locked(cursor, match_id)
+                if existing is None:
+                    raise StorageError("not_found")
+                return existing
             for member in participants:
                 cursor.execute("INSERT INTO arena.match_player "
                                "(match_id, player_id, slot, session_id, membership_epoch, "
