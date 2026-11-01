@@ -157,5 +157,45 @@ TEST(AdmissionControllerTest, LocalRejectionsRemainObservable)
     EXPECT_EQ(snapshot.rejectedGlobal, 0u);
     EXPECT_EQ(snapshot.rejectedPerIp, 0u);
 }
+TEST(
+    AdmissionControllerTest,
+    ReadinessRejectsWithoutReservationAndExistingLeaseSurvives
+)
+{
+    std::atomic<bool> ready{true};
+    AdmissionController controller(
+        {4, 4},
+        [&] { return ready.load(); }
+    );
+    auto existing = controller.tryAcquire(
+        InetAddress("127.0.0.1", 1)
+    );
+    ASSERT_TRUE(existing);
+    ready = false;
+    EXPECT_FALSE(controller.tryAcquire(InetAddress("127.0.0.2", 2)));
+    EXPECT_EQ(controller.snapshot().active, 1);
+    EXPECT_EQ(controller.snapshot().rejectedNotReady, 1);
+    EXPECT_EQ(controller.snapshot().trackedIps, 1);
+    ready = true;
+    EXPECT_TRUE(controller.tryAcquire(InetAddress("127.0.0.2", 3)));
+    existing.reset();
+    EXPECT_EQ(controller.snapshot().active, 0);
+}
+
+TEST(
+    AdmissionControllerTest,
+    ThrowingReadinessFailsClosedWithoutChangingCapacity
+)
+{
+    AdmissionController controller(
+        {4, 4},
+        []() -> bool { throw std::runtime_error("observer"); }
+    );
+    EXPECT_FALSE(controller.tryAcquire(InetAddress("127.0.0.1", 1)));
+    EXPECT_EQ(controller.snapshot().active, 0);
+    EXPECT_EQ(controller.snapshot().trackedIps, 0);
+    EXPECT_EQ(controller.snapshot().rejectedNotReady, 1);
+}
+
 } // namespace
 } // namespace service::gateway

@@ -1,0 +1,17 @@
+syntax = "proto3";
+package arena.runtime.config;
+
+// Startup credentials and listener/thread ownership are deliberately separate.
+message Node {
+  string service = 1;
+  string node_id = 2;
+  string host = 3;
+  uint32 port = 4;
+  optional bool ready = 5;
+}
+message RuntimeConfig {
+  uint64 version = 1;
+  optional bool desired_ready = 2;
+  optional uint32 drain_grace_ms = 3;
+  repeated Node nodes = 4;
+}

@@ -311,10 +311,87 @@ This is an acceptance procedure, not a claim that a particular run passed.
 It uses the production application/account adapter; reports and logs go to the
 supplied directory.
 
-Multi-instance session authority, load-balancer readiness integration, a
+Multi-instance session authority, deployed load-balancer readiness integration, a
 connection login deadline and distributed business idempotency remain planned.
 This architecture supports their placement but does not claim deployed high
 availability or automatic recovery of in-flight business operations.
+
+## Runtime configuration, discovery and health
+
+`ARENA_RUNTIME_CONFIG` opts into a versioned JSON file shared in schema with
+Storage. Keep the existing authenticated Storage settings and service token;
+the discovery file contains public endpoints and operator intent, not secrets.
+A minimal document is:
+
+```json
+{
+  "version": "1",
+  "desiredReady": true,
+  "drainGraceMs": 5000,
+  "nodes": [
+    {"service": "storage", "nodeId": "node-a", "host": "127.0.0.1", "port": 7105, "ready": true}
+  ]
+}
+```
+
+All fields are required, including explicit boolean values. The version is a
+nonzero uint64; a decimal string preserves its range in JSON tools. Grace is
+0..10000 ms; there must be 1..128 nodes with unique `(service,nodeId)` identities.
+Service/node names are bounded lowercase ASCII identifiers. Endpoints currently
+support only loopback `127.0.0.1` or `::1` and ports 1..65535, matching the internal
+RPC transport boundary. Unknown/duplicate fields, duplicate snake/camel aliases,
+string booleans, documents over 64 KiB and nesting beyond 16 levels are rejected.
+
+Publish a complete regular file with an atomic rename, then send `SIGHUP` to
+Gateway and the relevant Storage processes. Symlinks and unstable/partial reads
+are rejected. Each process has its own store and reload counters: publication
+is atomic within one process, not an atomic cluster-wide deployment. Readers
+retain an immutable snapshot; new versions replace one shared pointer. Versions
+must strictly increase. Restore previous contents with a higher version to roll
+back; a stale version cannot replace the current snapshot. Rejected loads keep
+the complete previous version serving. One loader plus one coalesced pending
+reload bounds repeated signals and callback-triggered requests.
+
+Gateway resolves the first ready Storage node in canonical `(service,nodeId)`
+order. Each admitted authentication, lookup, ID reservation or result attempt
+captures its endpoint; reload cannot retarget an in-flight call. When a runtime
+store is present and no Storage node is ready, admission fails closed without
+falling back to `ARENA_STORAGE_PORT`. This is static selection, not weighted load
+balancing or automatic replay of failed business commands.
+
+Set `ARENA_HEALTH_PORT` to a distinct loopback HTTP port; `0` selects an ephemeral
+port printed in `GATEWAY_READY`. A runtime file also enables health on an
+ephemeral port when the variable is absent. `ARENA_NODE_ID` defaults to `gateway`.
+An optional matching `gateway` node entry with `ready=false` closes this node's
+admission even when global `desiredReady` is true. Invalid configuration or
+listener startup fails with exit status 2.
+
+- `GET /health/alive`: 200 while the control owner is alive, including quiescence
+  and business drain.
+- `GET /health/ready`: 200 only after business listeners are bound, operator and
+  matching-node intent allow traffic, drain has not begun, and the current
+  Storage route has a recent successful authenticated `health.ready` probe.
+  Otherwise it returns 503.
+- `GET /health/config`: JSON with version, desired/configured readiness, drain,
+  inflight and reload counters. Health runs independently of business reactors;
+  at most 16 peers, 4 KiB request headers and 250 ms read/write deadlines bound
+  slow clients. Providers read cached state and never execute SQL or RPC.
+
+Without Storage, readiness needs only the local listener/intent/drain conditions.
+Storage probes are serialized, have a 300 ms upper RPC timeout, and schedule the
+next probe 250 ms after completion. A stale reply cannot make a replacement
+route ready. Existing rooms retain local input/status operations during a
+Storage outage; new connections and SQL-dependent login/join/settlement
+requests are gated. Explicit operator quiescence rejects all new business
+requests but is reversible with a higher-version ready configuration.
+
+On SIGINT/SIGTERM, control becomes permanently not-ready before business
+shutdown starts. Listeners use the current `drainGraceMs`, accepted persistence
+work is joined, and health closes last. A health request observes actual
+inflight RPC ownership; it does not count an abandoned caller as completed work.
+See the `RuntimeConfigPython`, `RuntimeConfigParity`, `RuntimeConfigDiscovery`
+and native runtime CTest cases for schema parity, reload storms, route capture,
+reversible quiescence, outage recovery and bounded real inflight drain.
 
 ## Persistent room replay
 

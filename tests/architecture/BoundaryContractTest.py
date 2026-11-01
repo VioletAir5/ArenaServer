@@ -52,7 +52,7 @@ def main():
           'a declared method is missing an actual dispatch registration')
     check(all(not cycles for cycles in baseline['cycles'].values()), 'baseline dependency cycle')
     check({entry['method'] for entry in baseline['contracts']['native_and_python_calls']} ==
-          {'account.find', 'match.allocate_ids', 'match.save_result', 'match.get', 'settlement.get'},
+          {'account.find', 'match.allocate_ids', 'match.save_result', 'match.get', 'settlement.get', 'health.ready'},
           'current native method coverage must follow real source calls')
     cases.append(dict(name='current_production_sources_and_seven_rpc_contracts', passed=True))
 

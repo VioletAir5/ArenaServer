@@ -234,11 +234,16 @@ ArenaProtocol::ArenaProtocol(
     ConnectionContext::Ptr context,
     std::shared_ptr<const MessageRegistry> registry,
     PacketPolicyFactory policies,
-    std::shared_ptr<spdlog::logger> logger
+    std::shared_ptr<spdlog::logger> logger,
+    RequestAdmission admission
 )
     : m_context(std::move(context))
     , m_dispatcher(
-          m_context, std::move(registry), sendReply, std::move(logger)
+          m_context,
+          std::move(registry),
+          sendReply,
+          std::move(logger),
+          std::move(admission)
       )
 {
     PacketPolicyChain chain;
@@ -322,14 +327,16 @@ ConnectionHandler makeArenaProtocolHandler(
     ConnectionContext::Ptr context,
     std::shared_ptr<const MessageRegistry> registry,
     PacketPolicyFactory policies,
-    std::shared_ptr<spdlog::logger> logger
+    std::shared_ptr<spdlog::logger> logger,
+    RequestAdmission admission
 )
 {
     auto protocol = std::make_shared<ArenaProtocol>(
         std::move(context),
         std::move(registry),
         std::move(policies),
-        std::move(logger)
+        std::move(logger),
+        std::move(admission)
     );
     ConnectionHandler handler;
     handler.onMessage = [protocol](

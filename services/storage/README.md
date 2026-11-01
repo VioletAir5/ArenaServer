@@ -549,6 +549,116 @@ leases retain their duration and fencing checks on the shared test civil clock.
 Direct CLI runs use the host clock unless this wrapper is explicitly selected.
 Production lease fencing, database time constraints and JWT validation are unchanged.
 
+## Runtime configuration and health
+
+Runtime control is opt-in. With neither `ARENA_RUNTIME_CONFIG` nor
+`ARENA_HEALTH_PORT` (and neither CLI alias), Storage keeps its existing RPC-only
+startup and shutdown behavior. Configuring either enables a separate loopback
+HTTP listener and periodic PostgreSQL readiness checks. Listener addresses,
+worker/pool sizes and credentials remain startup settings; reloading a discovery
+record does not rebind the Storage listener.
+
+| Setting | Meaning |
+| --- | --- |
+| `ARENA_RUNTIME_CONFIG` / `--runtime-config` | Optional UTF-8 JSON file. An explicitly configured empty, unreadable or invalid file fails startup before pool construction. The CLI path takes precedence. |
+| `ARENA_HEALTH_PORT` / `--health-port` | Optional HTTP port, `0..65535`; `0` requests an ephemeral port. With a config file and no explicit health port, an ephemeral listener is created. The CLI value takes precedence. |
+| `ARENA_NODE_ID` | Local node identity, default `storage`; lowercase ASCII letter followed by up to 63 lowercase letters, digits, `_` or `-`. It identifies the local `storage` record and appears in health output. |
+
+For example, after preparing the PG environment and shared service credential
+as above:
+
+```sh
+ARENA_NODE_ID=node-a \
+ARENA_RUNTIME_CONFIG=/etc/arena/runtime.json \
+ARENA_HEALTH_PORT=7205 \
+python -m services.storage.server --descriptor build/shared/generated/rpc.desc \
+  --port 7105 --workers 4
+```
+
+A complete file uses `shared/proto/runtime_config.proto` and ProtoJSON names:
+
+```json
+{
+  "version": "1",
+  "desiredReady": true,
+  "drainGraceMs": 5000,
+  "nodes": [
+    {"service": "storage", "nodeId": "node-a", "host": "127.0.0.1", "port": 7105, "ready": true}
+  ]
+}
+```
+
+All shown fields are required, including both booleans when false and the grace
+period when zero. `version` is a positive uint64; `drainGraceMs` is `0..10000`.
+There must be `1..128` nodes with unique `(service, nodeId)` pairs. Service names
+start with a lowercase ASCII letter and contain at most 32 lowercase letters,
+digits, `_` or `-`; node IDs follow the same rule with a 64-character limit.
+Discovery endpoints allow only `127.0.0.1` or `::1` and ports `1..65535`.
+This Storage process binds its RPC and HTTP listeners to `127.0.0.1`, so its own
+discovery record must use that address. Snake-case field aliases are also
+accepted, but supplying both aliases for one field is a duplicate and fails.
+
+Files are limited to 64 KiB and JSON nesting depth 16. Unknown or duplicate keys,
+missing fields, invalid values, partial JSON, non-UTF-8 input, symlinks and
+non-regular files are rejected. Each reader retains one detached immutable
+snapshot; publication replaces it atomically after complete validation and
+canonical `(service, nodeId)` sorting. Versions must increase strictly. A rollback
+restores the previous content under a **newer** version, rather than reusing an
+old version number.
+
+Write a complete replacement beside the live file and rename it atomically,
+then request reload with `kill -HUP "$storage_pid"`. File reads run off the
+asyncio owner loop. At most one load is active and one extra request is pending;
+a burst of signals coalesces into that pending load. Invalid, changed or stale
+files retain the last valid version and continue serving under it. Shutdown
+joins the actual file operation and prevents a late result from publishing.
+
+The HTTP listener accepts one GET request per connection:
+
+| Path | Result |
+| --- | --- |
+| `/health/alive` | 200 while the control listener is running, including PG failure and business drain. |
+| `/health/ready` | 200 only when operator intent, the matching local node's ready flag, actual PG health and terminal drain state all permit new work; otherwise 503. |
+| `/health/config` | 200 with the current status and publication version, without changing configuration. |
+
+The status JSON includes `service`, `node_id`, `config_version` (`0` without a
+file), `desired_ready`, `draining`, `ready`, `alive`, `inflight`, worker/pool
+counters, and `reload` counters (`applied`, `rejected`, `coalesced`, `active`,
+`peak`, `last_error`). `methods` counts actual authenticated handler admissions
+by RPC method; `completions` counts successful responses, excluding rejected
+admissions. `admission_rejected`, `dependency_ready`, `probe_version` and
+`probe_error` distinguish operator quiesce from dependency failure. Startup JSON
+reports the actual `port`, `health_port`, `node_id` and `config_version`.
+
+HTTP is read-only and loopback-only. It has at most 16 admitted connections, a
+250 ms request deadline, 4096-byte headers, at most 64 header lines and a 16 KiB
+JSON response limit. These endpoints do not require the business RPC credential.
+The PG readiness cache refreshes every 250 ms using a real repository query with
+a 250 ms context deadline; a result from an earlier config version cannot make
+the current version ready. Saturated workers or an unavailable database make
+readiness fail. Internal `health.ready` RPC remains admissible during quiesce,
+checks operator intent and performs its own bounded PG query.
+
+Publishing `desiredReady: false` (or `ready: false` on the matching local record)
+rejects new business RPCs while accepted requests finish. It leaves the RPC
+listener open; a newer ready snapshot restores admission after the PG probe
+succeeds. `SIGTERM`/`SIGINT` instead start terminal shutdown: mark not-ready,
+close business admission/listening, allow the captured `drainGraceMs` period,
+then cancel remaining RPC tasks. Without a file the controlled-mode grace is
+5 seconds. The process joins the loader and readiness task, closes Storage
+workers/outbox/projections and the PG pool, then closes health HTTP. Cancellation
+of a shutdown waiter cannot abandon those joins. Health remains available during
+business drain; readiness stays false and liveness stays true until HTTP closes.
+
+`RuntimeConfigPython` covers immutable publication, 10000 concurrent reads,
+1000 file reloads, coalesced/reentrant reload, retained invalid versions, bounded
+HTTP teardown and business quiesce. Its optional `--storage-lifecycle` cases use
+mocked PG construction/closure to reproduce empty-path startup failure and
+repeated shutdown cancellation without starting a database; they require the
+Storage Python dependencies. `RuntimeConfigDiscovery` separately exercises real
+Storage/Gateway discovery and drain against private PostgreSQL. Generated logs
+and reports under the build directory record which acceptance cases actually ran.
+
 ## Executable architecture contracts
 
 `contract.json` declares every deployed Storage method's physical and logical

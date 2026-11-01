@@ -7,13 +7,17 @@ import json
 import os
 from pathlib import Path
 import signal
+import re
+import time
 import sys
 import threading
 from uuid import UUID, uuid5
 
 from google.protobuf.message import DecodeError
 from shared.runtime.protocol import Protocol
-from shared.runtime.rpc import (Server, RpcError, INVALID_ARGUMENT, NOT_FOUND, UNAVAILABLE,
+from shared.runtime.config import ConfigSnapshot, ConfigStore, ConfigReloader
+from shared.runtime.health import HealthServer
+from shared.runtime.rpc import (Server, Context, RpcError, INVALID_ARGUMENT, NOT_FOUND, UNAVAILABLE,
     OVERLOADED, DEADLINE_EXCEEDED, CONFLICT, INTERNAL, OUTCOME_UNKNOWN)
 from .database import Database
 from .outbox import Publisher, consume_event
@@ -159,6 +163,7 @@ class StorageService:
         self.publisher = OutboxPump(database) if publish else None
         self._projections = set()
         self._close_task = None
+        self._runtime_intent = None
         self.projection_rejected = self.projection_failed = 0
         self.handlers = {}
         for method, request, handler in (
@@ -192,7 +197,12 @@ class StorageService:
     async def _ready(self, payload, context):
         if payload:
             raise RpcError(INVALID_ARGUMENT)
-        await self.worker.run(lambda work: work.accounts.get(1), context)
+        if self._runtime_intent is not None and not self._runtime_intent():
+            raise RpcError(UNAVAILABLE, retryable=True)
+        try:
+            await self.worker.run(lambda work: work.accounts.get(1), context)
+        except StorageError as error:
+            raise _storage_error(error) from None
         return b""
 
     @staticmethod
@@ -367,41 +377,174 @@ class StorageService:
             await asyncio.to_thread(self.database.close)
 
 
+class _RuntimeState:
+    """Keep operator intent, actual dependency health and terminal drain distinct."""
+    def __init__(self, service, store, node_id):
+        self.service, self.store, self.node_id = service, store, node_id
+        self.server = self.reloader = None
+        self.draining = False
+        self._dependency = False
+        self._dependency_version = -1
+        self._probe_task = self._close_task = None
+        self._sequence = 0
+        self._probe_error = None
+
+    def snapshot(self):
+        return self.store.snapshot() if self.store is not None else None
+
+    def version(self):
+        snapshot = self.snapshot()
+        return snapshot.version if snapshot is not None else 0
+
+    def operator_ready(self):
+        snapshot = self.snapshot()
+        if self.draining or snapshot is not None and not snapshot.desired_ready:
+            return False
+        own_node = next((node for node in snapshot.nodes
+            if node.service=='storage' and node.id==self.node_id),None) if snapshot is not None else None
+        return own_node is None or own_node.ready
+
+    def ready(self):
+        return self.operator_ready() and self._dependency and self._dependency_version == self.version()
+
+    def admit(self, method):
+        return method == 'health.ready' or self.ready()
+
+    def status(self):
+        snapshot = self.snapshot()
+        return dict(service='storage',node_id=self.node_id,config_version=self.version(),
+            desired_ready=snapshot.desired_ready if snapshot is not None else True,
+            draining=self.draining,ready=self.ready(),alive=True,
+            inflight=self.server.inflight,worker=self.service.worker.stats,pool=self.service.database.stats,
+            methods=dict(self.server.method_calls),completions=dict(self.server.method_completed),
+            admission_rejected=self.server.admission_rejected,
+            dependency_ready=self._dependency,probe_version=self._dependency_version,probe_error=self._probe_error,
+            reload=self.reloader.stats if self.reloader is not None else
+                dict(applied=0,rejected=0,coalesced=0,active=0,peak=0,last_error=None))
+
+    async def _probe(self):
+        while not self.draining:
+            started = time.monotonic()
+            version = self.version()
+            self._sequence += 1
+            context = Context(self._sequence,'storage-readiness',time.monotonic()+.25,'')
+            healthy = False
+            try:
+                await self.service.worker.run(lambda work:work.accounts.get(1),context)
+                healthy = True
+            except (StorageError,RpcError) as error:
+                self._probe_error = error.category if isinstance(error,StorageError) else str(error.status)
+            except Exception:
+                self._probe_error = 'internal'
+            # A result for an old publication cannot make the new version ready.
+            if version == self.version():
+                self._dependency,self._dependency_version = healthy,version
+                if healthy:
+                    self._probe_error = None
+            await asyncio.sleep(max(0,.25-(time.monotonic()-started)))
+
+    def request_reload(self):
+        return self.reloader.request_reload() if self.reloader is not None else False
+
+    def start(self):
+        self._probe_task = asyncio.create_task(self._probe())
+
+    async def close(self):
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        # A cancelled drain waiter must still reach worker and pool shutdown.
+        while not self._close_task.done():
+            try:
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                continue
+        self._close_task.result()
+
+    async def _close(self):
+        if self.reloader is not None:
+            await self.reloader.close()
+        if self._probe_task is not None:
+            self._probe_task.cancel()
+            await asyncio.gather(self._probe_task,return_exceptions=True)
+
 async def run_server(args):
     if not 0 <= args.port <= 65535:
         raise ValueError("invalid loopback port")
     token = os.environ.get("ARENA_INTERNAL_TOKEN", "")
     if not 32 <= len(token.encode()) <= 256:
         raise ValueError("an internal service credential is required")
+    node_id = os.environ.get('ARENA_NODE_ID','storage')
+    if not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}',node_id):
+        raise ValueError('invalid service node identity')
+    config_path = getattr(args,'runtime_config',None)
+    if config_path is None:
+        config_path = os.environ.get('ARENA_RUNTIME_CONFIG')
+    if config_path is not None and not os.fspath(config_path):
+        raise ValueError('runtime configuration path must not be empty')
+    health_port = getattr(args,'health_port',None)
+    if health_port is None and 'ARENA_HEALTH_PORT' in os.environ:
+        health_port = int(os.environ['ARENA_HEALTH_PORT'])
+    if health_port is not None and (type(health_port) is not int or not 0 <= health_port <= 65535):
+        raise ValueError('invalid loopback health port')
+    controlled = config_path is not None or health_port is not None
     parameters = dict(host=os.environ.get("PGHOST", ""), dbname=os.environ.get("PGDATABASE", ""),
                       user=os.environ.get("PGUSER", ""), connect_timeout=1,
                       port=int(os.environ.get("PGPORT", "5432")))
     for name in ("PGSERVICE", "PGSERVICEFILE", "PGHOSTADDR"):
         os.environ.pop(name, None)
     protocol = Protocol(args.descriptor)
+    store = ConfigStore(await asyncio.to_thread(ConfigSnapshot.read,protocol,config_path)) if config_path is not None else None
     database = Database(kwargs=parameters, max_size=args.workers, max_waiting=args.workers,
                         acquire_timeout=.2)
     projection = RedisStore(unix_socket_path=args.redis_socket, namespace="arena") if args.redis_socket else None
     service = StorageService(protocol, database, max_workers=args.workers,
                              redis_store=projection, publish=args.publish)
-    server = Server(protocol, service.handlers, service_token=token)
+    runtime = _RuntimeState(service,store,node_id) if controlled else None
+    server = Server(protocol, service.handlers, service_token=token,
+                    admission=runtime.admit if runtime is not None else None)
+    health = HealthServer(runtime.status) if runtime is not None else None
+    if runtime is not None:
+        runtime.server = server
+        service._runtime_intent = runtime.operator_ready
+        if config_path is not None:
+            runtime.reloader = ConfigReloader(protocol,config_path,store)
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stopped.set)
+    if runtime is not None:
+        loop.add_signal_handler(signal.SIGHUP,runtime.request_reload)
     try:
         port = await server.start("127.0.0.1", args.port)
         service.start()
-        print(json.dumps(dict(service="storage", port=port, state="listening")), flush=True)
+        details = dict(service="storage", port=port, state="listening")
+        if runtime is not None:
+            runtime.start()
+            actual_health_port = await health.start(health_port if health_port is not None else 0)
+            details.update(health_port=actual_health_port,node_id=node_id,config_version=runtime.version())
+        print(json.dumps(details), flush=True)
         await stopped.wait()
     finally:
-        await server.close(grace=1)
-        await service.close()
+        grace = 1
+        if runtime is not None:
+            runtime.draining = True
+            snapshot = runtime.snapshot()
+            grace = snapshot.drain_grace_ms/1000 if snapshot is not None else 5
+            draining = runtime.status()
+            draining['state'] = 'draining'
+            print(json.dumps(draining),flush=True)
+        try:
+            await server.close(grace=grace)
+            if runtime is not None:
+                await runtime.close()
+            await service.close()
+        finally:
+            if health is not None:
+                await health.close()
         print(json.dumps(dict(service="storage", state="stopped", worker=service.worker.stats,
             pool=database.stats, projection_failed=service.projection_failed,
             publisher=service.publisher.stats if service.publisher is not None else
                 dict(enabled=False, active=False, closed=True))), flush=True)
-
 
 def main():
     parser = argparse.ArgumentParser(description="Arena internal Storage service")
@@ -409,6 +552,8 @@ def main():
     parser.add_argument("--port", type=int, default=7105)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--redis-socket", type=Path)
+    parser.add_argument('--runtime-config',type=Path)
+    parser.add_argument('--health-port',type=int)
     parser.add_argument("--publish", action="store_true",
                         help="drain committed outbox events into the deduplicated reward audit")
     args = parser.parse_args()

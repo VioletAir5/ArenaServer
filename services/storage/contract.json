@@ -27,6 +27,7 @@
       "owner": "storage",
       "logical_owner": "storage",
       "callers": [
+        "gateway",
         "operations"
       ],
       "handler": "_ready",

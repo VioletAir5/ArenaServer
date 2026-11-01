@@ -43,6 +43,9 @@ struct Options
     /// Optional upstream budget clips timeout and supplies
     /// correlationId.
     std::optional<Context> context;
+    /// Exact route captured for this admission; no global client
+    /// retargeting.
+    std::optional<boost::asio::ip::tcp::endpoint> endpoint{};
 };
 
 /** @brief Cancels an accepted call without retaining its connection.

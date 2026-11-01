@@ -15,6 +15,7 @@ std::shared_ptr<const MessageRegistry> defaultMessageRegistry();
 ConnectionHandler makePreLoginHandshakeHandler(
     ConnectionContext::Ptr,
     std::shared_ptr<const MessageRegistry> registry = {},
-    PacketPolicyFactory policies = {}
+    PacketPolicyFactory policies = {},
+    RequestAdmission admission = {}
 );
 } // namespace service::gateway

@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "net/InetAddress.h"
@@ -39,6 +40,9 @@ public:
         std::uint64_t rejectedGlobal{0};
         std::uint64_t rejectedPerIp{0};
         std::uint64_t rejectedLocal{0};
+        /// Readiness rejection before any connection reservation is
+        /// acquired.
+        std::uint64_t rejectedNotReady{0};
     };
 
     /** @brief Releases one reservation when its last owner retires.
@@ -62,7 +66,9 @@ public:
 
     /** @brief Constructs a controller with positive global/IP limits.
      */
-    explicit AdmissionController(Limits limits);
+    explicit AdmissionController(
+        Limits limits, std::function<bool()> admission = {}
+    );
 
     /** @brief Atomically reserves capacity, or returns null on
      * rejection.

@@ -82,7 +82,8 @@ struct MessageDispatchTest : testing::Test
 
     void start(
         std::shared_ptr<MessageRegistry> registry,
-        std::shared_ptr<spdlog::logger> logger = {}
+        std::shared_ptr<spdlog::logger> logger = {},
+        RequestAdmission admission = {}
     )
     {
         registry->seal();
@@ -101,7 +102,8 @@ struct MessageDispatchTest : testing::Test
                 context,
                 std::move(registry),
                 {},
-                std::move(logger)
+                std::move(logger),
+                std::move(admission)
             )
         );
         runtime->start();
@@ -1244,4 +1246,59 @@ TEST_F(
     EXPECT_EQ(transport->shutdownCalls, 1);
     EXPECT_EQ(transport->outputAtShutdown, transport->output);
 }
+TEST_F(
+    MessageDispatchTest,
+    QuiesceRejectsNewRequestsWhileAcceptedCompletionFinishes
+)
+{
+    std::atomic<bool> ready{true};
+    int calls = 0;
+    RequestCompletion pending;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_PING,
+        [&](auto, auto completion)
+        {
+            ++calls;
+            pending = std::move(completion);
+        },
+        MessageRouteOptions{false}
+    );
+    start(registry, {}, [&](auto) { return ready.load(); });
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_PING);
+    request.set_request_id(1);
+    request.mutable_ping()->set_nonce(17);
+    receive(request);
+    EXPECT_TRUE(transport->output.empty());
+    ready = false;
+    request.set_request_id(2);
+    receive(request);
+    EXPECT_EQ(calls, 1);
+    ASSERT_TRUE(response().has_error());
+    EXPECT_EQ(response().error().code(), wire::ERR_UNAVAILABLE);
+    transport->output.clear();
+    wire::Envelope success;
+    success.mutable_pong()->set_nonce(17);
+    pending(success);
+    auto queued = std::move(posts);
+    posts.clear();
+    for (auto& task : queued)
+        task();
+    EXPECT_TRUE(response().has_pong());
+    EXPECT_EQ(response().request_id(), 1);
+    EXPECT_TRUE(runtime->connected());
+    ready = true;
+    transport->output.clear();
+    request.set_request_id(3);
+    receive(request);
+    EXPECT_EQ(calls, 2);
+    pending(std::move(success));
+    queued = std::move(posts);
+    posts.clear();
+    for (auto& task : queued)
+        task();
+    EXPECT_EQ(response().request_id(), 3);
+}
+
 } // namespace

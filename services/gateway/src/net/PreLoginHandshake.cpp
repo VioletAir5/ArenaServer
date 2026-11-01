@@ -44,13 +44,16 @@ std::shared_ptr<const MessageRegistry> defaultMessageRegistry()
 ConnectionHandler makePreLoginHandshakeHandler(
     ConnectionContext::Ptr context,
     std::shared_ptr<const MessageRegistry> registry,
-    PacketPolicyFactory policies
+    PacketPolicyFactory policies,
+    RequestAdmission admission
 )
 {
     return makeArenaProtocolHandler(
         std::move(context),
         registry ? std::move(registry) : defaultMessageRegistry(),
-        std::move(policies)
+        std::move(policies),
+        {},
+        std::move(admission)
     );
 }
 } // namespace service::gateway

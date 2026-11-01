@@ -84,6 +84,7 @@ struct Operation : std::enable_shared_from_this<Operation>
     Operation(
         const std::shared_ptr<ClientState>& owner,
         const arena::rpc::Request& request,
+        Tcp::endpoint target,
         Clock::time_point deadline,
         Client::Completion completion
     )
@@ -91,7 +92,7 @@ struct Operation : std::enable_shared_from_this<Operation>
         , executor(owner->executor)
         , socket(executor)
         , timer(executor)
-        , endpoint(owner->endpoint)
+        , endpoint(std::move(target))
         , deadline(deadline)
         , requestId(request.request_id())
         , correlationId(request.correlation_id())
@@ -404,6 +405,14 @@ std::expected<Call, arena::rpc::Status> Client::call(
 {
     using namespace std::chrono;
     const auto now = detail::Clock::now();
+    const auto endpoint = options.endpoint.value_or(
+        m_state->endpoint
+    );
+    const auto address = endpoint.address();
+    if (!endpoint.port() ||
+        !(address == boost::asio::ip::address_v4::loopback() ||
+          address == boost::asio::ip::address_v6::loopback()))
+        return std::unexpected(arena::rpc::INVALID_ARGUMENT);
     if (!completion || options.timeout <= milliseconds::zero() ||
         options.timeout > seconds(30) ||
         !methodValid(request.method()) ||
@@ -454,6 +463,7 @@ std::expected<Call, arena::rpc::Status> Client::call(
     auto operation = std::make_shared<detail::Operation>(
         owner,
         request,
+        endpoint,
         deadline,
         std::move(completion)
     );

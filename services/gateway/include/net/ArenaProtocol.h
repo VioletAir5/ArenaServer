@@ -18,7 +18,8 @@ public:
         ConnectionContext::Ptr,
         std::shared_ptr<const MessageRegistry>,
         PacketPolicyFactory = {},
-        std::shared_ptr<spdlog::logger> logger = {}
+        std::shared_ptr<spdlog::logger> logger = {},
+        RequestAdmission admission = {}
     );
     /** @brief Installs the durable owner endpoint used by session
      * replacement. */
@@ -49,6 +50,7 @@ ConnectionHandler makeArenaProtocolHandler(
     ConnectionContext::Ptr,
     std::shared_ptr<const MessageRegistry>,
     PacketPolicyFactory = {},
-    std::shared_ptr<spdlog::logger> logger = {}
+    std::shared_ptr<spdlog::logger> logger = {},
+    RequestAdmission admission = {}
 );
 } // namespace service::gateway

@@ -26,6 +26,7 @@
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <openssl/crypto.h>
 #include <openssl/sha.h>
 
@@ -33,6 +34,7 @@
 #include "net/RoomService.h"
 
 #include "rpc/Client.h"
+#include "runtime/RuntimeConfig.h"
 
 namespace service::gateway
 {
@@ -223,6 +225,12 @@ void complete(Callback callback, Value value)
 
 struct PersistentStorage::State : std::enable_shared_from_this<State>
 {
+    struct Route
+    {
+        boost::asio::ip::tcp::endpoint endpoint;
+        std::uint64_t version{0};
+        std::string nodeId;
+    };
     struct AuthJob
     {
         std::uint64_t id;
@@ -243,6 +251,9 @@ struct PersistentStorage::State : std::enable_shared_from_this<State>
         arena::storage::MatchRecord match;
         std::atomic<bool> cancelled{false};
         bool followup{false};
+        /// Both reads retain the endpoint chosen before the first
+        /// admission.
+        boost::asio::ip::tcp::endpoint endpoint;
     };
     enum class Phase
     {
@@ -338,6 +349,13 @@ struct PersistentStorage::State : std::enable_shared_from_this<State>
         boost::asio::io_context::executor_type>
         guard;
     RpcClient client;
+    /// Probe timer and its call run only on io; status is guarded by
+    /// mutex.
+    boost::asio::steady_timer healthTimer{io};
+    bool remoteReady{false};
+    std::uint64_t healthVersion{0};
+    std::optional<Route> healthRoute;
+    Clock::time_point healthObserved{};
     std::thread ioThread, workThread;
     mutable std::mutex mutex;
     std::mutex stopMutex;
@@ -356,6 +374,111 @@ struct PersistentStorage::State : std::enable_shared_from_this<State>
     std::size_t bytes{0};
     std::mt19937_64 generator;
     PersistentStorageMetrics counts;
+
+    /** @brief Copies one ready endpoint from one acquired immutable
+     * version. */
+    std::optional<Route>
+    route(arena::runtime::ConfigSnapshot::Ptr current = {}) const
+    {
+        if (!config.runtime)
+            return Route{config.endpoint, 0, "startup"};
+        if (!current)
+            current = config.runtime->snapshot();
+        const auto node = current->resolve("storage");
+        if (!node)
+            return std::nullopt;
+        return Route{
+            {boost::asio::ip::make_address(node->host), node->port},
+            current->version(),
+            node->id
+        };
+    }
+
+    /** @brief Schedules at most one probe after the preceding call
+     * completes. */
+    void scheduleProbe()
+    {
+        {
+            std::lock_guard lock(mutex);
+            if (stopping)
+                return;
+        }
+        healthTimer.expires_after(Milliseconds{250});
+        healthTimer.async_wait(
+            [weak = weak_from_this()](auto error)
+            {
+                if (auto self = weak.lock(); self && !error)
+                    self->probe();
+            }
+        );
+    }
+
+    /** @brief A reply from an obsolete route cannot make its
+     * replacement ready. */
+    void probe()
+    {
+        {
+            std::lock_guard lock(mutex);
+            if (stopping)
+                return;
+        }
+        const auto selected = route();
+        if (!selected)
+        {
+            {
+                std::lock_guard lock(mutex);
+                remoteReady = false;
+            }
+            return scheduleProbe();
+        }
+        arena::rpc::Request request;
+        request.set_method("health.ready");
+        request.set_service_token(config.serviceToken);
+        arena::internal_rpc::Options options;
+        options.timeout = std::min(
+            config.rpcTimeout,
+            Milliseconds{300}
+        );
+        options.endpoint = selected->endpoint;
+        auto accepted = client.call(
+            std::move(request),
+            options,
+            [weak = weak_from_this(),
+             selected = *selected](auto response)
+            {
+                const auto self = weak.lock();
+                if (!self)
+                    return;
+                const auto current = self->route();
+                {
+                    std::lock_guard lock(self->mutex);
+                    if (self->stopping)
+                        return;
+                    if (current &&
+                        current->nodeId == selected.nodeId &&
+                        current->endpoint == selected.endpoint)
+                    {
+                        self->healthVersion = selected.version;
+                        self->healthRoute = selected;
+                        self->healthObserved = Clock::now();
+                        self->remoteReady = response.status() ==
+                                                arena::rpc::OK &&
+                                            response.payload()
+                                                .empty();
+                    }
+                }
+                self->scheduleProbe();
+            }
+        );
+        if (!accepted)
+        {
+            {
+                std::lock_guard lock(mutex);
+                remoteReady = false;
+            }
+            scheduleProbe();
+        }
+    }
 
     std::string name(std::uint64_t id, bool failed = false) const
     {
@@ -697,6 +820,9 @@ struct PersistentStorage::State : std::enable_shared_from_this<State>
 
     void requestIds()
     {
+        const auto selected = route();
+        if (!selected)
+            return;
         {
             std::lock_guard guardLock(mutex);
             if (!accepting || idFetching ||
@@ -713,7 +839,7 @@ struct PersistentStorage::State : std::enable_shared_from_this<State>
         std::weak_ptr<State> weak = shared_from_this();
         auto result = client.call(
             std::move(request),
-            {config.rpcTimeout, {}},
+            {config.rpcTimeout, {}, selected->endpoint},
             [weak](auto response)
             {
                 const auto state = weak.lock();
@@ -941,20 +1067,33 @@ struct PersistentStorage::State : std::enable_shared_from_this<State>
         );
         request.set_service_token(config.serviceToken);
         std::weak_ptr<State> weak = shared_from_this();
-        auto accepted = client.call(
-            std::move(request),
-            {config.rpcTimeout, {}},
-            [weak, job](auto response)
-            {
-                const auto state = weak.lock();
-                if (!state)
-                    return;
-                std::lock_guard guardLock(state->mutex);
-                job->response = std::move(response);
-                job->phase = Phase::Response;
-                state->changed.notify_all();
-            }
-        );
+        const auto selected = route();
+        auto accepted = selected
+                            ? client.call(
+                                  std::move(request),
+                                  {config.rpcTimeout,
+                                   {},
+                                   selected->endpoint},
+                                  [weak, job](auto response)
+                                  {
+                                      const auto state = weak.lock();
+                                      if (!state)
+                                          return;
+                                      std::lock_guard guardLock(
+                                          state->mutex
+                                      );
+                                      job->response = std::move(
+                                          response
+                                      );
+                                      job->phase = Phase::Response;
+                                      state->changed.notify_all();
+                                  }
+                              )
+                            : std::expected<
+                                  arena::internal_rpc::Call,
+                                  arena::rpc::Status>(std::unexpected(
+                                  arena::rpc::UNAVAILABLE
+                              ));
         if (!accepted)
         {
             std::lock_guard guardLock(mutex);
@@ -969,6 +1108,15 @@ struct PersistentStorage::State : std::enable_shared_from_this<State>
         try
         {
             recover();
+            if (config.runtime || config.probeHealth)
+                boost::asio::post(
+                    io,
+                    [weak = weak_from_this()]
+                    {
+                        if (auto self = weak.lock())
+                            self->probe();
+                    }
+                );
         }
         catch (...)
         {
@@ -1148,6 +1296,9 @@ PersistentStorage::authenticate(
         !completion || !correlationValid(correlation))
         return std::unexpected(AuthError::InvalidCredentials);
     auto state = m_state;
+    const auto selected = state->route();
+    if (!selected)
+        return std::unexpected(AuthError::Unavailable);
     auto job = std::make_shared<State::AuthJob>();
     job->account = std::move(account);
     job->password = std::move(password);
@@ -1177,7 +1328,11 @@ PersistentStorage::authenticate(
     request.set_service_token(state->config.serviceToken);
     arena::internal_rpc::Options options{
         state->config.rpcTimeout,
-        arena::internal_rpc::Context{deadline, std::move(correlation)}
+        arena::internal_rpc::Context{
+            deadline,
+            std::move(correlation)
+        },
+        selected->endpoint
     };
     std::weak_ptr<State> weak = state;
     auto accepted = state->client.call(
@@ -1366,7 +1521,11 @@ PersistentStorage::settlement(
         !correlationValid(correlation))
         return std::unexpected(ErrorCode::ERR_INVALID_REQUEST);
     auto state = m_state;
+    const auto selected = state->route();
+    if (!selected)
+        return std::unexpected(ErrorCode::ERR_UNAVAILABLE);
     auto job = std::make_shared<State::Lookup>();
+    job->endpoint = selected->endpoint;
     job->player = player;
     job->matchId = id;
     job->deadline = deadline;
@@ -1408,7 +1567,8 @@ PersistentStorage::settlement(
     auto accepted = state->client.call(
         std::move(request),
         {state->config.rpcTimeout,
-         arena::internal_rpc::Context{deadline, job->correlation}},
+         arena::internal_rpc::Context{deadline, job->correlation},
+         job->endpoint},
         [weak, job, finish](auto response) mutable
         {
             const auto owner = weak.lock();
@@ -1450,7 +1610,8 @@ PersistentStorage::settlement(
                  arena::internal_rpc::Context{
                      job->deadline,
                      job->correlation
-                 }},
+                 },
+                 job->endpoint},
                 [job, finish](auto response) mutable
                 {
                     arena::storage::SettlementGetReply reply;
@@ -1558,10 +1719,34 @@ PersistentStorage::settlement(
                         }};
 }
 
+bool PersistentStorage::ready() const
+{
+    return metrics().dependencyReady;
+}
+
 PersistentStorageMetrics PersistentStorage::metrics() const
 {
+    const auto active = m_state->client.inflight();
+    const auto snapshot = m_state->config.runtime
+                              ? m_state->config.runtime->snapshot()
+                              : nullptr;
+    const auto selected = m_state->route(snapshot);
     std::lock_guard lock(m_state->mutex);
     auto value = m_state->counts;
+    value.rpcActive = active;
+    value.routeVersion = snapshot ? snapshot->version() : 0;
+    value.probeVersion = m_state->healthVersion;
+    value.dependencyReady = m_state->accepting &&
+                            !m_state->stopping && m_state->healthy &&
+                            m_state->recovered && selected &&
+                            m_state->remoteReady &&
+                            m_state->healthRoute &&
+                            selected->nodeId ==
+                                m_state->healthRoute->nodeId &&
+                            selected->endpoint ==
+                                m_state->healthRoute->endpoint &&
+                            Clock::now() - m_state->healthObserved <=
+                                Milliseconds{1000};
     value.authActive = m_state->auth.size() + m_state->lookups.size();
     value.workPending = m_state->work.size();
     value.idsAvailable = m_state->ids.size();
@@ -1601,6 +1786,18 @@ void PersistentStorage::stop() noexcept
     }
     try
     {
+        if (state->config.runtime || state->config.probeHealth)
+            boost::asio::post(
+                state->io,
+                [weak = state->weak_from_this()]
+                {
+                    if (auto self = weak.lock())
+                    {
+                        boost::system::error_code ignored;
+                        self->healthTimer.cancel(ignored);
+                    }
+                }
+            );
         state->client.stop();
     }
     catch (...)

@@ -48,18 +48,21 @@ add_custom_command(
     OUTPUT "${ARENA_PROTO_OUT}/rpc.pb.cc" "${ARENA_PROTO_OUT}/rpc.pb.h"
            "${ARENA_PROTO_OUT}/rpc.desc"
            "${ARENA_PROTO_OUT}/storage.pb.cc" "${ARENA_PROTO_OUT}/storage.pb.h"
+           "${ARENA_PROTO_OUT}/runtime_config.pb.cc" "${ARENA_PROTO_OUT}/runtime_config.pb.h"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${ARENA_PROTO_OUT}"
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE} --cpp_out "${ARENA_PROTO_OUT}"
+    COMMAND ${Protobuf_PROTOC_EXECUTABLE} --experimental_allow_proto3_optional --cpp_out "${ARENA_PROTO_OUT}"
             --descriptor_set_out "${ARENA_PROTO_OUT}/rpc.desc"
             --proto_path "${ARENA_PROTO_DIR}" "${ARENA_PROTO_DIR}/rpc.proto"
-            "${ARENA_PROTO_DIR}/storage.proto"
+            "${ARENA_PROTO_DIR}/storage.proto" "${ARENA_PROTO_DIR}/runtime_config.proto"
     DEPENDS "${ARENA_PROTO_DIR}/rpc.proto" "${ARENA_PROTO_DIR}/storage.proto"
+            "${ARENA_PROTO_DIR}/runtime_config.proto"
     VERBATIM)
 add_custom_target(arena_rpc_proto DEPENDS "${ARENA_PROTO_OUT}/rpc.pb.cc"
     "${ARENA_PROTO_OUT}/rpc.pb.h" "${ARENA_PROTO_OUT}/rpc.desc")
 add_dependencies(arena_shared arena_rpc_proto)
 target_sources(arena_shared PRIVATE "${ARENA_PROTO_OUT}/rpc.pb.cc"
-    "${ARENA_PROTO_OUT}/storage.pb.cc")
+    "${ARENA_PROTO_OUT}/storage.pb.cc" "${ARENA_PROTO_OUT}/runtime_config.pb.cc"
+    src/runtime/RuntimeConfig.cpp src/runtime/RuntimeControl.cpp)
 find_package(Boost 1.74 REQUIRED CONFIG)
 find_package(Threads REQUIRED)
 target_sources(arena_shared PRIVATE src/rpc/Client.cpp)

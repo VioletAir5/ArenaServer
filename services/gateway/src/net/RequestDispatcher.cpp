@@ -28,6 +28,7 @@ struct RequestDispatcher::State
     std::shared_ptr<const MessageRegistry> registry;
     ReplySink reply;
     std::shared_ptr<spdlog::logger> logger;
+    RequestAdmission admission;
     const std::thread::id owner{std::this_thread::get_id()};
     std::unordered_map<std::uint64_t, Pending> pending;
     std::uint64_t generation{0};
@@ -204,7 +205,8 @@ RequestDispatcher::RequestDispatcher(
     ConnectionContext::Ptr context,
     std::shared_ptr<const MessageRegistry> registry,
     ReplySink sink,
-    std::shared_ptr<spdlog::logger> logger
+    std::shared_ptr<spdlog::logger> logger,
+    RequestAdmission admission
 )
 {
     if (!context || !registry || !registry->sealed() || !sink)
@@ -213,6 +215,7 @@ RequestDispatcher::RequestDispatcher(
             "sealed registry and reply sink"
         );
     m_state = std::make_shared<State>();
+    m_state->admission = std::move(admission);
     m_state->context = std::move(context);
     m_state->registry = std::move(registry);
     m_state->reply = std::move(sink);
@@ -298,6 +301,19 @@ void RequestDispatcher::dispatch(
     };
     if (!validRequest || !request->requestId)
         return reject(arena::protocol::ERR_INVALID_REQUEST);
+    if (m_state->admission)
+    {
+        bool allowed = false;
+        try
+        {
+            allowed = m_state->admission(request->msgId);
+        }
+        catch (...)
+        {
+        }
+        if (!allowed)
+            return reject(arena::protocol::ERR_UNAVAILABLE);
+    }
     const auto* route = m_state->registry->find(request->msgId);
     if (!route)
         return reject(arena::protocol::ERR_UNKNOWN_MESSAGE);

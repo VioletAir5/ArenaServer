@@ -21,6 +21,11 @@
 #include "auth/LoginAuthenticator.h"
 #include "storage.pb.h"
 
+namespace arena::runtime
+{
+class ConfigStore;
+}
+
 namespace service::gateway
 {
 struct ManagedRoom;
@@ -35,6 +40,12 @@ struct PersistentStorageConfig
     };
     /// Internal credential, never included in diagnostics.
     std::string serviceToken;
+    /// Optional immutable discovery snapshots; absence uses the
+    /// startup endpoint.
+    std::shared_ptr<arena::runtime::ConfigStore> runtime;
+    /// Enable bounded readiness probes when the control plane is
+    /// configured.
+    bool probeHealth{false};
     /// Private, exclusively locked directory containing durable
     /// result jobs.
     std::filesystem::path spoolDirectory;
@@ -54,6 +65,13 @@ struct PersistentStorageMetrics
     std::uint64_t resultAttempts{0}, resultsCommitted{0}, rejected{0};
     std::uint64_t operatorRequeues{0}, cleanupFailures{0};
     bool accepting{false}, recovered{false}, spoolHealthy{false};
+    /// Actual admitted wire calls, including the single readiness
+    /// probe.
+    std::size_t rpcActive{0};
+    /// Current discovery version and the version of the latest valid
+    /// probe.
+    std::uint64_t routeVersion{0}, probeVersion{0};
+    bool dependencyReady{false};
 };
 
 /** @brief Owns a dedicated RPC executor and a finite CPU/filesystem
@@ -123,6 +141,9 @@ public:
         LookupCompletion
     );
 
+    /** @brief Reports actual dependency readiness for the current
+     * route version. */
+    bool ready() const;
     PersistentStorageMetrics metrics() const;
     void stop() noexcept;
 

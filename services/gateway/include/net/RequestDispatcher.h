@@ -34,6 +34,10 @@ using ReplySink = std::function<ErrorCode(
     ConnectionChannel&, const ReplyMetadata&, MessageReply
 )>;
 
+/// Process readiness checked only before a decoded request is
+/// admitted.
+using RequestAdmission = std::function<bool(std::uint32_t)>;
+
 /** @brief Tracks owner-thread requests without retaining a socket or
  * channel.
  *
@@ -52,7 +56,8 @@ public:
         ConnectionContext::Ptr,
         std::shared_ptr<const MessageRegistry>,
         ReplySink,
-        std::shared_ptr<spdlog::logger> logger = {}
+        std::shared_ptr<spdlog::logger> logger = {},
+        RequestAdmission admission = {}
     );
     ~RequestDispatcher();
     RequestDispatcher(const RequestDispatcher&) = delete;

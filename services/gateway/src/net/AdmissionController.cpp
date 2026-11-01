@@ -14,12 +14,16 @@ namespace service::gateway
 {
 struct AdmissionController::State
 {
-    explicit State(Limits configured)
+    State(Limits configured, std::function<bool()> predicate)
         : limits(configured)
+        , admission(std::move(predicate))
     {
     }
 
     const Limits limits;
+    /// Immutable thread-safe predicate; evaluated before the
+    /// accounting lock.
+    const std::function<bool()> admission;
     mutable std::mutex mutex;
     Snapshot counters;
     std::unordered_map<std::uint32_t, std::size_t> perIp;
@@ -37,8 +41,10 @@ std::uint32_t ipKey(const InetAddress& peer) noexcept
 }
 } // namespace
 
-AdmissionController::AdmissionController(Limits limits)
-    : m_state(std::make_shared<State>(limits))
+AdmissionController::AdmissionController(
+    Limits limits, std::function<bool()> admission
+)
+    : m_state(std::make_shared<State>(limits, std::move(admission)))
 {
     if (limits.maxConnections == 0 || limits.maxConnectionsPerIp == 0)
     {
@@ -75,6 +81,24 @@ AdmissionController::Lease::~Lease() noexcept
 std::shared_ptr<AdmissionController::Lease>
 AdmissionController::tryAcquire(const InetAddress& peer)
 {
+    if (m_state->admission)
+    {
+        bool allowed = false;
+        try
+        {
+            allowed = m_state->admission();
+        }
+        catch (...)
+        {
+        }
+        if (!allowed)
+        {
+            std::lock_guard lock(m_state->mutex);
+            ++m_state->counters.rejectedTotal;
+            ++m_state->counters.rejectedNotReady;
+            return {};
+        }
+    }
     const auto key = ipKey(peer);
     // Allocate before mutating counts. Allocation failure must never
     // leave a reservation without an owner to return it.

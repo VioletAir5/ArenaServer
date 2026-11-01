@@ -6,6 +6,7 @@
 #include <sys/signalfd.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -46,6 +48,8 @@
 
 #include "auth/FilePasswordAccounts.h"
 #include "room/ReplayRecorder.h"
+#include "runtime/RuntimeConfig.h"
+#include "runtime/RuntimeControl.h"
 
 using namespace service::gateway;
 
@@ -105,6 +109,7 @@ public:
         ::sigemptyset(&m_signals);
         ::sigaddset(&m_signals, SIGINT);
         ::sigaddset(&m_signals, SIGTERM);
+        ::sigaddset(&m_signals, SIGHUP);
         const auto error = ::pthread_sigmask(
             SIG_BLOCK,
             &m_signals,
@@ -166,11 +171,15 @@ public:
         EventLoop& loop,
         ITcpServer& server,
         const sigset_t& signals,
-        std::function<void()> stopUpkeep = {}
+        std::function<void()> stopUpkeep = {},
+        std::function<void()> reload = {},
+        std::function<std::chrono::milliseconds()> grace = {}
     )
         : m_loop(loop)
         , m_server(server)
         , m_stopUpkeep(std::move(stopUpkeep))
+        , m_reload(std::move(reload))
+        , m_grace(std::move(grace))
         , m_fd(shutdownSignalFd(signals))
         , m_channel(m_fd.get())
     {
@@ -204,12 +213,21 @@ private:
             );
             if (count == static_cast<ssize_t>(sizeof(info)))
             {
+                if (info.ssi_signo == SIGHUP)
+                {
+                    if (!m_stopping && m_reload)
+                        m_reload();
+                    continue;
+                }
                 if (!m_stopping)
                 {
                     m_stopping = true;
                     if (m_stopUpkeep)
                         m_stopUpkeep();
-                    m_server.stop();
+                    m_server.stop(
+                        m_grace ? m_grace()
+                                : ITcpServer::kDefaultStopGrace
+                    );
                     if (m_server.stopped())
                         m_loop.quit();
                     else
@@ -244,6 +262,11 @@ private:
     /// Periodic session upkeep must not keep the event loop alive
     /// during drain.
     std::function<void()> m_stopUpkeep;
+    /// Reload only queues bounded work on the independent control
+    /// owner.
+    std::function<void()> m_reload;
+    /// Read the latest immutable drain bound at terminal shutdown.
+    std::function<std::chrono::milliseconds()> m_grace;
     /// Signal fd remains open until its Channel has been removed.
     service::FileDescriptor m_fd;
     Channel m_channel;
@@ -261,7 +284,8 @@ void printAdmission(const AdmissionController& controller)
               << " rejected=" << count.rejectedTotal
               << " global=" << count.rejectedGlobal
               << " per_ip=" << count.rejectedPerIp
-              << " local=" << count.rejectedLocal << '\n';
+              << " local=" << count.rejectedLocal
+              << " not_ready=" << count.rejectedNotReady << '\n';
 }
 void printOnline(const OnlineRegistry& registry)
 {
@@ -340,8 +364,31 @@ void printMatch(const MatchmakingService& matcher)
     histogram("abandoned_wait", metrics.abandonedWait);
     std::cerr << '\n';
 }
+/** @brief Cancels actor timers before their reactor is destroyed on
+ * every exit path. */
+struct ScheduledServiceCleanup final
+{
+    /// Room actors scheduled on the surrounding reactor.
+    std::shared_ptr<RoomService> rooms;
+    /// Matchmaking owner using the same reactor timers.
+    std::shared_ptr<MatchmakingService> matcher;
+    /// Published false before any reactor-bound state is released.
+    std::shared_ptr<std::atomic<bool>> listenersReady;
+
+    /** @brief Also covers exceptions from later listener
+     * construction. */
+    ~ScheduledServiceCleanup() noexcept
+    {
+        listenersReady->store(false);
+        if (rooms)
+            rooms->stop();
+        if (matcher)
+            matcher->stop();
+    }
+};
 } // namespace
 int main(int argc, char** argv)
+try
 {
     const std::string_view backend = argc >= 2 ? argv[1] : "epoll";
     const std::string_view protocol = argc >= 3 ? argv[2] : "raw";
@@ -355,6 +402,15 @@ int main(int argc, char** argv)
                      "[raw|packet|handshake] [ws-origin]\n";
         return 2;
     }
+    // Block reactor-owned signals before persistence/control workers
+    // inherit masks.
+    std::optional<ShutdownSignalMask> signalMask;
+    std::shared_ptr<arena::runtime::ConfigStore> runtimeConfig;
+    std::shared_ptr<arena::runtime::RuntimeControl> control;
+    std::shared_ptr<const MessageRegistry> handshakeRegistry;
+    AdmissionController::Limits admissionLimits{};
+    bool useStorage = false;
+    auto listenersReady = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<AdmissionController> admission;
     std::shared_ptr<OnlineRegistry> online;
     std::shared_ptr<MatchmakingService> matcher;
@@ -366,6 +422,25 @@ int main(int argc, char** argv)
     std::uint16_t wsPort = 8889;
     try
     {
+        if (backend == "epoll")
+            signalMask.emplace();
+        if (const auto* file = std::getenv("ARENA_RUNTIME_CONFIG"))
+        {
+            const auto parsed = arena::runtime::ConfigSnapshot::read(
+                file
+            );
+            if (!parsed)
+                throw std::invalid_argument(
+                    "invalid runtime configuration file"
+                );
+            runtimeConfig = std::make_shared<
+                arena::runtime::ConfigStore>(*parsed);
+        }
+        useStorage = std::getenv("ARENA_STORAGE_PORT") != nullptr;
+        if (runtimeConfig)
+            for (const auto& node :
+                 runtimeConfig->snapshot()->nodes())
+                useStorage = useStorage || node.service == "storage";
         const auto grace = positiveLimit(
             "ARENA_DISCONNECT_GRACE_MS",
             30000
@@ -375,9 +450,8 @@ int main(int argc, char** argv)
                 "ARENA_DISCONNECT_GRACE_MS must be between 1 and "
                 "3600000"
             );
-        if (std::getenv("ARENA_STORAGE_PORT") &&
-            (protocol != "handshake" ||
-             !std::getenv("ARENA_JWT_KEY")))
+        if (useStorage && (protocol != "handshake" ||
+                           !std::getenv("ARENA_JWT_KEY")))
             throw std::invalid_argument(
                 "Storage requires authenticated handshake mode"
             );
@@ -388,14 +462,12 @@ int main(int argc, char** argv)
             throw std::invalid_argument(
                 "ARENA_TCP_PORT and ARENA_WS_PORT must differ"
             );
-        admission = std::make_shared<AdmissionController>(
-            AdmissionController::Limits{
-                positiveLimit("ARENA_MAX_CONNECTIONS", 1000),
-                positiveLimit("ARENA_MAX_CONNECTIONS_PER_IP", 100)
-            }
-        );
+        admissionLimits = AdmissionController::Limits{
+            positiveLimit("ARENA_MAX_CONNECTIONS", 1000),
+            positiveLimit("ARENA_MAX_CONNECTIONS_PER_IP", 100)
+        };
     }
-    catch (const std::invalid_argument& error)
+    catch (const std::exception& error)
     {
         std::cerr << error.what() << '\n';
         return 2;
@@ -428,7 +500,7 @@ int main(int argc, char** argv)
                     passwords;
                 AsyncPasswordLogin asyncPasswords;
                 DurableSettlementLookup durableLookup;
-                if (std::getenv("ARENA_STORAGE_PORT"))
+                if (useStorage)
                 {
                     const auto* token = std::getenv(
                         "ARENA_INTERNAL_TOKEN"
@@ -447,6 +519,11 @@ int main(int argc, char** argv)
                         listenerPort("ARENA_STORAGE_PORT", 7105)
                     };
                     config.serviceToken = token;
+                    config.runtime = runtimeConfig;
+                    config.probeHealth = runtimeConfig ||
+                                         std::getenv(
+                                             "ARENA_HEALTH_PORT"
+                                         );
                     config.spoolDirectory = spool;
                     config.idBlockSize = static_cast<std::uint32_t>(
                         boundedLimit(
@@ -471,7 +548,11 @@ int main(int argc, char** argv)
                     persistence = std::make_shared<PersistentStorage>(
                         std::move(config)
                     );
-                    if (!persistence->prime(std::chrono::seconds(5)))
+                    const bool primed = persistence->prime(
+                        std::chrono::seconds(5)
+                    );
+                    if ((!primed && !runtimeConfig) ||
+                        !persistence->metrics().spoolHealthy)
                         throw std::runtime_error(
                             "Storage startup is unavailable"
                         );
@@ -675,23 +756,144 @@ int main(int argc, char** argv)
                 return 2;
             }
         }
+        handshakeRegistry = std::move(registry);
+    }
+    RequestAdmission requestAdmission;
+    std::function<bool()> connectionAdmission;
+    try
+    {
+        if (runtimeConfig || std::getenv("ARENA_HEALTH_PORT"))
+        {
+            arena::runtime::RuntimeControl::Config configured;
+            configured.store = runtimeConfig;
+            if (const auto* path = std::getenv(
+                    "ARENA_RUNTIME_CONFIG"
+                ))
+                configured.configFile = path;
+            if (const auto* text = std::getenv("ARENA_HEALTH_PORT"))
+            {
+                const std::string_view value(text);
+                unsigned port = 0;
+                const auto parsed = std::from_chars(
+                    value.data(),
+                    value.data() + value.size(),
+                    port
+                );
+                if (value.empty() || parsed.ec != std::errc{} ||
+                    parsed.ptr != value.data() + value.size() ||
+                    port > 65535)
+                    throw std::invalid_argument(
+                        "invalid health port"
+                    );
+                configured.healthPort = static_cast<std::uint16_t>(
+                    port
+                );
+            }
+            if (const auto* node = std::getenv("ARENA_NODE_ID"))
+                configured.nodeId = node;
+            else
+                configured.nodeId = "gateway";
+            configured.dependencyReady = [listenersReady]
+            { return listenersReady->load(); };
+            if (persistence)
+            {
+                const auto weak = std::weak_ptr<PersistentStorage>(
+                    persistence
+                );
+                configured.dependencyReady = [weak, listenersReady]
+                {
+                    const auto owner = weak.lock();
+                    return listenersReady->load() && owner &&
+                           owner->ready();
+                };
+                configured.inflight = [weak]
+                {
+                    const auto owner = weak.lock();
+                    return owner ? owner->metrics().rpcActive : 0;
+                };
+            }
+            if (configured.healthPort &&
+                (configured.healthPort == tcpPort ||
+                 (protocol == "handshake" &&
+                  configured.healthPort == wsPort)))
+                throw std::invalid_argument(
+                    "health and business listener ports must differ"
+                );
+            control = std::make_shared<
+                arena::runtime::RuntimeControl>(
+                std::move(configured)
+            );
+            if (control->port() == tcpPort ||
+                (protocol == "handshake" &&
+                 control->port() == wsPort))
+                throw std::invalid_argument(
+                    "ephemeral health port overlaps a business "
+                    "listener"
+                );
+            const auto
+                weak = std::weak_ptr<arena::runtime::RuntimeControl>(
+                    control
+                );
+            connectionAdmission = [weak]
+            {
+                const auto owner = weak.lock();
+                return owner && owner->ready();
+            };
+            requestAdmission = [weak](std::uint32_t message)
+            {
+                const auto owner = weak.lock();
+                if (!owner || owner->draining())
+                    return false;
+                if (!owner->configuredReady())
+                    return false;
+                // Existing room actors keep local input/status during
+                // a database outage.
+                if (message != arena::protocol::MSG_LOGIN_REQUEST &&
+                    message !=
+                        arena::protocol::MSG_MATCH_JOIN_REQUEST &&
+                    message !=
+                        arena::protocol::MSG_SETTLEMENT_REQUEST)
+                    return true;
+                return owner->ready();
+            };
+        }
+        admission = std::make_shared<AdmissionController>(
+            admissionLimits,
+            std::move(connectionAdmission)
+        );
+    }
+    catch (const std::exception&)
+    {
+        std::cerr << "Invalid runtime control configuration\n";
+        return 2;
+    }
+    if (handshakeRegistry)
         handlerFactory =
-            [registry,
-             packetPolicies](ConnectionContext::Ptr connection)
+            [registry = std::move(handshakeRegistry),
+             packetPolicies,
+             requestAdmission](ConnectionContext::Ptr connection)
         {
             return makePreLoginHandshakeHandler(
                 std::move(connection),
                 registry,
-                packetPolicies
+                packetPolicies,
+                requestAdmission
             );
         };
-    }
+    const auto drainGrace = [&]
+    {
+        return runtimeConfig
+                   ? std::chrono::milliseconds(
+                         runtimeConfig->snapshot()->drainGraceMs()
+                     )
+                   : ITcpServer::kDefaultStopGrace;
+    };
     const InetAddress address("127.0.0.1", tcpPort);
     if (backend == "epoll")
     {
         // Blocking precedes worker construction; all signals reach
         // the base fd.
-        ShutdownSignalMask mask;
+        const auto& mask = *signalMask;
         EventLoop loop;
         std::unique_ptr<ITcpServer>
             server = std::make_unique<TcpServer>(
@@ -710,6 +912,11 @@ int main(int argc, char** argv)
                 online,
                 connectionScheduler(loop)
             );
+        const ScheduledServiceCleanup actorCleanup{
+            rooms,
+            matcher,
+            listenersReady
+        };
         if (matcher)
             matcher->start(connectionScheduler(loop));
         if (rooms)
@@ -721,14 +928,31 @@ int main(int argc, char** argv)
                 mask.signals(),
                 [&]
                 {
+                    if (control)
+                        control->setDraining();
                     if (rooms)
                         rooms->stop();
                     if (matcher)
                         matcher->stop();
                     if (upkeep)
                         upkeep->stop();
-                }
+                },
+                [&]
+                {
+                    if (control)
+                        control->requestReload();
+                },
+                drainGrace
             );
+            listenersReady->store(true);
+            std::cerr << "GATEWAY_READY tcp_port=" << tcpPort
+                      << " ws_port=0 health_port="
+                      << (control ? control->port() : 0)
+                      << " config_version="
+                      << (runtimeConfig
+                              ? runtimeConfig->snapshot()->version()
+                              : 0)
+                      << '\n';
             loop.loop();
         }
         server.reset();
@@ -753,6 +977,8 @@ int main(int argc, char** argv)
             printOnline(*online);
         if (persistence)
             persistence->stop();
+        if (control)
+            control->stop();
         printAdmission(*admission);
         return 0;
     }
@@ -764,11 +990,16 @@ int main(int argc, char** argv)
             online,
             connectionScheduler(context.get_executor())
         );
+    const ScheduledServiceCleanup actorCleanup{
+        rooms,
+        matcher,
+        listenersReady
+    };
     if (matcher)
         matcher->start(connectionScheduler(context.get_executor()));
     if (rooms)
         rooms->start(connectionScheduler(context.get_executor()));
-    boost::asio::signal_set signals(context, SIGINT, SIGTERM);
+    boost::asio::signal_set signals(context, SIGINT, SIGTERM, SIGHUP);
     boost::asio::steady_timer poll(context);
     std::unique_ptr<ITcpServer>
         server = std::make_unique<AsioTcpServer>(
@@ -816,29 +1047,46 @@ int main(int argc, char** argv)
             }
         );
     };
-    signals.async_wait(
-        [&](auto error, int)
-        {
-            if (!error)
+    std::function<void()> waitSignal;
+    waitSignal = [&]
+    {
+        signals.async_wait(
+            [&](auto error, int signal)
             {
+                if (error)
+                    return;
+                if (signal == SIGHUP)
+                {
+                    if (control)
+                        control->requestReload();
+                    waitSignal();
+                    return;
+                }
+                if (control)
+                    control->setDraining();
                 if (rooms)
                     rooms->stop();
                 if (matcher)
                     matcher->stop();
                 if (upkeep)
                     upkeep->stop();
-                server->stop();
+                const auto grace = drainGrace();
+                server->stop(grace);
                 if (wsServer)
-                {
-                    wsServer->stop(ITcpServer::kDefaultStopGrace);
-                }
+                    wsServer->stop(grace);
                 waitStopped();
             }
-        }
-    );
+        );
+    };
+    waitSignal();
+    listenersReady->store(true);
     std::cerr << "GATEWAY_READY tcp_port=" << tcpPort
               << " ws_port=" << wsPort
               << " authenticated=" << static_cast<bool>(online)
+              << " health_port=" << (control ? control->port() : 0)
+              << " config_version="
+              << (runtimeConfig ? runtimeConfig->snapshot()->version()
+                                : 0)
               << '\n';
     context.run();
     wsServer.reset();
@@ -874,6 +1122,8 @@ int main(int argc, char** argv)
                   << " spool_files=" << metrics.spoolFiles
                   << " spool_bytes=" << metrics.spoolBytes << '\n';
     }
+    if (control)
+        control->stop();
     printAdmission(*admission);
     if (protocol == "handshake")
     {
@@ -885,4 +1135,9 @@ int main(int argc, char** argv)
                          )
                       << " count=" << counts[i] << '\n';
     }
+}
+catch (const std::exception&)
+{
+    std::cerr << "gateway runtime failed\n";
+    return 2;
 }

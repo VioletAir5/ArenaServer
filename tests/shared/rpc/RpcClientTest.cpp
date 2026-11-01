@@ -866,5 +866,108 @@ TEST_F(RpcClientTest, RetryableStormNeverReplaysNonIdempotentRequests)
     EXPECT_EQ(peer->requests.size(), 100);
 }
 
+TEST_F(
+    RpcClientTest,
+    RouteIsCapturedPerAdmissionWithoutRetargetingDefault
+)
+{
+    open();
+    auto other = std::make_shared<Peer>(context, Mode::Echo);
+    other->accept();
+    struct Cleanup
+    {
+        std::shared_ptr<Peer> peer;
+        ~Cleanup()
+        {
+            peer->stop();
+        }
+    } cleanup{other};
+    Options options;
+    options.endpoint = peer->endpoint();
+    int callbacks = 0;
+    ASSERT_TRUE(client->call(
+        request("first-A"),
+        options,
+        [&](auto response)
+        {
+            EXPECT_EQ(response.status(), arena::rpc::OK);
+            ++callbacks;
+        }
+    ));
+    options.endpoint = other->endpoint();
+    ASSERT_TRUE(client->call(
+        request("second-B"),
+        options,
+        [&](auto response)
+        {
+            EXPECT_EQ(response.status(), arena::rpc::OK);
+            ++callbacks;
+        }
+    ));
+    ASSERT_TRUE(client->call(
+        request("default-A"),
+        Options{},
+        [&](auto response)
+        {
+            EXPECT_EQ(response.status(), arena::rpc::OK);
+            ++callbacks;
+        }
+    ));
+    ASSERT_TRUE(until([&] { return callbacks == 3; }));
+    ASSERT_EQ(peer->requests.size(), 2);
+    ASSERT_EQ(other->requests.size(), 1);
+    EXPECT_EQ(other->requests.front().payload(), "second-B");
+    EXPECT_TRUE(
+        std::any_of(
+            peer->requests.begin(),
+            peer->requests.end(),
+            [](const auto& value)
+            { return value.payload() == "first-A"; }
+        )
+    );
+    EXPECT_TRUE(
+        std::any_of(
+            peer->requests.begin(),
+            peer->requests.end(),
+            [](const auto& value)
+            { return value.payload() == "default-A"; }
+        )
+    );
+    EXPECT_EQ(client->inflight(), 0);
+}
+
+TEST_F(RpcClientTest, InvalidRouteOverridesRejectBeforeOpeningSocket)
+{
+    open();
+    int callbacks = 0;
+    Options options;
+    options.endpoint = Tcp::endpoint(
+        boost::asio::ip::make_address("192.0.2.1"),
+        7105
+    );
+    auto result = client->call(
+        request(),
+        options,
+        [&](auto) { ++callbacks; }
+    );
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), arena::rpc::INVALID_ARGUMENT);
+    options.endpoint = Tcp::endpoint(
+        boost::asio::ip::address_v4::loopback(),
+        0
+    );
+    result = client->call(
+        request(),
+        options,
+        [&](auto) { ++callbacks; }
+    );
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), arena::rpc::INVALID_ARGUMENT);
+    pump();
+    EXPECT_EQ(callbacks, 0);
+    EXPECT_EQ(client->inflight(), 0);
+    EXPECT_TRUE(peer->requests.empty());
+}
+
 } // namespace
 } // namespace arena::internal_rpc

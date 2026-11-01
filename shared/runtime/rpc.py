@@ -86,6 +86,19 @@ async def _close(writer, deadline, *, abort=False):
         await asyncio.sleep(0)
 
 
+async def close_listener(server):
+    """Fence queued plain-TCP accepts before retiring a CPython 3.10 listener."""
+    if server is None:
+        return
+    loop = server.get_loop()
+    for listener in server.sockets:
+        loop.remove_reader(listener.fileno())
+    await asyncio.sleep(0)
+    server.close()
+    await server.wait_closed()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
 class Server:
     """One loop owns streams and handler tasks; excess peers close immediately.
 
@@ -94,13 +107,19 @@ class Server:
     Use a bounded worker adapter for synchronous dependencies.
     """
     def __init__(self, protocol, handlers, *, max_connections=128,
-                 read_timeout=1, max_timeout=5, service_token=None):
+                 read_timeout=1, max_timeout=5, service_token=None, admission=None):
         if type(max_connections) is not int or not 1 <= max_connections <= 4096:
             raise ValueError("invalid connection limit")
         if service_token is not None and (not isinstance(service_token, str) or not 32 <= len(service_token) <= 256):
             raise ValueError('internal service token must be 32..256 characters')
+        if admission is not None and not callable(admission):
+            raise ValueError('admission must be callable')
+        self._admission = admission
+        self.admission_rejected = 0
         self._token = service_token
         self.protocol, self.handlers = protocol, dict(handlers)
+        self.method_calls = {method:0 for method in self.handlers}
+        self.method_completed = {method:0 for method in self.handlers}
         self.max_connections = max_connections
         self.read_timeout, self.max_timeout = _timeout(read_timeout), _timeout(max_timeout)
         self._server = None
@@ -177,6 +196,10 @@ class Server:
             if handler is None:
                 raise RpcError(NOT_FOUND)
             context.check()
+            if self._admission is not None and not self._admission(request.method):
+                self.admission_rejected += 1
+                raise RpcError(UNAVAILABLE, retryable=True)
+            self.method_calls[request.method] = self.method_calls.get(request.method,0)+1
             operation = asyncio.create_task(handler(request.payload, context))
             peer = asyncio.create_task(reader.read(1))
             done, _ = await asyncio.wait((operation, peer), timeout=context.remaining(),
@@ -196,6 +219,7 @@ class Server:
             await self._respond(writer, request, OK, payload=payload, deadline=context.deadline)
             replied = True
             self.completed += 1
+            self.method_completed[request.method] = self.method_completed.get(request.method,0)+1
         except RpcError as error:
             if request is not None:
                 try:
@@ -228,21 +252,7 @@ class Server:
                 self._writers.discard(writer)
 
     async def _stop_accepting(self):
-        if self._server is None:
-            return
-        # Linux SelectorEventLoop queues raw accepts before their transports
-        # attach. Stop that source, then let existing plain-TCP accepts attach
-        # before Server.close() clears the CPython 3.10 server socket list.
-        loop = self._server.get_loop()
-        for listener in self._server.sockets:
-            loop.remove_reader(listener.fileno())
-        await asyncio.sleep(0)
-        self._server.close()
-        await self._server.wait_closed()
-        # connection_made observes _closed and rejects late admission; its
-        # connection_lost callback releases the descriptor on the next turn.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        await close_listener(self._server)
 
     async def _shutdown(self, grace):
         await self._stop_accepting()
@@ -255,7 +265,9 @@ class Server:
 
     async def close(self, grace=1):
         """Finish one shutdown; the first caller establishes the grace period."""
-        grace = _timeout(grace)
+        if type(grace) not in (int,float) or not math.isfinite(grace) or not 0 <= grace <= 30:
+            raise ValueError('invalid shutdown grace')
+        grace = float(grace)
         if self._close_task is None:
             self._closed = True
             self._close_task = asyncio.create_task(self._shutdown(grace))
