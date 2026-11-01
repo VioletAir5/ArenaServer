@@ -2,9 +2,7 @@
  * @brief Adapts event-loop timers to connection feature scheduling.
  */
 #pragma once
-#include <boost/asio/any_io_executor.hpp>
-
-#include "net/ConnectionFeature.h"
+#include "runtime/OwnerScheduler.h"
 namespace service::gateway
 {
 class EventLoop;
@@ -13,7 +11,5 @@ class EventLoop;
 // loop/context. ConnectionHost's mailbox closes before registry
 // release and supplies that lifetime barrier for retained completion
 // posters.
-ConnectionScheduler connectionScheduler(EventLoop&);
-/** @brief Creates a scheduler for the supplied executor. */
-ConnectionScheduler connectionScheduler(boost::asio::any_io_executor);
+arena::runtime::OwnerScheduler connectionScheduler(EventLoop&);
 } // namespace service::gateway

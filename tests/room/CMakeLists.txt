@@ -53,3 +53,10 @@ add_test(NAME FullJourneyProductionGateway
         "$<TARGET_FILE:ArenaServer>" "$<TARGET_FILE:arena_replay>" ${journey_clock_arguments})
 set_tests_properties(FullJourneyProductionGateway PROPERTIES
     TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;journey")
+add_executable(arena_room_recovery_tests RoomRecoveryTest.cpp)
+target_link_libraries(arena_room_recovery_tests PRIVATE arena_room GTest::gtest_main)
+target_compile_options(arena_room_recovery_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_room_recovery_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_room_recovery_tests)

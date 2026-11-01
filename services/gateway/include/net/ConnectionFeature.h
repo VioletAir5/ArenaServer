@@ -2,7 +2,6 @@
  * @brief Defines connection policies and their lifecycle hooks.
  */
 #pragma once
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -16,41 +15,6 @@
 namespace service::gateway
 {
 class ConnectionChannel;
-using ConnectionClock = std::chrono::steady_clock;
-// Destroy/reset on the owner to cancel. The scheduler outlives
-// tokens.
-/** @brief Cancels an owner-thread timer when its token is reset or
- * destroyed. */
-class ConnectionTimer
-{
-public:
-    explicit ConnectionTimer(std::function<void()> cancel = {});
-    ~ConnectionTimer();
-    ConnectionTimer(ConnectionTimer&&) noexcept;
-    ConnectionTimer& operator=(ConnectionTimer&&) noexcept;
-    ConnectionTimer(const ConnectionTimer&) = delete;
-    /** @brief Cancels the held timer and clears its action. */
-    void reset() noexcept;
-
-private:
-    /// Cancellation action for the scheduled timer.
-    std::function<void()> m_cancel;
-};
-/** @brief Provides owner-thread callback and timer scheduling to
- * features. */
-struct ConnectionScheduler
-{
-    using Action = std::function<void()>;
-    // Thread-safe; always enqueue on owner, never invoke inline. If
-    // enqueue throws it must not retain the action. The host closes
-    // admission before releasing its owner executor.
-    /// Defers an action to the connection owner.
-    std::function<void(Action)> defer;
-    /// Schedules an action for a monotonic deadline.
-    std::function<
-        ConnectionTimer(ConnectionClock::time_point, Action)>
-        at;
-};
 /** @brief Receives transport lifecycle and output pressure hooks. */
 class IConnectionFeature
 {

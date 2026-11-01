@@ -12,6 +12,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway
 {
 namespace
@@ -423,10 +425,10 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
     /// owner.
     std::unique_ptr<service::match::MatchQueue> queue;
     /// Cleared only after admission closes under the mailbox mutex.
-    ConnectionScheduler scheduler;
+    arena::runtime::OwnerScheduler scheduler;
     /// Owner-only cancellation token, reset before executor
     /// retirement.
-    ConnectionTimer timer;
+    arena::runtime::OwnerTimer timer;
     /// Cumulative statistics preserved after queue reclamation at
     /// stop.
     service::match::QueueMetrics finalMetrics;
@@ -469,7 +471,9 @@ MatchmakingService::~MatchmakingService() noexcept
 {
     stop();
 }
-void MatchmakingService::start(ConnectionScheduler scheduler)
+void MatchmakingService::start(
+    arena::runtime::OwnerScheduler scheduler
+)
 {
     auto& state = *m_state;
     state.requireOwner();

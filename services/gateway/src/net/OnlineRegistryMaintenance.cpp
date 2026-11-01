@@ -10,6 +10,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway
 {
 struct OnlineRegistryMaintenance::State
@@ -17,7 +19,7 @@ struct OnlineRegistryMaintenance::State
 {
     State(
         std::shared_ptr<OnlineRegistry> value,
-        ConnectionScheduler service,
+        arena::runtime::OwnerScheduler service,
         std::chrono::milliseconds period
     )
         : registry(std::move(value))
@@ -36,7 +38,7 @@ struct OnlineRegistryMaintenance::State
     void arm()
     {
         timer = scheduler.at(
-            ConnectionClock::now() + interval,
+            arena::runtime::OwnerClock::now() + interval,
             [weak = weak_from_this()]
             {
                 if (auto self = weak.lock())
@@ -96,14 +98,14 @@ struct OnlineRegistryMaintenance::State
     std::shared_ptr<OnlineRegistry> registry;
     /// Management executor used only on the owner and cleared when
     /// upkeep stops.
-    ConnectionScheduler scheduler;
+    arena::runtime::OwnerScheduler scheduler;
     /// Bounds reclamation delay after a monotonic deadline.
     const std::chrono::milliseconds interval;
     /// Management thread owns the timer token and all maintenance
     /// mutation.
     const std::thread::id owner{std::this_thread::get_id()};
     /// Cancelled before the base executor is released.
-    ConnectionTimer timer;
+    arena::runtime::OwnerTimer timer;
     /// Prevents cancelled or already-ready timer callbacks from
     /// rearming.
     bool active{true};
@@ -111,7 +113,7 @@ struct OnlineRegistryMaintenance::State
 
 OnlineRegistryMaintenance::OnlineRegistryMaintenance(
     std::shared_ptr<OnlineRegistry> registry,
-    ConnectionScheduler scheduler,
+    arena::runtime::OwnerScheduler scheduler,
     std::chrono::milliseconds interval
 )
 {

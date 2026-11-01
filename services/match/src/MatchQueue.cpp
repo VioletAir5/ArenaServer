@@ -28,18 +28,22 @@ std::atomic<std::uint64_t> nextTicketId{1};
 
 /** @brief Allocates a process-wide identity without wrapping into
  * reused IDs. */
-std::optional<std::uint64_t> allocateTicketId() noexcept
+std::optional<std::uint64_t>
+allocateTicketId(std::uint64_t floor) noexcept
 {
+    if (floor == UINT64_MAX)
+        return std::nullopt;
     auto current = nextTicketId.load(std::memory_order_relaxed);
     while (current)
     {
-        const auto next = current == UINT64_MAX ? 0 : current + 1;
+        const auto value = std::max(current, floor + 1);
+        const auto next = value == UINT64_MAX ? 0 : value + 1;
         if (nextTicketId.compare_exchange_weak(
                 current,
                 next,
                 std::memory_order_relaxed
             ))
-            return current;
+            return value;
     }
     return std::nullopt;
 }
@@ -101,6 +105,83 @@ std::uint32_t gap(std::uint32_t left, std::uint32_t right) noexcept
 {
     return left >= right ? left - right : right - left;
 }
+/** @brief Copies all scalar policy while excluding executable
+ * dependencies. */
+QueueCheckpointPolicy checkpointPolicy(const QueueConfig& config)
+{
+    return {
+        config.initialWindow,
+        config.expansionStep,
+        config.maximumWindow,
+        config.expansionInterval,
+        config.timeout,
+        config.retention,
+        config.maxTickets,
+        config.maxQueued,
+        config.comparisonsPerTick
+    };
+}
+
+std::uint64_t
+saturatedAdd(std::uint64_t left, std::uint64_t right) noexcept
+{
+    return left + std::min(right, UINT64_MAX - left);
+}
+
+std::uint64_t
+saturatedMultiply(std::uint64_t left, std::uint64_t right) noexcept
+{
+    if (!left || !right)
+        return 0;
+    return left > UINT64_MAX / right ? UINT64_MAX : left * right;
+}
+
+/** @brief Bounds saturated sums using each bin's actual value
+ * interval. */
+template <std::size_t Size>
+bool validHistogramSum(
+    const std::array<std::uint64_t, Size>& bins,
+    const std::array<std::uint64_t, Size>& bounds,
+    std::uint64_t maximum,
+    std::uint64_t sum
+) noexcept
+{
+    std::uint64_t lower = 0, upper = 0, first = 0;
+    for (std::size_t i = 0; i < Size; ++i)
+    {
+        if (first > maximum)
+        {
+            if (bins[i])
+                return false;
+        }
+        else
+        {
+            lower = saturatedAdd(
+                lower,
+                saturatedMultiply(bins[i], first)
+            );
+            upper = saturatedAdd(
+                upper,
+                saturatedMultiply(
+                    bins[i],
+                    std::min(bounds[i], maximum)
+                )
+            );
+        }
+        if (bounds[i] != UINT64_MAX)
+            first = bounds[i] + 1;
+    }
+    return lower <= sum && sum <= upper;
+}
+template <std::size_t Size>
+std::uint64_t
+histogramCount(const std::array<std::uint64_t, Size>& bins) noexcept
+{
+    std::uint64_t count = 0;
+    for (const auto value : bins)
+        count = saturatedAdd(count, value);
+    return count;
+}
 } // namespace
 
 struct MatchQueue::State
@@ -159,6 +240,27 @@ struct MatchQueue::State
         {
         }
 
+        /** @brief Rebuilds the domain ticket on this queue's owner.
+         */
+        explicit Entry(const QueueEntryCheckpoint& restored)
+            : ticket(
+                  restored.ticketId,
+                  restored.playerId,
+                  restored.lifecycle
+              )
+            , sessionId(restored.sessionId)
+            , joinKey(restored.joinKey)
+            , mmr(restored.mmr)
+            , admitted(restored.admitted)
+            , finished(restored.finished)
+            , reclaimFrom(restored.reclaimFrom)
+            , matchId(restored.matchId)
+            , opponent(restored.opponent)
+            , opponentTicket(restored.opponentTicket)
+            , active(restored.active)
+            , roomId(restored.roomId)
+        {
+        }
         /** @brief Reconstructs the immutable retry index key. */
         Key key() const noexcept
         {
@@ -255,7 +357,12 @@ struct MatchQueue::State
     std::optional<std::uint64_t> ticketId()
     {
         if (!config.ticketIdSource)
-            return allocateTicketId();
+        {
+            const auto value = allocateTicketId(lastTicketId);
+            if (value)
+                lastTicketId = *value;
+            return value;
+        }
         std::optional<std::uint64_t> value;
         inEligibility = true;
         try
@@ -269,11 +376,12 @@ struct MatchQueue::State
         }
         inEligibility = false;
         if (!value || !*value || *value >= (std::uint64_t{1} << 63) ||
-            *value <= lastDurableId)
+            *value <= lastDurableId || *value <= lastTicketId)
             return {};
         // Gaps after a later allocation failure are safe; IDs never
         // roll back.
         lastDurableId = *value;
+        lastTicketId = *value;
         return value;
     }
 
@@ -760,6 +868,9 @@ struct MatchQueue::State
     /// Highest valid durable identity consumed, including any
     /// allocation gap.
     std::uint64_t lastDurableId{0};
+    /// Highest identity consumed by either allocator; recovery never
+    /// resets it.
+    std::uint64_t lastTicketId{0};
     /// Ordered IDs also preserve admission order because command time
     /// is monotonic.
     std::map<std::uint64_t, std::unique_ptr<Entry>> tickets;
@@ -1013,5 +1124,325 @@ QueueMetrics MatchQueue::metrics() const
     auto result = m_state->counts;
     result.retained = m_state->tickets.size();
     return result;
+}
+QueueCheckpoint MatchQueue::checkpoint() const
+{
+    const auto& state = *m_state;
+    state.checkOwner();
+    QueueCheckpoint result;
+    result.policy = checkpointPolicy(state.config);
+    result.entries.reserve(state.tickets.size());
+    for (const auto& [id, entry] : state.tickets)
+    {
+        (void)id;
+        result.entries.push_back(
+            {entry->ticket.id(),
+             entry->ticket.playerId(),
+             entry->sessionId,
+             entry->joinKey,
+             entry->mmr,
+             *entry->ticket.snapshot(),
+             entry->admitted,
+             entry->finished,
+             entry->reclaimFrom,
+             entry->matchId,
+             entry->opponent,
+             entry->opponentTicket,
+             entry->active,
+             entry->roomId}
+        );
+    }
+    result.lastNow = state.lastNow;
+    result.lastTicketId = state.lastTicketId;
+    result.lastDurableId = state.lastDurableId;
+    result.externalIds = bool(state.config.ticketIdSource);
+    result.search = {
+        state.searchAnchor,
+        state.bestCandidate,
+        state.bestGap,
+        state.anchorAfter,
+        state.candidateAfter,
+        state.searchCeiling,
+        state.searchTime
+    };
+    result.metrics = metrics();
+    return result;
+}
+
+std::expected<std::unique_ptr<MatchQueue>, QueueRecoveryError>
+MatchQueue::restore(
+    const QueueCheckpoint& image,
+    QueueConfig config,
+    Eligibility eligibility
+)
+{
+    const auto invalid = []
+    {
+        return std::unexpected(QueueRecoveryError::InvalidCheckpoint);
+    };
+    if (image.version != 1)
+        return invalid();
+    if (image.policy != checkpointPolicy(config) ||
+        image.externalIds != bool(config.ticketIdSource))
+        return std::unexpected(QueueRecoveryError::PolicyMismatch);
+    try
+    {
+        auto result = std::make_unique<MatchQueue>(
+            std::move(config),
+            std::move(eligibility)
+        );
+        auto& state = *result->m_state;
+        if (image.entries.size() > state.config.maxTickets ||
+            image.metrics.retained != image.entries.size() ||
+            image.metrics.joined < image.entries.size() ||
+            (image.externalIds &&
+             (image.lastTicketId >= (std::uint64_t{1} << 63) ||
+              image.lastDurableId != image.lastTicketId)) ||
+            (!image.externalIds && image.lastDurableId) ||
+            (!image.lastNow &&
+             (!image.entries.empty() || image.lastTicketId ||
+              image.metrics.joined || image.search.anchorAfter ||
+              image.search.ceiling)))
+            return invalid();
+        std::uint64_t previousId = 0;
+        std::size_t queued = 0, assigned = 0, cancelled = 0,
+                    expired = 0, failed = 0;
+        for (const auto& entry : image.entries)
+        {
+            const auto id = entry.ticketId.value();
+            if (id <= previousId || id > image.lastTicketId ||
+                !entry.joinKey || entry.mmr > 10000 ||
+                !image.lastNow || entry.admitted > *image.lastNow ||
+                (entry.finished &&
+                 (*entry.finished < entry.admitted ||
+                  *entry.finished > *image.lastNow)) ||
+                (entry.reclaimFrom &&
+                 (!entry.finished ||
+                  *entry.reclaimFrom < *entry.finished ||
+                  *entry.reclaimFrom > *image.lastNow)))
+                return invalid();
+            previousId = id;
+            // Rehydration checks exact FSM reachability, including
+            // reservation cycles.
+            auto restored = std::make_unique<State::Entry>(entry);
+            switch (entry.lifecycle.state)
+            {
+            case TicketState::Queued:
+                if (entry.lifecycle.revision > UINT64_MAX - 2 ||
+                    !entry.active || entry.finished ||
+                    entry.reclaimFrom || entry.matchId ||
+                    entry.opponent || entry.opponentTicket ||
+                    entry.roomId)
+                    return invalid();
+                ++queued;
+                break;
+            case TicketState::Assigned:
+                if (!entry.finished || !entry.opponent ||
+                    !entry.opponentTicket ||
+                    *entry.opponent == entry.playerId ||
+                    *entry.opponentTicket == entry.ticketId ||
+                    entry.opponentTicket->value() >
+                        image.lastTicketId ||
+                    entry.matchId !=
+                        std::min(id, entry.opponentTicket->value()) ||
+                    (entry.active &&
+                     (entry.reclaimFrom || entry.roomId)) ||
+                    (!entry.active && !entry.reclaimFrom) ||
+                    elapsedMs(*entry.finished, entry.admitted) >=
+                        static_cast<std::uint64_t>(
+                            state.config.timeout.count()
+                        ))
+                    return invalid();
+                if (entry.active)
+                    ++assigned;
+                break;
+            case TicketState::Cancelled:
+            case TicketState::Expired:
+            case TicketState::Failed:
+                if (entry.active || !entry.finished ||
+                    !entry.reclaimFrom || entry.matchId ||
+                    entry.opponent || entry.opponentTicket ||
+                    entry.roomId)
+                    return invalid();
+                if (entry.lifecycle.state == TicketState::Expired)
+                {
+                    if (elapsedMs(*entry.finished, entry.admitted) <
+                        static_cast<std::uint64_t>(
+                            state.config.timeout.count()
+                        ))
+                        return invalid();
+                    ++expired;
+                }
+                else if (
+                    entry.lifecycle.state == TicketState::Cancelled
+                )
+                    ++cancelled;
+                else
+                    ++failed;
+                break;
+            case TicketState::Reserved:
+            default:
+                // A reservation is never a stable public queue
+                // cutoff.
+                return invalid();
+            }
+            if (!state.keys.emplace(restored->key(), id).second ||
+                (entry.active &&
+                 !state.active.emplace(entry.playerId.value(), id)
+                      .second))
+                return invalid();
+            state.tickets.emplace(id, std::move(restored));
+        }
+        for (const auto& [id, entry] : state.tickets)
+        {
+            if (entry->state() != TicketState::Assigned)
+                continue;
+            const auto peer = state.tickets.find(
+                entry->opponentTicket->value()
+            );
+            if (peer == state.tickets.end())
+            {
+                // A released peer's retry history may be reclaimed
+                // independently.
+                if (entry->active)
+                    return invalid();
+                continue;
+            }
+            const auto& other = *peer->second;
+            if (other.state() != TicketState::Assigned ||
+                other.ticket.playerId() != *entry->opponent ||
+                other.opponent != entry->ticket.playerId() ||
+                other.opponentTicket != entry->ticket.id() ||
+                other.matchId != entry->matchId ||
+                other.active != entry->active ||
+                other.finished != entry->finished ||
+                other.reclaimFrom != entry->reclaimFrom ||
+                other.roomId != entry->roomId)
+                return invalid();
+            if (entry->active && id == entry->matchId)
+                state.assignments.emplace(
+                    entry->matchId,
+                    std::pair{id, peer->first}
+                );
+        }
+        const auto& counts = image.metrics;
+        const auto matchedPlayers = saturatedAdd(
+            counts.matchedPairs,
+            counts.matchedPairs
+        );
+        const auto abandoned = saturatedAdd(
+            counts.cancelled,
+            counts.expired
+        );
+        const auto minimumJoined = saturatedAdd(
+            saturatedAdd(matchedPlayers, abandoned),
+            saturatedAdd(
+                static_cast<std::uint64_t>(queued),
+                static_cast<std::uint64_t>(failed)
+            )
+        );
+        if (queued > state.config.maxQueued ||
+            counts.queued != queued ||
+            counts.assignedPlayers != assigned ||
+            assigned != state.assignments.size() * 2 ||
+            counts.cancelled < cancelled ||
+            counts.expired < expired ||
+            counts.releasedPairs > counts.matchedPairs ||
+            counts.joined < minimumJoined ||
+            histogramCount(counts.matchedWait) != matchedPlayers ||
+            histogramCount(counts.mmrGap) != counts.matchedPairs ||
+            histogramCount(counts.abandonedWait) != abandoned ||
+            !validHistogramSum(
+                counts.matchedWait,
+                QueueMetrics::waitBoundsMs,
+                static_cast<std::uint64_t>(
+                    state.config.timeout.count()
+                ) - 1,
+                counts.totalMatchedWaitMs
+            ) ||
+            !validHistogramSum(
+                counts.mmrGap,
+                QueueMetrics::gapBounds,
+                std::min<std::uint64_t>(
+                    10000,
+                    state.config.maximumWindow
+                ),
+                counts.totalMmrGap
+            ) ||
+            (counts.matchedPairs != UINT64_MAX &&
+             counts.releasedPairs != UINT64_MAX &&
+             counts.matchedPairs - counts.releasedPairs !=
+                 assigned / 2))
+            return invalid();
+        const auto& search = image.search;
+        const auto validId = [&](std::uint64_t id)
+        { return id && id <= image.lastTicketId; };
+        if (search.anchorAfter > image.lastTicketId ||
+            search.ceiling > image.lastTicketId ||
+            search.bestGap > 10000 ||
+            (!search.anchor &&
+             (search.bestCandidate || search.candidateAfter)) ||
+            (search.anchor &&
+             (!validId(*search.anchor) ||
+              *search.anchor > search.ceiling ||
+              search.candidateAfter > search.ceiling ||
+              !image.lastNow || search.time > *image.lastNow)) ||
+            (search.bestCandidate &&
+             (!validId(*search.bestCandidate) ||
+              *search.bestCandidate > search.ceiling ||
+              search.bestCandidate == search.anchor)) ||
+            (search.ceiling &&
+             (!image.lastNow || search.time > *image.lastNow)))
+            return invalid();
+        if (search.anchor && search.bestCandidate)
+        {
+            const auto anchor = state.tickets.find(*search.anchor);
+            const auto best = state.tickets.find(
+                *search.bestCandidate
+            );
+            // Missing or terminal candidates are valid stale cursors;
+            // pair() discards them. Live queued candidates must
+            // retain the exact compatibility fact sampled at the
+            // original search cutoff.
+            if (anchor != state.tickets.end() &&
+                best != state.tickets.end() &&
+                anchor->second->state() == TicketState::Queued &&
+                best->second->state() == TicketState::Queued)
+            {
+                const auto difference = gap(
+                    anchor->second->mmr,
+                    best->second->mmr
+                );
+                if (search.time < anchor->second->admitted ||
+                    search.time < best->second->admitted ||
+                    search.bestGap != difference ||
+                    difference >
+                        state.window(*anchor->second, search.time) ||
+                    difference >
+                        state.window(*best->second, search.time))
+                    return invalid();
+            }
+        }
+        state.lastNow = image.lastNow;
+        state.lastTicketId = image.lastTicketId;
+        state.lastDurableId = image.lastDurableId;
+        state.searchAnchor = search.anchor;
+        state.bestCandidate = search.bestCandidate;
+        state.bestGap = search.bestGap;
+        state.anchorAfter = search.anchorAfter;
+        state.candidateAfter = search.candidateAfter;
+        state.searchCeiling = search.ceiling;
+        state.searchTime = search.time;
+        state.counts = counts;
+        return result;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return std::unexpected(QueueRecoveryError::Capacity);
+    }
+    catch (const std::invalid_argument&)
+    {
+        return invalid();
+    }
 }
 } // namespace service::match

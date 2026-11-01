@@ -4,11 +4,11 @@
  */
 #pragma once
 
-#include "net/ConnectionFeature.h"
 #include "net/MessageRegistry.h"
 #include "net/OnlineRegistry.h"
 
 #include "match/MatchQueue.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace service::gateway
 {
@@ -53,7 +53,7 @@ public:
     MatchmakingService& operator=(const MatchmakingService&) = delete;
     /** @brief Starts periodic matching before listeners begin
      * processing requests. */
-    void start(ConnectionScheduler);
+    void start(arena::runtime::OwnerScheduler);
     /** @brief Closes admission, cancels upkeep and rejects pending
      * commands. */
     void stop() noexcept;

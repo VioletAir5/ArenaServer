@@ -26,8 +26,22 @@ if(ARENA_ENABLE_RPC_TESTS)
         --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
         --report "${CMAKE_CURRENT_BINARY_DIR}/rpc-report.json")
     set_tests_properties(InternalRpcBoundary PROPERTIES TIMEOUT 60 LABELS "integration;rpc")
+    add_test(NAME ServiceRpcMetadata COMMAND "${rpc_python}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ServiceMetadataTest.py"
+        --repository-root "${PROJECT_SOURCE_DIR}"
+        --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
+        --report "${CMAKE_CURRENT_BINARY_DIR}/service-metadata-report.json")
+    set_tests_properties(ServiceRpcMetadata PROPERTIES TIMEOUT 45 LABELS "integration;rpc;contract")
 endif()
 
 add_executable(arena_storage_probe StorageProbe.cpp)
 target_link_libraries(arena_storage_probe PRIVATE arena_shared)
 target_link_options(arena_storage_probe PRIVATE $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+
+add_executable(arena_rpc_server_tests RpcServerTest.cpp)
+target_link_libraries(arena_rpc_server_tests PRIVATE arena_shared GTest::gtest_main)
+target_compile_options(arena_rpc_server_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_rpc_server_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_rpc_server_tests)

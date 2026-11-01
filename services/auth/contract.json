@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "service": "auth",
+  "implementation": "services/auth/app/main.cpp",
+  "registration_kind": "native_server",
+  "transport": {
+    "request": "arena.rpc.Request",
+    "response": "arena.rpc.Response",
+    "max_timeout_ms": 1000,
+    "max_frame_bytes": 262144,
+    "compatibility": "strict-v1-role-bound-profile",
+    "automatic_transport_retries": 0
+  },
+  "common_errors": [
+    "CANCELLED",
+    "DEADLINE_EXCEEDED",
+    "INTERNAL",
+    "INVALID_ARGUMENT",
+    "OUTCOME_UNKNOWN",
+    "OVERLOADED",
+    "UNAUTHENTICATED",
+    "UNAVAILABLE",
+    "INCOMPATIBLE_VERSION",
+    "CALL_CYCLE"
+  ],
+  "methods": [
+    {
+      "name": "health.ready",
+      "owner": "auth",
+      "logical_owner": "auth",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "health.ready",
+      "request": null,
+      "response": null,
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-storage-and-kdf-cleanup",
+      "result_semantics": "stateless-signed-candidate; Lobby owns session installation"
+    },
+    {
+      "name": "auth.authenticate",
+      "owner": "auth",
+      "logical_owner": "auth",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "auth.authenticate",
+      "request": "arena.auth.AuthenticateRequest",
+      "response": "arena.auth.AuthenticateReply",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-storage-and-kdf-cleanup",
+      "result_semantics": "stateless-signed-candidate; Lobby owns session installation",
+      "response_implementation": "services/auth/src/AuthService.cpp"
+    }
+  ]
+}

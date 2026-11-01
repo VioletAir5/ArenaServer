@@ -89,6 +89,9 @@ struct RuntimeControl::State : std::enable_shared_from_this<State>
                 "invalid runtime control configuration"
             );
         acceptor.open(Tcp::v4());
+        // Fixed health endpoints must restart while prior peers
+        // remain in TIME_WAIT.
+        acceptor.set_option(Tcp::acceptor::reuse_address(true));
         acceptor.bind(
             {boost::asio::ip::address_v4::loopback(),
              config.healthPort}

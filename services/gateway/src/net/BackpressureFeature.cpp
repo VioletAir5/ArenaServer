@@ -7,19 +7,21 @@
 #include <stdexcept>
 
 #include "net/ConnectionChannel.h"
+
+#include "runtime/OwnerScheduler.h"
 namespace service::gateway
 {
 BackpressureFeature::BackpressureFeature(
     std::size_t low,
     std::size_t high,
-    ConnectionClock::duration timeout
+    arena::runtime::OwnerClock::duration timeout
 )
     : m_low(low)
     , m_high(high)
     , m_timeout(timeout)
 {
     if (low >= high || high >= kHardOutputLimit ||
-        timeout <= ConnectionClock::duration::zero())
+        timeout <= arena::runtime::OwnerClock::duration::zero())
         throw std::invalid_argument(
             "invalid backpressure thresholds/timeout"
         );
@@ -32,7 +34,7 @@ void BackpressureFeature::onOutputBufferChanged(
     {
         m_paused = true;
         m_timer = control.scheduleAt(
-            ConnectionClock::now() + m_timeout,
+            arena::runtime::OwnerClock::now() + m_timeout,
             [](ConnectionChannel& c)
             {
                 c.context().rejections->record(

@@ -81,5 +81,11 @@ public:
         : Base(id)
     {
     }
+    /** @brief Rehydrates a validated room lifecycle on the current
+     * owner. */
+    Room(RoomId id, service::state::Snapshot<State> restored)
+        : Base(id, restored)
+    {
+    }
 };
 } // namespace arena::domain

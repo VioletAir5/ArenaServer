@@ -4,12 +4,14 @@
  */
 #pragma once
 
-#include "net/ConnectionFeature.h"
 #include "net/MessageRegistry.h"
 #include "net/OnlineRegistry.h"
 
+#include "arena/domain/Battle.h"
+#include "arena/domain/Room.h"
 #include "room/ReplayRecorder.h"
 #include "room/RoomActor.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace service::gateway
 {
@@ -36,6 +38,14 @@ struct RoomServiceConfig
     /// Finished results remain queryable by the same logical session
     /// for at most one hour.
     std::chrono::milliseconds resultRetention{60000};
+    /// Explicit owner cutoffs replace automatic timer scheduling.
+    bool externalTicks{false};
+    /// An external durable owner acknowledges frozen settlement
+    /// intents. Mutually exclusive with persistSettlement.
+    bool externalSettlement{false};
+    /// Optional nonblocking allocation of a strictly increasing actor
+    /// ID. Restoring or cloning never invokes this binding.
+    std::function<std::uint64_t()> incarnationSource;
     /// Optional full-session archive sink; disk I/O runs off the
     /// owner.
     std::shared_ptr<service::room::ReplayRecorder> replays;
@@ -64,8 +74,8 @@ struct RoomServiceConfig
     };
     /// Injectable monotonic clock; only the management owner calls
     /// it.
-    std::function<ConnectionClock::time_point()> now{
-        ConnectionClock::now
+    std::function<arena::runtime::OwnerClock::time_point()> now{
+        arena::runtime::OwnerClock::now
     };
 };
 struct RoomMetrics
@@ -178,6 +188,86 @@ struct RoomStatus
     std::optional<RoomSettlement> settlement;
 };
 
+/** @brief Copies all immutable value policies independently of
+ * runtime bindings. */
+struct RoomPolicy
+{
+    /// Complete mailbox, actor and catch-up admission limits.
+    std::size_t maxRooms, maxPending, maxPendingPerRoom, maxCatchUp;
+    service::room::ActorConfig actor;
+    /// Lifecycle and retained-result bounds.
+    std::uint64_t battleDurationTicks, readyTimeoutTicks;
+    std::chrono::milliseconds resultRetention;
+    /// Settlement admission and retry bounds remain unchanged on
+    /// recovery.
+    std::size_t persistenceAdmissionAttempts;
+    std::chrono::milliseconds persistenceRetryBase,
+        persistenceRetryMax;
+    /// Binding kinds and driving modes are part of the policy
+    /// contract.
+    bool externalTicks, externalSettlement, callbackSettlement,
+        archives;
+    bool operator==(const RoomPolicy&) const noexcept;
+};
+
+/** @brief Stores one complete managed lifecycle without callback
+ * ownership. */
+struct ManagedMatchCheckpoint
+{
+    /// Historical allocation remains valid even after members expire.
+    ManagedRoom allocation;
+    /// Domain states and exact transition revisions.
+    service::state::Snapshot<arena::domain::Room::State> room;
+    service::state::Snapshot<arena::domain::Battle::State> battle;
+    /// Owner projections sampled at the same cutoff as the actor.
+    RoomPhase phase;
+    std::array<bool, 2> ready;
+    std::array<Presence, 2> presence;
+    /// Frozen wall facts and logical lifecycle counters.
+    std::uint64_t createdUnixMs, startedUnixMs;
+    std::uint64_t waitedTicks, startedTick, finishedTick, playedTicks;
+    /// Immutable intent and monotonic retention/retry deadlines.
+    std::optional<RoomSettlement> result;
+    std::optional<arena::runtime::OwnerClock::time_point> expires,
+        retryAt;
+    /// Exhausted or transferred admission budgets cannot reopen on
+    /// recovery.
+    std::size_t admissionAttempts;
+    bool persistenceAccepted, persistenceBlocked;
+    /// Zero is pending, one committed, two terminal failure. A
+    /// pending callback-owned attempt is not checkpointable.
+    int persistenceOutcome;
+};
+
+/** @brief Owns a quiescent service cut without schedulers or archive
+ * handles. Actor replay journals restart at these snapshots; an upper
+ * journal owns any full-session ordered log across recovery.
+ */
+struct RoomCheckpoint
+{
+    RoomPolicy policy;
+    /// Canonically room-sorted committed actor and lifecycle values.
+    std::vector<service::room::Snapshot> actors;
+    std::vector<ManagedMatchCheckpoint> matches;
+    /// Cumulative counters and derived gauges from the same cutoff.
+    RoomMetrics metrics;
+    /// Original next logical deadline, mapped by the durable owner if
+    /// needed.
+    arena::runtime::OwnerClock::time_point deadline;
+    /// Lifecycle/admission state, without timer or executor
+    /// ownership.
+    bool running, started, accepting;
+    /// Includes retired incarnations, preventing later allocation
+    /// collisions.
+    std::uint64_t incarnationHighWater;
+};
+
+enum class RoomRecoveryError
+{
+    Busy,
+    Invalid
+};
+
 /** @brief Applies room commands only on a fixed owner with a 50 ms
  * tick. Construct/start/stop/destroy on the management owner.
  * Input/snapshot admission is thread-safe and bounded. An input
@@ -206,7 +296,36 @@ public:
     RoomService(const RoomService&) = delete;
     RoomService& operator=(const RoomService&) = delete;
     /** @brief Starts the absolute-deadline 20 Hz owner timer. */
-    void start(ConnectionScheduler);
+    void start(arena::runtime::OwnerScheduler);
+    /** @brief Copies a quiescent owner cut without clocks, pruning or
+     * I/O. Pending commands, active archives and unfinished callback
+     * loans return Busy.
+     */
+    std::expected<RoomCheckpoint, RoomRecoveryError>
+    checkpoint() const;
+    /** @brief Validates and builds an isolated service on its
+     * construction owner. Runtime bindings must reproduce the
+     * complete policy. No IDs or clocks are consumed. External-tick
+     * clones can advance immediately; timer-mode clones call start
+     * once to attach a scheduler to the preserved deadline.
+     */
+    static std::
+        expected<std::unique_ptr<RoomService>, RoomRecoveryError>
+        restore(
+            std::shared_ptr<OnlineRegistry>,
+            const RoomCheckpoint&,
+            RoomServiceConfig
+        );
+    /** @brief Applies exactly one explicit logical cutoff; false
+     * requires the caller to discard the candidate and any captured
+     * replies/effects.
+     */
+    bool advance();
+    /** @brief Completes one externally owned durable intent. False
+     * acknowledgement blocks the existing budget permanently.
+     * Duplicate facts are idempotent.
+     */
+    bool acknowledgeSettlement(std::uint64_t matchId, bool committed);
     /** @brief Closes mailboxes, cancels ticking, clears actors and
      * settles pending once. */
     void stop() noexcept;

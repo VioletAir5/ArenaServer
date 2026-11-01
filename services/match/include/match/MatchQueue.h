@@ -110,6 +110,7 @@ struct TicketSnapshot
     /// Trusted room allocation retained with both assignment
     /// histories.
     std::optional<arena::domain::RoomId> roomId;
+    bool operator==(const TicketSnapshot&) const = default;
 };
 using QueueResult = std::expected<TicketSnapshot, QueueError>;
 
@@ -152,8 +153,125 @@ struct QueueMetrics
     /// Cumulative sums for mean successful player wait and mean pair
     /// rating gap.
     std::uint64_t totalMatchedWaitMs{0}, totalMmrGap{0};
+    bool operator==(const QueueMetrics&) const = default;
 };
 
+/** @brief Persists queue policy without retaining executable
+ * dependencies. */
+struct QueueCheckpointPolicy
+{
+    /// Initial inclusive MMR window at admission.
+    std::uint32_t initialWindow{50};
+    /// MMR points added per complete expansion interval.
+    std::uint32_t expansionStep{25};
+    /// Inclusive ceiling for an expanded MMR window.
+    std::uint32_t maximumWindow{500};
+    /// Positive duration between window expansions.
+    std::chrono::milliseconds expansionInterval{1000};
+    /// Exclusive lifetime measured from the original admission.
+    std::chrono::milliseconds timeout{30000};
+    /// Minimum lifetime of released or terminal retry history.
+    std::chrono::milliseconds retention{60000};
+    /// Total retained records, including active assignments.
+    std::size_t maxTickets{4096};
+    /// Maximum waiting players across all logical sessions.
+    std::size_t maxQueued{1024};
+    /// Maximum candidate comparisons in one upkeep pass.
+    std::size_t comparisonsPerTick{8192};
+    bool operator==(const QueueCheckpointPolicy&) const = default;
+};
+
+/** @brief Captures one retained ticket, including released assignment
+ * history. */
+struct QueueEntryCheckpoint
+{
+    /// Immutable server-allocated ticket identity.
+    TicketId ticketId;
+    /// Authenticated player owning the original admission.
+    PlayerId playerId;
+    /// Reconnect-stable logical session owning this ticket.
+    SessionId sessionId;
+    /// Original nonzero client operation key.
+    std::uint64_t joinKey;
+    /// Server rating captured once at admission.
+    std::uint32_t mmr;
+    /// Validated domain state and its exact transition revision.
+    service::state::Snapshot<TicketState> lifecycle;
+    /// Original monotonic admission time, never renewed by recovery.
+    Clock::time_point admitted;
+    /// Time at which wait and MMR expansion became frozen.
+    std::optional<Clock::time_point> finished;
+    /// Start of terminal-history retention, absent while assigned and
+    /// active.
+    std::optional<Clock::time_point> reclaimFrom;
+    /// Shared pair identity, zero before assignment.
+    std::uint64_t matchId{0};
+    /// Peer player retained with assignment history.
+    std::optional<PlayerId> opponent;
+    /// Peer ticket, which may already have retired after release.
+    std::optional<TicketId> opponentTicket;
+    /// Whether this ticket still occupies the player's active slot.
+    bool active{true};
+    /// Trusted allocation retained after assignment release.
+    std::optional<arena::domain::RoomId> roomId;
+    bool operator==(const QueueEntryCheckpoint&) const = default;
+};
+
+/** @brief Preserves a bounded search even when its candidate was
+ * reclaimed. */
+struct QueueSearchCheckpoint
+{
+    /// Anchor identity for an incomplete candidate scan.
+    std::optional<std::uint64_t> anchor;
+    /// Best compatible peer observed during that scan.
+    std::optional<std::uint64_t> bestCandidate;
+    /// Exact rating difference for the saved best peer.
+    std::uint32_t bestGap{0};
+    /// Last completed anchor; removed identities remain valid
+    /// cursors.
+    std::uint64_t anchorAfter{0};
+    /// Last compared ticket in the incomplete scan.
+    std::uint64_t candidateAfter{0};
+    /// Initial scan ceiling excluding later admissions.
+    std::uint64_t ceiling{0};
+    /// Original window-sampling time for the incomplete scan.
+    Clock::time_point time{};
+    bool operator==(const QueueSearchCheckpoint&) const = default;
+};
+
+/** @brief Owns a complete queue image; clock mapping belongs to its
+ * codec. */
+struct QueueCheckpoint
+{
+    /// Supported in-memory checkpoint schema version.
+    std::uint32_t version{1};
+    /// Scalar policy that must match the restored queue
+    /// configuration.
+    QueueCheckpointPolicy policy;
+    /// Entries remain in canonical ascending TicketId order.
+    std::vector<QueueEntryCheckpoint> entries;
+    /// Greatest monotonic command time accepted by the original
+    /// owner.
+    std::optional<Clock::time_point> lastNow;
+    /// Highest ID consumed, including later admission-allocation
+    /// failures.
+    std::uint64_t lastTicketId{0};
+    /// Highest valid ID consumed from the external durable source.
+    std::uint64_t lastDurableId{0};
+    /// Whether restoration must inject an external durable ID source.
+    bool externalIds{false};
+    /// Complete resumable nearest-neighbour search state.
+    QueueSearchCheckpoint search;
+    /// Cumulative counters, histograms and current occupancy gauges.
+    QueueMetrics metrics;
+    bool operator==(const QueueCheckpoint&) const = default;
+};
+enum class QueueRecoveryError
+{
+    InvalidCheckpoint,
+    PolicyMismatch,
+    Capacity
+};
 /** @brief Serializes ticket identity, lifecycle, pairing and
  * accounting.
  *
@@ -224,6 +342,18 @@ public:
     /** @brief Returns owner-consistent cumulative metrics and
      * physical gauges. */
     QueueMetrics metrics() const;
+    /** @brief Copies owner state without maintenance, callbacks or ID
+     * allocation. */
+    QueueCheckpoint checkpoint() const;
+    /** @brief Validates and reconstructs indexes on the current
+     * construction owner. Numeric policy must match the checkpoint.
+     * Only ticketIdSource and eligibility are supplied by the caller;
+     * neither is invoked by recovery.
+     */
+    static std::expected<
+        std::unique_ptr<MatchQueue>,
+        QueueRecoveryError>
+    restore(const QueueCheckpoint&, QueueConfig, Eligibility = {});
 
 private:
     struct State;

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
@@ -20,6 +21,8 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/write.hpp>
+
+#include "security/SecureErase.h"
 
 namespace arena::internal_rpc
 {
@@ -45,6 +48,64 @@ bool methodValid(std::string_view value)
               c == '_' || c == '.'))
             return false;
     return true;
+}
+bool serviceValid(std::string_view value)
+{
+    if (value.empty() || value.size() > 32 || value.front() < 'a' ||
+        value.front() > 'z')
+        return false;
+    for (const char c : value)
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+              c == '_' || c == '-'))
+            return false;
+    return true;
+}
+
+/** @brief Copies the validated parent's path; a child cannot remove
+ * visited owners. */
+std::optional<arena::rpc::Status> prepareServicePath(
+    arena::rpc::Request& request, const Options& options
+)
+{
+    const bool versioned = request.protocol_version() ||
+                           !request.caller_service().empty() ||
+                           !request.target_service().empty() ||
+                           request.service_path_size() ||
+                           (options.context &&
+                            !options.context->servicePath.empty());
+    if (!versioned)
+        return std::nullopt;
+    if (request.protocol_version() &&
+        request.protocol_version() != protocolVersion)
+        return arena::rpc::INCOMPATIBLE_VERSION;
+    if (!serviceValid(request.caller_service()) ||
+        !serviceValid(request.target_service()))
+        return arena::rpc::INVALID_ARGUMENT;
+    request.set_protocol_version(protocolVersion);
+    if (options.context && !options.context->servicePath.empty())
+    {
+        request.clear_service_path();
+        for (const auto& service : options.context->servicePath)
+            request.add_service_path(service);
+    }
+    if (request.service_path().empty())
+        request.add_service_path(request.caller_service());
+    if (static_cast<std::size_t>(request.service_path_size()) >=
+        maxServiceHops)
+        return arena::rpc::CALL_CYCLE;
+    std::set<std::string> visited;
+    for (const auto& service : request.service_path())
+    {
+        if (!serviceValid(service))
+            return arena::rpc::INVALID_ARGUMENT;
+        if (service == request.target_service() ||
+            !visited.insert(service).second)
+            return arena::rpc::CALL_CYCLE;
+    }
+    if (request.service_path(request.service_path_size() - 1) !=
+        request.caller_service())
+        return arena::rpc::INVALID_ARGUMENT;
+    return std::nullopt;
 }
 } // namespace
 
@@ -96,14 +157,34 @@ struct Operation : std::enable_shared_from_this<Operation>
         , deadline(deadline)
         , requestId(request.request_id())
         , correlationId(request.correlation_id())
+        , version(request.protocol_version())
         , completion(std::move(completion))
     {
-        const auto bytes = request.SerializeAsString();
-        const auto size = static_cast<std::uint32_t>(bytes.size());
-        outbound.resize(4);
+        const auto size = static_cast<std::uint32_t>(
+            request.ByteSizeLong()
+        );
+        outbound.resize(4 + size);
         for (unsigned i = 0; i != 4; ++i)
             outbound[i] = static_cast<char>(size >> (24 - 8 * i));
-        outbound += bytes;
+        try
+        {
+            if (!request.SerializeToArray(
+                    outbound.data() + 4,
+                    static_cast<int>(size)
+                ))
+                throw std::runtime_error("RPC serialization failed");
+        }
+        catch (...)
+        {
+            arena::security::eraseSecret(outbound);
+            throw;
+        }
+    }
+
+    ~Operation()
+    {
+        arena::security::eraseSecret(outbound);
+        arena::security::eraseSecret(inbound);
     }
 
     void cancel()
@@ -272,9 +353,25 @@ struct Operation : std::enable_shared_from_this<Operation>
                             self->finish(arena::rpc::INTERNAL);
                             return;
                         }
+                        if (response.protocol_version() !=
+                                self->version &&
+                            !(response.protocol_version() ==
+                                  protocolVersion &&
+                              response.status() ==
+                                  arena::rpc::INCOMPATIBLE_VERSION))
+                        {
+                            self->finish(
+                                arena::rpc::INCOMPATIBLE_VERSION
+                            );
+                            return;
+                        }
                         if (response.status() == arena::rpc::OK ||
                             response.status() ==
-                                arena::rpc::OUTCOME_UNKNOWN)
+                                arena::rpc::OUTCOME_UNKNOWN ||
+                            response.status() ==
+                                arena::rpc::INCOMPATIBLE_VERSION ||
+                            response.status() ==
+                                arena::rpc::CALL_CYCLE)
                             response.set_retryable(false);
                         self->complete(std::move(response));
                     }
@@ -300,6 +397,7 @@ struct Operation : std::enable_shared_from_this<Operation>
         response.set_request_id(requestId);
         response.set_correlation_id(correlationId);
         response.set_status(status);
+        response.set_protocol_version(version);
         response.set_retryable(retryable);
         complete(std::move(response));
     }
@@ -318,6 +416,8 @@ struct Operation : std::enable_shared_from_this<Operation>
             std::lock_guard lock(owner->mutex);
             owner->operations.erase(requestId);
         }
+        arena::security::eraseSecret(outbound);
+        arena::security::eraseSecret(inbound);
         auto callback = std::move(completion);
         try
         {
@@ -340,6 +440,9 @@ struct Operation : std::enable_shared_from_this<Operation>
     Clock::time_point deadline;
     std::uint64_t requestId;
     std::string correlationId;
+    /// Expected negotiated service profile; zero is the existing
+    /// Storage profile.
+    std::uint32_t version;
     Client::Completion completion;
     std::string outbound, inbound;
     std::array<unsigned char, 4> header{};
@@ -403,6 +506,21 @@ std::expected<Call, arena::rpc::Status> Client::call(
     Completion completion
 )
 {
+    struct RequestCleanup
+    {
+        arena::rpc::Request& request;
+        ~RequestCleanup() noexcept
+        {
+            if (!request.payload().empty())
+                arena::security::eraseSecret(
+                    *request.mutable_payload()
+                );
+            if (!request.service_token().empty())
+                arena::security::eraseSecret(
+                    *request.mutable_service_token()
+                );
+        }
+    } cleanup{request};
     using namespace std::chrono;
     const auto now = detail::Clock::now();
     const auto endpoint = options.endpoint.value_or(
@@ -422,6 +540,8 @@ std::expected<Call, arena::rpc::Status> Client::call(
          !correlationValid(options.context->correlationId)) ||
         request.ByteSizeLong() > maxFrame)
         return std::unexpected(arena::rpc::INVALID_ARGUMENT);
+    if (const auto error = prepareServicePath(request, options))
+        return std::unexpected(*error);
     auto deadline = now + options.timeout;
     if (options.context)
     {

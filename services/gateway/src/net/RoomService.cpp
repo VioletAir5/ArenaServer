@@ -9,7 +9,9 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -17,6 +19,7 @@
 
 #include "arena/domain/Battle.h"
 #include "arena/domain/Room.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace service::gateway
 {
@@ -35,20 +38,45 @@ struct RoomLess
 };
 /** @brief Allocates a process-local actor identity without ever
  * wrapping to zero. */
-std::uint64_t nextIncarnation()
+std::uint64_t nextIncarnation(std::uint64_t highWater)
 {
     static std::atomic<std::uint64_t> next{0};
     auto previous = next.load(std::memory_order_relaxed);
     do
     {
-        if (previous == UINT64_MAX)
+        const auto floor = std::max(previous, highWater);
+        if (floor == UINT64_MAX)
             throw std::overflow_error("room incarnation exhausted");
-    } while (!next.compare_exchange_weak(
-        previous,
-        previous + 1,
-        std::memory_order_relaxed
-    ));
-    return previous + 1;
+        if (next.compare_exchange_weak(
+                previous,
+                floor + 1,
+                std::memory_order_relaxed
+            ))
+            return floor + 1;
+    } while (true);
+}
+
+/** @brief Captures numeric policies while excluding clocks and
+ * handles. */
+RoomPolicy policy(const RoomServiceConfig& c)
+{
+    return {
+        c.maxRooms,
+        c.maxPending,
+        c.maxPendingPerRoom,
+        c.maxCatchUp,
+        c.actor,
+        c.battleDurationTicks,
+        c.readyTimeoutTicks,
+        c.resultRetention,
+        c.persistenceAdmissionAttempts,
+        c.persistenceRetryBase,
+        c.persistenceRetryMax,
+        c.externalTicks,
+        c.externalSettlement,
+        static_cast<bool>(c.persistSettlement),
+        static_cast<bool>(c.replays)
+    };
 }
 
 /** @brief Uses stable diagnostic names independent of protobuf enum
@@ -86,14 +114,277 @@ std::string_view reasonName(SettlementReason reason) noexcept
 
 /** @brief Prevents monotonic deadline overflow before changing timer
  * state. */
-ConnectionClock::time_point after(
-    ConnectionClock::time_point time,
-    ConnectionClock::duration duration
+arena::runtime::OwnerClock::time_point after(
+    arena::runtime::OwnerClock::time_point time,
+    arena::runtime::OwnerClock::duration duration
 )
 {
-    if (time > ConnectionClock::time_point::max() - duration)
+    if (time >
+        arena::runtime::OwnerClock::time_point::max() - duration)
         throw std::overflow_error("room timer deadline exhausted");
     return time + duration;
+}
+} // namespace
+
+bool RoomPolicy::operator==(const RoomPolicy& other) const noexcept
+{
+    const auto values = [](const RoomPolicy& p)
+    {
+        return std::tie(
+            p.maxRooms,
+            p.maxPending,
+            p.maxPendingPerRoom,
+            p.maxCatchUp,
+            p.actor.maxMembers,
+            p.actor.maxInputsPerTick,
+            p.actor.historyTicks,
+            p.actor.positionLimit,
+            p.battleDurationTicks,
+            p.readyTimeoutTicks,
+            p.resultRetention,
+            p.persistenceAdmissionAttempts,
+            p.persistenceRetryBase,
+            p.persistenceRetryMax,
+            p.externalTicks,
+            p.externalSettlement,
+            p.callbackSettlement,
+            p.archives
+        );
+    };
+    return values(*this) == values(other);
+}
+
+namespace
+{
+/** @brief Rejects cross-layer contradictions without reading clocks
+ * or rosters. */
+bool validMatch(
+    const ManagedMatchCheckpoint& m,
+    const service::room::Snapshot& actor,
+    const RoomPolicy& p,
+    const RegistryCheckpoint& registry
+)
+{
+    using Room = arena::domain::Room;
+    using Battle = arena::domain::Battle;
+    const bool durable = p.callbackSettlement || p.externalSettlement;
+    const bool terminal = m.phase == RoomPhase::Settling ||
+                          m.phase == RoomPhase::Finished;
+    constexpr auto managedBit = std::uint64_t{1} << 63;
+    if (!m.allocation.matchId ||
+        (m.allocation.matchId & managedBit) ||
+        m.allocation.roomId.value() !=
+            (managedBit | m.allocation.matchId) ||
+        actor.roomId != m.allocation.roomId || !m.createdUnixMs ||
+        (m.startedUnixMs && m.startedUnixMs < m.createdUnixMs) ||
+        m.waitedTicks > p.readyTimeoutTicks ||
+        m.playedTicks > p.battleDurationTicks ||
+        m.admissionAttempts > p.persistenceAdmissionAttempts ||
+        m.persistenceOutcome < 0 || m.persistenceOutcome > 2)
+        return false;
+    const auto& a = m.allocation.members[0];
+    const auto& b = m.allocation.members[1];
+    if (a.playerId.value() >= b.playerId.value() ||
+        a.sessionId == b.sessionId || !a.roomEpoch || !b.roomEpoch ||
+        a.roomEpoch == UINT64_MAX || b.roomEpoch == UINT64_MAX ||
+        a.initialMmr > 10000 || b.initialMmr > 10000)
+        return false;
+    for (const auto presence : m.presence)
+        if (presence != Presence::Online &&
+            presence != Presence::Detached)
+            return false;
+    const auto room = std::find_if(
+        registry.rooms.begin(),
+        registry.rooms.end(),
+        [&](const auto& r) { return r.roomId == m.allocation.roomId; }
+    );
+    if (m.phase != RoomPhase::Finished)
+    {
+        // A managed allocation owns its historical cohort even if
+        // grace maintenance has already removed one or both retained
+        // entries.
+        if (room == registry.rooms.end() || !room->managed ||
+            room->managed->matchId != m.allocation.matchId ||
+            room->managed->members != m.allocation.members)
+            return false;
+    }
+    else if (room != registry.rooms.end())
+        return false; // Finished releases this reserved allocation
+                      // atomically.
+    if (actor.players.empty())
+    {
+        if (actor.tick || m.phase != RoomPhase::Forming ||
+            m.waitedTicks || m.playedTicks || m.ready[0] ||
+            m.ready[1])
+            return false;
+    }
+    else
+    {
+        if (actor.players.size() != m.allocation.members.size())
+            return false;
+        for (std::size_t i = 0; i != actor.players.size(); ++i)
+        {
+            const auto& expected = m.allocation.members[i];
+            if (actor.players[i].member != service::room::Member{
+                                               expected.playerId,
+                                               expected.sessionId,
+                                               expected.roomEpoch
+                                           })
+                return false;
+        }
+    }
+    if (m.waitedTicks > UINT64_MAX - m.playedTicks)
+        return false;
+    const auto totalTicks = m.waitedTicks + m.playedTicks;
+    const bool
+        initialAbort = terminal && m.result &&
+                       m.result->reason ==
+                           SettlementReason::MemberUnavailable &&
+                       !totalTicks && actor.tick == 1;
+    if (actor.tick != totalTicks && !initialAbort)
+        return false;
+    if (m.playedTicks)
+    {
+        if (!m.startedUnixMs || m.startedTick != m.waitedTicks + 1 ||
+            m.startedTick > actor.tick ||
+            m.playedTicks != actor.tick - m.startedTick + 1)
+            return false;
+    }
+    else if (m.startedTick || m.startedUnixMs)
+        return false;
+    if ((!terminal && m.room.revision > actor.tick) ||
+        (actor.tick <= UINT64_MAX - 3 &&
+         m.room.revision > actor.tick + 3))
+        return false;
+    if (terminal != m.result.has_value() ||
+        (m.phase == RoomPhase::Finished) != m.expires.has_value())
+        return false;
+    if (!terminal && (m.finishedTick || m.retryAt ||
+                      m.admissionAttempts || m.persistenceAccepted ||
+                      m.persistenceBlocked || m.persistenceOutcome))
+        return false;
+    switch (m.phase)
+    {
+    case RoomPhase::Forming:
+    case RoomPhase::Ready:
+        if (m.room.state != (m.phase == RoomPhase::Forming
+                                 ? Room::State::Forming
+                                 : Room::State::Ready) ||
+            m.battle.state != Battle::State::Prepared ||
+            m.playedTicks || m.waitedTicks >= p.readyTimeoutTicks ||
+            ((m.ready[0] && m.ready[1]) !=
+             (m.phase == RoomPhase::Ready)))
+            return false;
+        break;
+    case RoomPhase::Playing:
+        if (m.room.state != Room::State::Running ||
+            m.battle.state != Battle::State::Running || !m.ready[0] ||
+            !m.ready[1] || !m.playedTicks ||
+            m.playedTicks >= p.battleDurationTicks ||
+            m.waitedTicks >= p.readyTimeoutTicks)
+            return false;
+        break;
+    case RoomPhase::Settling:
+    case RoomPhase::Finished:
+        if (m.room.state != (m.phase == RoomPhase::Settling
+                                 ? Room::State::Closing
+                                 : Room::State::Closed))
+            return false;
+        break;
+    default:
+        return false;
+    }
+    if (terminal)
+    {
+        const auto& r = *m.result;
+        if (actor.players.size() != 2 ||
+            r.resultId != m.allocation.matchId ||
+            r.matchId != m.allocation.matchId ||
+            r.roomId != actor.roomId || r.finalTick != actor.tick ||
+            r.finalChecksum != actor.checksum ||
+            r.players != actor.players || r.winnerPlayerId ||
+            r.createdUnixMs != m.createdUnixMs ||
+            r.startedUnixMs != m.startedUnixMs ||
+            r.finishedUnixMs <
+                std::max(m.createdUnixMs, m.startedUnixMs) ||
+            r.startedTick != m.startedTick ||
+            r.playedTicks != m.playedTicks ||
+            m.finishedTick != actor.tick)
+            return false;
+        switch (r.reason)
+        {
+        case SettlementReason::Completed:
+            if (m.playedTicks != p.battleDurationTicks)
+                return false;
+            break;
+        case SettlementReason::ReadyTimeout:
+            if (m.playedTicks || m.waitedTicks != p.readyTimeoutTicks)
+                return false;
+            break;
+        case SettlementReason::MemberUnavailable:
+            break;
+        default:
+            return false;
+        }
+        const bool battleEnded = !durable ||
+                                 m.phase == RoomPhase::Finished;
+        const auto expectedBattle =
+            battleEnded ? (r.reason == SettlementReason::Completed
+                               ? Battle::State::Finished
+                               : Battle::State::Aborted)
+                        : (m.playedTicks ? Battle::State::Running
+                                         : Battle::State::Prepared);
+        if (m.battle.state != expectedBattle)
+            return false;
+        if (durable)
+        {
+            if (!m.admissionAttempts ||
+                (m.persistenceAccepted && m.retryAt) ||
+                (m.persistenceOutcome && !m.persistenceAccepted) ||
+                (m.phase == RoomPhase::Finished &&
+                 (!m.persistenceAccepted || m.persistenceBlocked)))
+                return false;
+            if (p.externalSettlement)
+            {
+                if (m.admissionAttempts != 1 ||
+                    !m.persistenceAccepted || m.persistenceOutcome ||
+                    m.retryAt)
+                    return false;
+            }
+            else if (
+                (m.phase == RoomPhase::Settling &&
+                 m.persistenceAccepted && !m.persistenceOutcome) ||
+                (m.phase == RoomPhase::Finished &&
+                 m.persistenceOutcome != 1) ||
+                (m.persistenceBlocked && m.persistenceAccepted &&
+                 m.persistenceOutcome != 2) ||
+                (!m.persistenceAccepted && !m.persistenceBlocked &&
+                 !m.retryAt) ||
+                (!m.persistenceAccepted && m.persistenceBlocked &&
+                 m.admissionAttempts !=
+                     p.persistenceAdmissionAttempts)
+            )
+                return false;
+        }
+        else if (
+            m.admissionAttempts || m.persistenceAccepted ||
+            m.persistenceBlocked || m.persistenceOutcome || m.retryAt
+        )
+            return false;
+    }
+    const auto
+        expectedBattleRevision = m.battle.state ==
+                                         Battle::State::Prepared
+                                     ? 0u
+                                 : m.battle.state ==
+                                         Battle::State::Running
+                                     ? 1u
+                                 : m.battle.state ==
+                                         Battle::State::Finished
+                                     ? 2u
+                                 : m.playedTicks ? 2u
+                                                 : 1u;
+    return m.battle.revision == expectedBattleRevision;
 }
 } // namespace
 
@@ -164,6 +455,40 @@ struct RoomService::State : std::enable_shared_from_this<State>
               )
         {
         }
+        explicit ManagedMatch(const ManagedMatchCheckpoint& saved)
+            : allocation(saved.allocation)
+            , createdUnixMs(saved.createdUnixMs)
+            , startedUnixMs(saved.startedUnixMs)
+            , room(allocation.roomId, saved.room)
+            , battle(
+                  arena::domain::BattleId{allocation.matchId},
+                  allocation.roomId,
+                  saved.battle
+              )
+            , phase(saved.phase)
+            , ready(saved.ready)
+            , presence(saved.presence)
+            , waitedTicks(saved.waitedTicks)
+            , startedTick(saved.startedTick)
+            , finishedTick(saved.finishedTick)
+            , playedTicks(saved.playedTicks)
+            , result(saved.result)
+            , expires(saved.expires)
+            , retryAt(saved.retryAt)
+            , admissionAttempts(saved.admissionAttempts)
+            , persistenceAccepted(saved.persistenceAccepted)
+            , persistenceBlocked(saved.persistenceBlocked)
+        {
+            if (saved.persistenceAccepted &&
+                !saved.persistenceOutcome)
+                return; // External intents deliberately have no
+                        // callback loan.
+            if (saved.persistenceOutcome)
+            {
+                persistence = std::make_shared<PersistenceAttempt>();
+                persistence->outcome.store(saved.persistenceOutcome);
+            }
+        }
         ManagedRoom allocation;
         std::uint64_t createdUnixMs, startedUnixMs{0};
         arena::domain::Room room;
@@ -176,9 +501,9 @@ struct RoomService::State : std::enable_shared_from_this<State>
         std::uint64_t waitedTicks{0}, startedTick{0}, finishedTick{0},
             playedTicks{0};
         std::optional<RoomSettlement> result;
-        std::optional<ConnectionClock::time_point> expires;
+        std::optional<arena::runtime::OwnerClock::time_point> expires;
         std::shared_ptr<PersistenceAttempt> persistence;
-        std::optional<ConnectionClock::time_point> retryAt;
+        std::optional<arena::runtime::OwnerClock::time_point> retryAt;
         std::size_t admissionAttempts{0};
         bool persistenceAccepted{false}, persistenceBlocked{false};
     };
@@ -206,6 +531,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         , config(std::move(limits))
     {
         if (!online || !config.now || !config.wallNow ||
+            (config.externalSettlement && config.persistSettlement) ||
             !config.maxRooms ||
             !config.persistenceAdmissionAttempts ||
             config.persistenceAdmissionAttempts > 32 ||
@@ -229,6 +555,29 @@ struct RoomService::State : std::enable_shared_from_this<State>
             throw std::invalid_argument(
                 "invalid room service configuration"
             );
+    }
+
+    bool durableSettlement() const noexcept
+    {
+        return config.externalSettlement ||
+               static_cast<bool>(config.persistSettlement);
+    }
+
+    /** @brief Reserves only newly created actors, never checkpoint
+     * clones. */
+    std::uint64_t allocateIncarnation()
+    {
+        const auto value = config.incarnationSource
+                               ? config.incarnationSource()
+                               : nextIncarnation(
+                                     incarnationHighWater
+                                 );
+        if (!value || value <= incarnationHighWater)
+            throw std::invalid_argument(
+                "non-increasing room incarnation source"
+            );
+        incarnationHighWater = value;
+        return value;
     }
 
     /** @brief Rejects foreign access before reading owner-affine
@@ -283,7 +632,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
 
     /** @brief Isolates completion exceptions and settles each
      * accepted command once. */
-    static void deliver(Command& command) noexcept
+    static bool deliver(Command& command) noexcept
     {
         try
         {
@@ -315,9 +664,11 @@ struct RoomService::State : std::enable_shared_from_this<State>
                         ? std::move(*command.inputResult)
                         : InputResult(std::unexpected(command.error))
                 );
+            return true;
         }
         catch (...)
         {
+            return false;
         }
     }
 
@@ -414,8 +765,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
             match.finishedTick,
             match.playedTicks,
             config.battleDurationTicks,
-            config.persistSettlement &&
-                    match.phase != RoomPhase::Finished
+            durableSettlement() && match.phase != RoomPhase::Finished
                 ? std::nullopt
                 : match.result
         };
@@ -451,7 +801,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
                 if (match->allocation.matchId == command.matchId &&
                     participant(*match, command) && match->result)
                 {
-                    if (config.persistSettlement &&
+                    if (durableSettlement() &&
                         match->phase != RoomPhase::Finished)
                         command
                             .error = arena::protocol::ERR_UNAVAILABLE;
@@ -661,6 +1011,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         if (accepted)
         {
             current.persistenceAccepted = true;
+            current.retryAt.reset();
             ++counts.persistenceSubmitted;
             logPersistence(current, "room_persistence_submitted");
             return;
@@ -692,6 +1043,17 @@ struct RoomService::State : std::enable_shared_from_this<State>
     void drainPersistence()
     {
         requireOwner();
+        if (processing)
+            return;
+        processing = true;
+        struct Guard
+        {
+            bool& flag;
+            ~Guard()
+            {
+                flag = false;
+            }
+        } guard{processing};
         std::vector<arena::domain::RoomId> ids;
         for (const auto& [id, match] : matches)
             if (match->phase == RoomPhase::Settling)
@@ -738,8 +1100,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         );
         result.startedTick = match.startedTick;
         result.playedTicks = match.playedTicks;
-        if (!config.persistSettlement &&
-            match.phase == RoomPhase::Playing)
+        if (!durableSettlement() && match.phase == RoomPhase::Playing)
         {
             transition(
                 match.battle,
@@ -753,7 +1114,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
                     arena::domain::Room::Event::BattleEnded
                 );
         }
-        else if (!config.persistSettlement)
+        else if (!durableSettlement())
             transition(
                 match.battle,
                 arena::domain::Battle::Event::Abort
@@ -765,7 +1126,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         match.result.emplace(std::move(result));
         match.finishedTick = snapshot.tick;
         match.phase = RoomPhase::Settling;
-        if (!config.persistSettlement)
+        if (!durableSettlement())
         {
             if (reason == SettlementReason::Completed)
                 ++counts.battlesCompleted;
@@ -775,7 +1136,16 @@ struct RoomService::State : std::enable_shared_from_this<State>
         logPhase(id, match);
         if (!running)
             return;
-        if (config.persistSettlement)
+        if (config.externalSettlement)
+        {
+            // The external owner journals this one transferred
+            // intent; no callback or automatic retry is allowed to
+            // reopen its budget.
+            match.admissionAttempts = 1;
+            match.persistenceAccepted = true;
+            ++counts.persistenceSubmitted;
+        }
+        else if (config.persistSettlement)
             progressPersistence(id);
         if (!running)
             return;
@@ -807,7 +1177,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
             config.now(),
             config.resultRetention
         );
-        if (config.persistSettlement)
+        if (durableSettlement())
             transition(
                 match.battle,
                 match.result->reason == SettlementReason::Completed
@@ -824,7 +1194,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         finishRecording(id);
         match.phase = RoomPhase::Finished;
         match.expires = expiry;
-        if (config.persistSettlement)
+        if (durableSettlement())
         {
             ++counts.persistenceCommitted;
             if (match.result->reason == SettlementReason::Completed)
@@ -884,7 +1254,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         {
             if (config.persistSettlement)
                 progressPersistence(id);
-            else
+            else if (!config.externalSettlement)
                 finish(id, match);
             if (!running)
                 return;
@@ -1137,6 +1507,17 @@ struct RoomService::State : std::enable_shared_from_this<State>
     bool openMatch(const ManagedRoom& allocation)
     {
         requireOwner();
+        if (processing)
+            return false;
+        processing = true;
+        struct Guard
+        {
+            bool& flag;
+            ~Guard()
+            {
+                flag = false;
+            }
+        } guard{processing};
         if (!running || !allocation.matchId ||
             actors.size() >= config.maxRooms ||
             config.actor.maxMembers < 2 ||
@@ -1156,7 +1537,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         }
         auto actor = std::make_unique<service::room::RoomActor>(
             allocation.roomId,
-            nextIncarnation(),
+            allocateIncarnation(),
             config.actor
         );
         auto match = std::make_unique<ManagedMatch>(
@@ -1280,7 +1661,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
                                 std::make_unique<
                                     service::room::RoomActor>(
                                     id,
-                                    nextIncarnation(),
+                                    allocateIncarnation(),
                                     config.actor
                                 )
                             )
@@ -1361,8 +1742,20 @@ struct RoomService::State : std::enable_shared_from_this<State>
 
     /** @brief Detaches the cutoff mailbox, then mutates actors
      * exclusively on owner. */
-    void step()
+    bool step()
     {
+        if (processing)
+            return false;
+        processing = true;
+        struct ProcessingGuard
+        {
+            bool& flag;
+            ~ProcessingGuard()
+            {
+                flag = false;
+            }
+        } guard{processing};
+        bool succeeded = true;
         std::vector<Command> batch;
         {
             std::lock_guard lock(mutex);
@@ -1420,13 +1813,16 @@ struct RoomService::State : std::enable_shared_from_this<State>
                 }
                 catch (...)
                 {
-                    // A core step commits atomically. Other rooms can
-                    // keep ticking.
+                    // Timer mode isolates rooms. Explicit candidates
+                    // report failure so their owner can discard all
+                    // partial effects.
+                    succeeded = false;
                 }
             }
         }
         catch (...)
         {
+            succeeded = false;
         }
         for (auto& command : batch)
         {
@@ -1434,8 +1830,9 @@ struct RoomService::State : std::enable_shared_from_this<State>
                 !command.inputResult && !command.statusResult &&
                 !command.settlementResult)
                 command.error = arena::protocol::ERR_UNAVAILABLE;
-            deliver(command);
+            succeeded = deliver(command) && succeeded;
         }
+        return succeeded && running;
     }
 
     /** @brief Arms only the next absolute owner deadline without
@@ -1525,7 +1922,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
                 // Unacknowledged durable results retain registry
                 // fences until registry shutdown; stop must not
                 // impersonate a commit.
-                if (!config.persistSettlement ||
+                if (!durableSettlement() ||
                     match->phase == RoomPhase::Finished)
                     online->finishMatch(
                         id,
@@ -1563,7 +1960,8 @@ struct RoomService::State : std::enable_shared_from_this<State>
     bool accepting{false};
     /// Protected by mutex. At most one owner wake is queued for all
     /// acknowledgements.
-    std::function<void(ConnectionScheduler::Action)> persistenceWake;
+    std::function<void(arena::runtime::OwnerScheduler::Action)>
+        persistenceWake;
     bool persistenceWakePending{false};
     /// The following state is owner-only; callbacks are invoked after
     /// leaving its references.
@@ -1587,10 +1985,18 @@ struct RoomService::State : std::enable_shared_from_this<State>
         RoomLess>
         matches;
     RoomMetrics counts;
-    ConnectionScheduler scheduler;
-    ConnectionTimer timer;
-    ConnectionClock::time_point deadline{};
+    arena::runtime::OwnerScheduler scheduler;
+    arena::runtime::OwnerTimer timer;
+    arena::runtime::OwnerClock::time_point deadline{};
     bool running{false}, started{false};
+    /// Checkpoints reject reentrant owner mutation, including reply
+    /// delivery.
+    bool processing{false};
+    /// A timer-mode restore attaches one scheduler without resetting
+    /// its cut.
+    bool restoredUnbound{false};
+    /// Retired IDs remain reserved even when no actors survive.
+    std::uint64_t incarnationHighWater{0};
 };
 
 RoomService::RoomService(
@@ -1607,21 +2013,29 @@ RoomService::~RoomService() noexcept
 {
     stop();
 }
-void RoomService::start(ConnectionScheduler scheduler)
+void RoomService::start(arena::runtime::OwnerScheduler scheduler)
 {
     auto& state = *m_state;
     state.requireOwner();
-    if (state.started || !scheduler.at || !scheduler.defer)
+    if ((state.started && !state.restoredUnbound) ||
+        (!state.config.externalTicks &&
+         (!scheduler.at || !scheduler.defer)))
         throw std::logic_error(
             "room start requires a fresh service and owner scheduler"
         );
+    const bool restored = state.restoredUnbound;
+    state.restoredUnbound = false;
+    if (restored && !state.running)
+        throw std::logic_error("stopped room service cannot restart");
     state.started = true;
     state.scheduler = std::move(scheduler);
     state.running = true;
     try
     {
-        state.deadline = after(state.config.now(), tickInterval);
-        state.arm();
+        if (!restored)
+            state.deadline = after(state.config.now(), tickInterval);
+        if (!state.config.externalTicks)
+            state.arm();
     }
     catch (...)
     {
@@ -1629,9 +2043,306 @@ void RoomService::start(ConnectionScheduler scheduler)
         throw;
     }
     std::lock_guard lock(state.mutex);
-    state.persistenceWake = state.scheduler.defer;
+    if (!state.config.externalTicks)
+        state.persistenceWake = state.scheduler.defer;
     state.accepting = true;
 }
+
+std::expected<RoomCheckpoint, RoomRecoveryError>
+RoomService::checkpoint() const
+{
+    auto& state = *m_state;
+    state.requireOwner();
+    std::lock_guard lock(state.mutex);
+    if (state.processing || !state.pending.empty() ||
+        !state.recordings.empty() || state.persistenceWakePending)
+        return std::unexpected(RoomRecoveryError::Busy);
+    RoomCheckpoint saved{
+        policy(state.config),
+        {},
+        {},
+        metrics(),
+        state.deadline,
+        state.running,
+        state.started,
+        state.accepting,
+        state.incarnationHighWater
+    };
+    saved.actors.reserve(state.actors.size());
+    saved.matches.reserve(state.matches.size());
+    for (const auto& [id, actor] : state.actors)
+    {
+        (void)id;
+        saved.actors.push_back(actor->snapshot());
+    }
+    for (const auto& [id, value] : state.matches)
+    {
+        (void)id;
+        const auto& m = *value;
+        const auto outcome = m.persistence
+                                 ? m.persistence->outcome.load(
+                                       std::memory_order_acquire
+                                   )
+                                 : 0;
+        if (!state.config.externalSettlement &&
+            m.phase == RoomPhase::Settling && m.persistenceAccepted &&
+            !outcome)
+            return std::unexpected(RoomRecoveryError::Busy);
+        const auto room = m.room.snapshot();
+        const auto battle = m.battle.snapshot();
+        if (!room || !battle)
+            return std::unexpected(RoomRecoveryError::Invalid);
+        saved.matches.push_back(
+            {m.allocation,
+             *room,
+             *battle,
+             m.phase,
+             m.ready,
+             m.presence,
+             m.createdUnixMs,
+             m.startedUnixMs,
+             m.waitedTicks,
+             m.startedTick,
+             m.finishedTick,
+             m.playedTicks,
+             m.result,
+             m.expires,
+             m.retryAt,
+             m.admissionAttempts,
+             m.persistenceAccepted,
+             m.persistenceBlocked,
+             outcome}
+        );
+    }
+    return saved;
+}
+
+std::expected<std::unique_ptr<RoomService>, RoomRecoveryError>
+RoomService::restore(
+    std::shared_ptr<OnlineRegistry> online,
+    const RoomCheckpoint& saved,
+    RoomServiceConfig bindings
+)
+{
+    if (!online || !(saved.policy == policy(bindings)))
+        return std::unexpected(RoomRecoveryError::Invalid);
+    // A published service is constructed only after all owned values
+    // validate. Destruction of a failed staging map must never
+    // release registry members.
+    try
+    {
+        auto restoredService = std::make_unique<RoomService>(
+            online,
+            std::move(bindings)
+        );
+        auto& state = *restoredService->m_state;
+        if (saved.actors.size() > state.config.maxRooms ||
+            saved.matches.size() > saved.actors.size() ||
+            saved.running != saved.accepting ||
+            (saved.running && !saved.started) ||
+            (!saved.running &&
+             (!saved.actors.empty() || !saved.matches.empty())) ||
+            (!saved.started &&
+             saved.deadline !=
+                 arena::runtime::OwnerClock::time_point{}))
+            return std::unexpected(RoomRecoveryError::Invalid);
+        decltype(state.actors) actors;
+        decltype(state.matches) matches;
+        std::set<std::uint64_t> incarnations, matchIds;
+        std::uint64_t previousRoom = 0;
+        for (const auto& value : saved.actors)
+        {
+            if (value.roomId.value() <= previousRoom ||
+                !value.incarnation ||
+                value.incarnation > saved.incarnationHighWater ||
+                !incarnations.insert(value.incarnation).second ||
+                saved.metrics.ticks < value.tick)
+                return std::unexpected(RoomRecoveryError::Invalid);
+            previousRoom = value.roomId.value();
+            auto actor = service::room::RoomActor::restore(
+                value,
+                state.config.actor
+            );
+            if (!actor)
+                return std::unexpected(RoomRecoveryError::Invalid);
+            actors.emplace(value.roomId, std::move(*actor));
+        }
+        const auto registry = online->checkpoint();
+        RoomMetrics gauges;
+        std::uint64_t started = 0, completed = 0, aborted = 0,
+                      submitted = 0, committed = 0, failed = 0;
+        previousRoom = 0;
+        for (const auto& value : saved.matches)
+        {
+            if (saved.policy.callbackSettlement &&
+                value.phase == RoomPhase::Settling &&
+                value.persistenceAccepted &&
+                !value.persistenceOutcome)
+                return std::unexpected(RoomRecoveryError::Busy);
+            const auto id = value.allocation.roomId;
+            const auto actor = actors.find(id);
+            if (id.value() <= previousRoom || actor == actors.end() ||
+                !matchIds.insert(value.allocation.matchId).second ||
+                !validMatch(
+                    value,
+                    actor->second->snapshot(),
+                    saved.policy,
+                    registry
+                ))
+                return std::unexpected(RoomRecoveryError::Invalid);
+            previousRoom = id.value();
+            matches.emplace(
+                id,
+                std::make_unique<State::ManagedMatch>(value)
+            );
+            if (value.phase == RoomPhase::Finished)
+                ++gauges.retainedResults;
+            else
+                ++gauges.managedMatches;
+            if (value.playedTicks)
+                ++started;
+            if (value.persistenceAccepted)
+                ++submitted;
+            if (value.persistenceBlocked)
+                ++failed;
+            if (state.durableSettlement() &&
+                value.phase == RoomPhase::Settling)
+            {
+                ++gauges.pendingSettlements;
+                if (value.persistenceBlocked)
+                    ++gauges.blockedSettlements;
+            }
+            if (value.result && (!state.durableSettlement() ||
+                                 value.phase == RoomPhase::Finished))
+            {
+                if (value.result->reason ==
+                    SettlementReason::Completed)
+                    ++completed;
+                else
+                    ++aborted;
+                if (state.durableSettlement())
+                    ++committed;
+            }
+        }
+        for (const auto& [id, actor] : actors)
+        {
+            (void)actor;
+            if ((id.value() & (std::uint64_t{1} << 63)) &&
+                !matches.contains(id))
+                return std::unexpected(RoomRecoveryError::Invalid);
+        }
+        for (const auto& value : registry.rooms)
+            if (value.managed && actors.contains(value.roomId) &&
+                !matches.contains(value.roomId))
+                return std::unexpected(RoomRecoveryError::Invalid);
+        const auto& counters = saved.metrics;
+        if (counters.actors != actors.size() ||
+            counters.managedMatches != gauges.managedMatches ||
+            counters.retainedResults != gauges.retainedResults ||
+            counters.pendingSettlements !=
+                gauges.pendingSettlements ||
+            counters.blockedSettlements !=
+                gauges.blockedSettlements ||
+            counters.battlesStarted < started ||
+            counters.battlesCompleted < completed ||
+            counters.battlesAborted < aborted ||
+            counters.persistenceSubmitted < submitted ||
+            counters.persistenceCommitted < committed ||
+            counters.persistenceFailed < failed)
+            return std::unexpected(RoomRecoveryError::Invalid);
+        // No operation after publication can fail or invoke a runtime
+        // binding.
+        state.counts = counters;
+        state.counts.actors = state.counts.managedMatches =
+            state.counts.retainedResults = 0;
+        state.counts.pendingSettlements = state.counts
+                                              .blockedSettlements = 0;
+        state.deadline = saved.deadline;
+        state.incarnationHighWater = saved.incarnationHighWater;
+        state.running = saved.running;
+        state.started = saved.started;
+        state.accepting = saved.accepting;
+        state.restoredUnbound = saved.running &&
+                                !state.config.externalTicks;
+        state.actors = std::move(actors);
+        state.matches = std::move(matches);
+        return restoredService;
+    }
+    catch (...)
+    {
+        return std::unexpected(RoomRecoveryError::Invalid);
+    }
+}
+
+bool RoomService::advance()
+{
+    auto& state = *m_state;
+    state.requireOwner();
+    if (!state.config.externalTicks || !state.running ||
+        state.processing)
+        return false;
+    try
+    {
+        state.deadline = after(state.deadline, tickInterval);
+        return state.step();
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool RoomService::acknowledgeSettlement(
+    std::uint64_t matchId, bool committed
+)
+{
+    auto& state = *m_state;
+    state.requireOwner();
+    if (!state.config.externalSettlement || !state.running ||
+        state.processing || !matchId)
+        return false;
+    for (auto& [id, value] : state.matches)
+    {
+        auto& match = *value;
+        if (match.allocation.matchId != matchId)
+            continue;
+        if (match.phase == RoomPhase::Finished)
+            return committed;
+        if (match.phase != RoomPhase::Settling ||
+            !match.persistenceAccepted)
+            return false;
+        if (match.persistenceBlocked)
+            return !committed;
+        state.processing = true;
+        struct Guard
+        {
+            bool& flag;
+            ~Guard()
+            {
+                flag = false;
+            }
+        } guard{state.processing};
+        if (!committed)
+        {
+            match.persistenceBlocked = true;
+            ++state.counts.persistenceFailed;
+            state.logPersistence(match, "room_persistence_failed");
+            return state.running;
+        }
+        try
+        {
+            state.finish(id, match);
+            return state.running;
+        }
+        catch (...)
+        {
+            return false; // Candidate owner discards state and
+                          // captured effects.
+        }
+    }
+    return false;
+}
+
 void RoomService::stop() noexcept
 {
     m_state->stop();
@@ -1734,7 +2445,7 @@ RoomMetrics RoomService::metrics() const
             ++result.retainedResults;
         else
             ++result.managedMatches;
-        if (m_state->config.persistSettlement &&
+        if (m_state->durableSettlement() &&
             match->phase == RoomPhase::Settling)
         {
             ++result.pendingSettlements;

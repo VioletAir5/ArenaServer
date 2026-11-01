@@ -474,5 +474,34 @@ TEST(
     EXPECT_EQ(descriptors(), baseline);
 }
 
+TEST(
+    RuntimeControlTest, FixedHealthPortRestartsAfterCompletedResponse
+)
+{
+    const auto baseline = descriptors();
+    std::uint16_t port = 0;
+    {
+        RuntimeControl initial({});
+        port = initial.port();
+        EXPECT_NE(
+            request(port, "/health/alive").find("200 OK"),
+            std::string::npos
+        );
+        initial.stop();
+    }
+    for (unsigned restart = 0; restart < 3; ++restart)
+    {
+        RuntimeControl::Config config;
+        config.healthPort = port;
+        RuntimeControl replacement(std::move(config));
+        EXPECT_NE(
+            request(port, "/health/alive").find("200 OK"),
+            std::string::npos
+        );
+        replacement.stop();
+    }
+    EXPECT_EQ(descriptors(), baseline);
+}
+
 } // namespace
 } // namespace arena::runtime

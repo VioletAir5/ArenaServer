@@ -9,6 +9,11 @@ message Request {
   string idempotency_key = 5;
   bytes payload = 6;
   string service_token = 7;
+  // Versioned service profiles authenticate the immediate caller and reject cycles.
+  uint32 protocol_version = 8;
+  string caller_service = 9;
+  repeated string service_path = 10;
+  string target_service = 11;
 }
 enum Status {
   OK = 0;
@@ -22,6 +27,8 @@ enum Status {
   INTERNAL = 8;
   OUTCOME_UNKNOWN = 9;
   UNAUTHENTICATED = 10;
+  INCOMPATIBLE_VERSION = 11;
+  CALL_CYCLE = 12;
 }
 message Response {
   uint64 request_id = 1;
@@ -29,4 +36,5 @@ message Response {
   Status status = 3;
   bool retryable = 4;
   bytes payload = 5;
+  uint32 protocol_version = 6;
 }

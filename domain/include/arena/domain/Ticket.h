@@ -82,6 +82,17 @@ public:
         , m_playerId(playerId)
     {
     }
+    /** @brief Rehydrates a validated ticket lifecycle on the current
+     * owner. */
+    Ticket(
+        TicketId id,
+        PlayerId playerId,
+        service::state::Snapshot<State> restored
+    )
+        : Base(id, restored)
+        , m_playerId(playerId)
+    {
+    }
     PlayerId playerId() const noexcept
     {
         return m_playerId;

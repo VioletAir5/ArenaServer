@@ -7,8 +7,9 @@
 #include <chrono>
 #include <memory>
 
-#include "net/ConnectionFeature.h"
 #include "net/OnlineRegistry.h"
+
+#include "runtime/OwnerScheduler.h"
 
 namespace service::gateway
 {
@@ -34,7 +35,7 @@ public:
      */
     OnlineRegistryMaintenance(
         std::shared_ptr<OnlineRegistry> registry,
-        ConnectionScheduler scheduler,
+        arena::runtime::OwnerScheduler scheduler,
         std::chrono::milliseconds interval =
             std::chrono::milliseconds(100)
     );

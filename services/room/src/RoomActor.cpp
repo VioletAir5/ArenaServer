@@ -457,6 +457,22 @@ ReplayLog RoomActor::replayLog() const
     return result;
 }
 
+std::expected<std::unique_ptr<RoomActor>, ReplayFailure>
+RoomActor::restore(const Snapshot& checkpoint, ActorConfig config)
+{
+    const auto validated = replay(ReplayLog{config, checkpoint, {}});
+    if (!validated)
+        return std::unexpected(validated.error());
+    auto actor = std::make_unique<RoomActor>(
+        checkpoint.roomId,
+        checkpoint.incarnation,
+        config
+    );
+    actor->m_state->current = checkpoint;
+    actor->m_state->checkpoint = checkpoint;
+    return actor;
+}
+
 std::expected<ReplayResult, ReplayFailure>
 RoomActor::replay(const ReplayLog& log)
 {

@@ -115,6 +115,66 @@ struct ManagedRoom
     std::array<MatchRoomMember, 2> members;
 };
 
+/** @brief Stores one retained session without callbacks or lease
+ * ownership. */
+struct RegistryEntryCheckpoint
+{
+    /// Complete logical state, including the original monotonic grace
+    /// cutoff.
+    OnlineSnapshot snapshot;
+    /// Last transport tuple remains nonzero even while detached.
+    SessionBinding binding;
+    /// Signed-token wall-clock expiry; recovery does not extend it.
+    std::int64_t expiresAt;
+    /// Online lease revocation flag, sampled without retaining that
+    /// lease.
+    bool leaseValid;
+};
+
+/** @brief Stores both the current reverse index and a historical
+ * cohort. */
+struct RegistryRoomCheckpoint
+{
+    arena::domain::RoomId roomId;
+    /// Sorted retained members; an empty list is valid only for
+    /// managed rooms.
+    std::vector<arena::domain::PlayerId> players;
+    /// Allocation identity survives member expiry and password
+    /// replacement.
+    std::optional<ManagedRoom> managed;
+};
+
+/** @brief Copies physical authority state without pruning or clock
+ * mapping. */
+struct RegistryCheckpoint
+{
+    /// Largest installed authority generation, including previously
+    /// removed entries.
+    std::uint64_t epochWatermark{0};
+    /// Largest allocated logical session, including historical cohort
+    /// members.
+    std::uint64_t sessionWatermark{0};
+    /// Shutdown is irreversible, including after restoration.
+    bool stopped{false};
+    /// Player-sorted records, including expired entries awaiting
+    /// maintenance.
+    std::vector<RegistryEntryCheckpoint> entries;
+    /// Room-sorted indexes and immutable allocation cohorts.
+    std::vector<RegistryRoomCheckpoint> rooms;
+};
+
+enum class RegistryRecoveryError
+{
+    Configuration,
+    Capacity,
+    Identity,
+    Entry,
+    Room,
+    Cohort,
+    Callback,
+    Allocation
+};
+
 struct OnlineRegistryConfig
 {
     /// Bounds retained Online and Detached players together.
@@ -224,6 +284,58 @@ public:
         const service::auth::JwtTokens& tokens,
         std::function<void()> kick
     );
+    /** @brief Installs a candidate authenticated and signed by Auth.
+     *
+     * The trusted Lobby caller reserves a unique epoch durably before
+     * invoking Auth. Completions may arrive out of order: an older
+     * candidate for the same player is rejected without revoking the
+     * current lease. This method performs no signing or remote I/O.
+     * The caller must persist the resulting authority before exposing
+     * its reply outside a transactional candidate.
+     */
+    std::expected<SessionGrant, service::auth::AuthError>
+    installVerified(
+        service::auth::IssuedToken,
+        std::uint64_t connectionId,
+        std::optional<service::auth::TokenClaims> resume,
+        std::function<std::int64_t()> wallNow,
+        std::function<void()> kick
+    );
+    /** @brief Returns the largest installed or initial authority
+     * epoch. Lobby's durable reservation counter may be further
+     * ahead.
+     */
+    std::uint64_t epochWatermark() const;
+    /** @brief Copies all retained state without pruning, clock reads
+     * or kicks. */
+    RegistryCheckpoint checkpoint() const;
+    using KickFactory = std::function<
+        std::function<void()>(SessionBinding)>;
+    /** @brief Builds an isolated authority from a complete validated
+     * checkpoint.
+     *
+     * Clones receive independent leases and never revoke leases in
+     * the source registry. The caller maps persisted monotonic times
+     * before this call. No clock is read and expired entries remain
+     * available for the next cutoff.
+     * @param[in] wallNow Shared authentication clock used by restored
+     * leases.
+     * @param[in] kickFactory Constructs owner callbacks for Online
+     * entries. For a transactional candidate, return callbacks that
+     * only collect effects until the candidate is committed. Factory
+     * creation must not kick live transports.
+     * @return New authority or a typed error without publishing
+     * partial state.
+     */
+    static std::expected<
+        std::shared_ptr<OnlineRegistry>,
+        RegistryRecoveryError>
+    restore(
+        const RegistryCheckpoint&,
+        OnlineRegistryConfig,
+        std::function<std::int64_t()> wallNow,
+        KickFactory kickFactory
+    );
     /** @brief Starts grace once for the exact current transport
      * binding. */
     void detach(SessionBinding) noexcept;
@@ -282,6 +394,21 @@ public:
     void shutdown() noexcept;
 
 private:
+    struct RestoreTag
+    {
+    };
+    OnlineRegistry(OnlineRegistryConfig, RestoreTag);
+    std::expected<SessionGrant, service::auth::AuthError> installWith(
+        arena::domain::PlayerId,
+        std::uint64_t,
+        std::optional<service::auth::TokenClaims>,
+        std::function<std::expected<
+            service::auth::IssuedToken,
+            service::auth::AuthError>(std::uint64_t)>,
+        std::function<std::int64_t()>,
+        std::function<void()>,
+        std::optional<std::uint64_t> = {}
+    );
     struct State;
     /// One mutex-protected authority for player records and both room
     /// indexes.

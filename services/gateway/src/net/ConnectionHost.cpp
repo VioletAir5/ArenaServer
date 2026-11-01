@@ -9,6 +9,8 @@
 #include <utility>
 
 #include "net/BackpressureFeature.h"
+
+#include "runtime/OwnerScheduler.h"
 namespace service::gateway
 {
 // A retained poster owns only this mailbox. In particular foreign
@@ -18,7 +20,8 @@ struct ConnectionHost::Mailbox : std::enable_shared_from_this<Mailbox>
 {
     Mailbox(
         std::thread::id ownerThread,
-        std::function<void(ConnectionScheduler::Action)> schedule
+        std::function<void(arena::runtime::OwnerScheduler::Action)>
+            schedule
     )
         : owner(ownerThread)
         , defer(std::move(schedule))
@@ -99,7 +102,7 @@ struct ConnectionHost::Mailbox : std::enable_shared_from_this<Mailbox>
     const std::thread::id owner;
     /// Owner enqueue function cleared when completion admission
     /// closes.
-    std::function<void(ConnectionScheduler::Action)> defer;
+    std::function<void(arena::runtime::OwnerScheduler::Action)> defer;
     /// Non-owning target, acquired only on the owner thread.
     std::weak_ptr<ConnectionHost> host;
     /// Accepted foreign actions still waiting in the owner executor.
@@ -107,46 +110,10 @@ struct ConnectionHost::Mailbox : std::enable_shared_from_this<Mailbox>
     /// Whether new completion actions may be accepted.
     bool active{false};
 };
-ConnectionTimer::ConnectionTimer(std::function<void()> cancel)
-    : m_cancel(std::move(cancel))
-{
-}
-ConnectionTimer::~ConnectionTimer()
-{
-    reset();
-}
-ConnectionTimer::ConnectionTimer(ConnectionTimer&& other) noexcept
-    : m_cancel(std::exchange(other.m_cancel, {}))
-{
-}
-ConnectionTimer&
-ConnectionTimer::operator=(ConnectionTimer&& other) noexcept
-{
-    if (this != &other)
-    {
-        reset();
-        m_cancel = std::exchange(other.m_cancel, {});
-    }
-    return *this;
-}
-void ConnectionTimer::reset() noexcept
-{
-    if (auto cancel = std::exchange(m_cancel, {}))
-    {
-        try
-        {
-            cancel();
-        }
-        catch (...)
-        {
-            std::terminate();
-        }
-    }
-}
 ConnectionHost::ConnectionHost(
     ITransport::Ptr transport,
     ConnectionContext::Ptr context,
-    ConnectionScheduler scheduler,
+    arena::runtime::OwnerScheduler scheduler,
     ConnectionHandler handler
 )
     : m_transport(std::move(transport))
@@ -449,13 +416,14 @@ const ConnectionContext& ConnectionHost::context() const noexcept
 {
     return *m_context;
 }
-ConnectionTimer ConnectionHost::scheduleAt(
-    ConnectionClock::time_point when, ConnectionAction callback
+arena::runtime::OwnerTimer ConnectionHost::scheduleAt(
+    arena::runtime::OwnerClock::time_point when,
+    ConnectionAction callback
 )
 {
     requireOwner();
     if (m_closing)
-        return ConnectionTimer{};
+        return arena::runtime::OwnerTimer{};
     return m_scheduler.at(
         when,
         [weak = weak_from_this(), callback = std::move(callback)]
@@ -510,7 +478,7 @@ void ConnectionHost::runAction(ConnectionAction action)
 std::shared_ptr<ConnectionHost> makeConnectionHost(
     ITransport::Ptr transport,
     ConnectionContext::Ptr context,
-    ConnectionScheduler scheduler,
+    arena::runtime::OwnerScheduler scheduler,
     const ConnectionHandlerFactory& handlers,
     const ConnectionFeatureFactory& features
 )

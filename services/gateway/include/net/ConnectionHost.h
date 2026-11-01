@@ -9,6 +9,8 @@
 #include "net/ConnectionHandler.h"
 #include "net/ITransport.h"
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway
 {
 /** @brief Coordinates owner-thread connection lifetime and transport
@@ -30,7 +32,7 @@ public:
     ConnectionHost(
         ITransport::Ptr,
         ConnectionContext::Ptr,
-        ConnectionScheduler,
+        arena::runtime::OwnerScheduler,
         ConnectionHandler
     );
     ~ConnectionHost() noexcept override;
@@ -56,8 +58,8 @@ public:
     bool acceptingInput() const noexcept override;
     void setReadPaused(ReadPauseReason, bool) override;
     const ConnectionContext& context() const noexcept override;
-    ConnectionTimer scheduleAt(
-        ConnectionClock::time_point, ConnectionAction
+    arena::runtime::OwnerTimer scheduleAt(
+        arena::runtime::OwnerClock::time_point, ConnectionAction
     ) override;
     ConnectionPost poster() const override;
 
@@ -76,7 +78,7 @@ private:
     /// Immutable identity and owner-thread authentication context.
     ConnectionContext::Ptr m_context;
     /// Owner executor and monotonic timers.
-    ConnectionScheduler m_scheduler;
+    arena::runtime::OwnerScheduler m_scheduler;
     /// Per-connection protocol lifecycle and byte consumer.
     ConnectionHandler m_handler;
     /// Transport pressure and lifecycle policies only.
@@ -115,7 +117,7 @@ private:
 std::shared_ptr<ConnectionHost> makeConnectionHost(
     ITransport::Ptr,
     ConnectionContext::Ptr,
-    ConnectionScheduler,
+    arena::runtime::OwnerScheduler,
     const ConnectionHandlerFactory&,
     const ConnectionFeatureFactory& = {}
 );

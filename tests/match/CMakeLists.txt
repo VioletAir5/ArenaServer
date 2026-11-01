@@ -31,3 +31,13 @@ add_test(NAME MatchmakingTransport_ws
         "$<TARGET_FILE:arena_websocket_test_host>" ws 0)
 set_tests_properties(MatchmakingTransport_ws PROPERTIES
     TIMEOUT 40 RUN_SERIAL TRUE LABELS "integration;network;matchmaking;websocket")
+
+add_executable(arena_match_recovery_tests MatchQueueRecoveryTest.cpp
+    ../domain/StateMachineRecoveryTest.cpp)
+target_link_libraries(arena_match_recovery_tests PRIVATE arena_match GTest::gtest_main)
+target_compile_options(arena_match_recovery_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_match_recovery_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+include(GoogleTest)
+gtest_discover_tests(arena_match_recovery_tests)

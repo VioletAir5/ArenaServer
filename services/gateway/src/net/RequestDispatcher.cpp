@@ -12,6 +12,8 @@
 
 #include "net/RequestExecution.h"
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway
 {
 struct RequestDispatcher::State
@@ -20,8 +22,8 @@ struct RequestDispatcher::State
     {
         ReplyMetadata metadata;
         std::uint64_t generation;
-        ConnectionClock::time_point deadline;
-        ConnectionTimer timer;
+        arena::runtime::OwnerClock::time_point deadline;
+        arena::runtime::OwnerTimer timer;
     };
 
     ConnectionContext::Ptr context;
@@ -138,7 +140,8 @@ struct RequestDispatcher::State
         auto entry = std::move(found->second);
         pending.erase(found);
         entry.timer.reset();
-        const bool expired = ConnectionClock::now() >= entry.deadline;
+        const bool expired = arena::runtime::OwnerClock::now() >=
+                             entry.deadline;
         const bool disconnected = !channel.connected() ||
                                   context->session->superseded();
         entry.metadata.request->execution->retire(
@@ -330,7 +333,7 @@ void RequestDispatcher::dispatch(
 
     const auto id = request->requestId;
     const auto ticket = ++m_state->generation;
-    const auto deadline = ConnectionClock::now() +
+    const auto deadline = arena::runtime::OwnerClock::now() +
                           route->options.timeout;
     const std::weak_ptr<State> weak = m_state;
     auto execution = std::make_shared<RequestExecution>(
@@ -364,7 +367,12 @@ void RequestDispatcher::dispatch(
     metadata.request = owned;
     m_state->pending.emplace(
         id,
-        State::Pending{metadata, ticket, deadline, ConnectionTimer{}}
+        State::Pending{
+            metadata,
+            ticket,
+            deadline,
+            arena::runtime::OwnerTimer{}
+        }
     );
     const RequestCompletion complete =
         [execution](MessageReply result)

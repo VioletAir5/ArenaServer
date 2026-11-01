@@ -13,7 +13,6 @@
 
 #include "net/AsioTcpServer.h"
 #include "net/ConnectionHandler.h"
-#include "net/ConnectionSchedulers.h"
 #include "net/InetAddress.h"
 #include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
@@ -21,6 +20,7 @@
 #include "net/WebSocketServer.h"
 
 #include "TransportTestProfile.h"
+#include "runtime/OwnerScheduler.h"
 
 using namespace service::gateway;
 
@@ -50,14 +50,18 @@ int main(int argc, char** argv)
         &rooms
     );
     if (matcher)
-        matcher->start(connectionScheduler(context.get_executor()));
+        matcher->start(
+            arena::runtime::ownerScheduler(context.get_executor())
+        );
     if (rooms)
-        rooms->start(connectionScheduler(context.get_executor()));
+        rooms->start(
+            arena::runtime::ownerScheduler(context.get_executor())
+        );
     std::unique_ptr<OnlineRegistryMaintenance> upkeep;
     if (online)
         upkeep = std::make_unique<OnlineRegistryMaintenance>(
             online,
-            connectionScheduler(context.get_executor())
+            arena::runtime::ownerScheduler(context.get_executor())
         );
     auto admission = std::make_shared<AdmissionController>(
         AdmissionController::Limits{100, 100}

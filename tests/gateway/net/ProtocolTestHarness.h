@@ -5,6 +5,8 @@
 #include "net/ConnectionHost.h"
 #include "protocol/PacketCodec.hpp"
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway::test
 {
 struct MemoryTransport : ITransport
@@ -55,7 +57,7 @@ struct ProtocolTest : testing::Test
         context = std::make_shared<ConnectionContext>(
             1,
             InetAddress("127.0.0.1", 1),
-            ConnectionClock::now(),
+            arena::runtime::OwnerClock::now(),
             counters
         );
     std::shared_ptr<MemoryTransport>
@@ -69,13 +71,13 @@ struct ProtocolTest : testing::Test
         host = std::make_shared<ConnectionHost>(
             transport,
             context,
-            ConnectionScheduler{
+            arena::runtime::OwnerScheduler{
                 [this](auto task)
                 { posts.push_back(std::move(task)); },
                 [this](auto, auto task)
                 {
                     deadlines.push_back(std::move(task));
-                    return ConnectionTimer{};
+                    return arena::runtime::OwnerTimer{};
                 }
             },
             std::move(handler)

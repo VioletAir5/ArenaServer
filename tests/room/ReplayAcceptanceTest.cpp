@@ -15,11 +15,11 @@
 #include <boost/asio/steady_timer.hpp>
 #include <gtest/gtest.h>
 
-#include "net/ConnectionSchedulers.h"
 #include "net/RoomService.h"
 
 #include "room/ReplayFile.h"
 #include "room/ReplayRecorder.h"
+#include "runtime/OwnerScheduler.h"
 
 using namespace service::room;
 namespace
@@ -361,7 +361,9 @@ TEST(ReplayAcceptanceTest, RoomOwnerArchivePersistsEveryObservedTick)
     config.replays = recorder;
     config.actor.historyTicks = 2;
     gw::RoomService rooms(online, config);
-    rooms.start(gw::connectionScheduler(context.get_executor()));
+    rooms.start(
+        arena::runtime::ownerScheduler(context.get_executor())
+    );
     std::vector<std::pair<std::uint64_t, std::uint64_t>> live;
     std::uint64_t incarnation = 0, membership = 0, sequence = 0;
     bool timedOut = false;

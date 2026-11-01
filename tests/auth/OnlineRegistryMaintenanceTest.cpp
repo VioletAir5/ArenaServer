@@ -10,7 +10,7 @@
 #include <boost/asio/post.hpp>
 #include <gtest/gtest.h>
 
-#include "net/ConnectionSchedulers.h"
+#include "runtime/OwnerScheduler.h"
 
 using namespace service::gateway;
 using namespace std::chrono_literals;
@@ -21,13 +21,13 @@ struct FakeTimers
     struct Timer
     {
         std::shared_ptr<bool> live;
-        ConnectionScheduler::Action action;
+        arena::runtime::OwnerScheduler::Action action;
     };
     std::vector<Timer> timers;
     int schedules{0};
     int failAt{0};
 
-    ConnectionScheduler scheduler()
+    arena::runtime::OwnerScheduler scheduler()
     {
         return {
             {},
@@ -37,7 +37,8 @@ struct FakeTimers
                     throw std::runtime_error("timer allocation");
                 auto live = std::make_shared<bool>(true);
                 timers.push_back({live, std::move(action)});
-                return ConnectionTimer([live] { *live = false; });
+                return arena::runtime::OwnerTimer([live]
+                                                  { *live = false; });
             }
         };
     }
@@ -248,7 +249,7 @@ TEST(
     auto registry = std::make_shared<OnlineRegistry>();
     OnlineRegistryMaintenance upkeep(
         registry,
-        connectionScheduler(context.get_executor())
+        arena::runtime::ownerScheduler(context.get_executor())
     );
     boost::asio::post(context, [&] { upkeep.stop(); });
     EXPECT_GT(context.run(), 0U);

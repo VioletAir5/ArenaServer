@@ -7,6 +7,7 @@
 #include "protocol/EnvelopeCodec.hpp"
 
 #include "ProtocolTestHarness.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace
 {
@@ -244,7 +245,7 @@ TEST(
     auto context = std::make_shared<ConnectionContext>(
         1,
         InetAddress("127.0.0.1", 1),
-        ConnectionClock::now()
+        arena::runtime::OwnerClock::now()
     );
     EXPECT_THROW(
         makeArenaProtocolHandler(context, nullptr),
@@ -261,7 +262,7 @@ TEST(
         (ConnectionContext(
             1,
             InetAddress("127.0.0.1", 1),
-            ConnectionClock::now(),
+            arena::runtime::OwnerClock::now(),
             nullptr
         )),
         std::invalid_argument

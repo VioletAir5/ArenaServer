@@ -9,11 +9,11 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/AsioTcpServer.h"
-#include "net/ConnectionSchedulers.h"
 #include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
 
 #include "TransportTestProfile.h"
+#include "runtime/OwnerScheduler.h"
 
 int main(int argc, char** argv)
 {
@@ -44,14 +44,18 @@ int main(int argc, char** argv)
     using namespace service::gateway;
     boost::asio::io_context context;
     if (matcher)
-        matcher->start(connectionScheduler(context.get_executor()));
+        matcher->start(
+            arena::runtime::ownerScheduler(context.get_executor())
+        );
     if (rooms)
-        rooms->start(connectionScheduler(context.get_executor()));
+        rooms->start(
+            arena::runtime::ownerScheduler(context.get_executor())
+        );
     std::unique_ptr<OnlineRegistryMaintenance> upkeep;
     if (online)
         upkeep = std::make_unique<OnlineRegistryMaintenance>(
             online,
-            connectionScheduler(context.get_executor())
+            arena::runtime::ownerScheduler(context.get_executor())
         );
     boost::asio::signal_set signals(context, SIGTERM, SIGUSR1);
     boost::asio::steady_timer poll(context);

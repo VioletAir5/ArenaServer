@@ -10,6 +10,8 @@
 #include "net/RequestExecution.h"
 #include "net/RoomService.h"
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway
 {
 namespace
@@ -359,7 +361,7 @@ void registerLifecycleRoute(
                                     arena::protocol::ERR_UNAVAILABLE
                                 )
                             );
-                        if (ConnectionClock::now() >=
+                        if (arena::runtime::OwnerClock::now() >=
                             execution->deadline())
                             return complete(
                                 std::unexpected(

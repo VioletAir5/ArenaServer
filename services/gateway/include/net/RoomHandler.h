@@ -7,6 +7,8 @@
 
 #include "net/RoomService.h"
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway
 {
 class MessageRegistry;
@@ -19,7 +21,7 @@ using DurableSettlementLookup = std::function<
     std::expected<std::function<void()>, ErrorCode>(
         arena::domain::PlayerId,
         std::uint64_t,
-        ConnectionClock::time_point,
+        arena::runtime::OwnerClock::time_point,
         std::string,
         RoomService::SettlementCompletion
     )>;

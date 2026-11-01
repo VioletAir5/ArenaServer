@@ -9,6 +9,8 @@
 
 #include "net/ConnectionFeature.h"
 
+#include "runtime/OwnerScheduler.h"
+
 namespace service::gateway
 {
 class ConnectionChannel;
@@ -65,8 +67,9 @@ public:
      * already-ready callbacks also check host lifetime and logical
      * closure before running.
      */
-    virtual ConnectionTimer
-        scheduleAt(ConnectionClock::time_point, ConnectionAction) = 0;
+    virtual arena::runtime::OwnerTimer scheduleAt(
+        arena::runtime::OwnerClock::time_point, ConnectionAction
+    ) = 0;
     /** @brief Returns a thread-safe posting handle valid after host
      * teardown.
      *

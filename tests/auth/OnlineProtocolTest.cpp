@@ -17,6 +17,7 @@
 #include "protocol/PacketCodec.hpp"
 
 #include "auth/LoginAuthenticator.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace
 {
@@ -124,7 +125,7 @@ struct Client
               std::make_shared<ConnectionContext>(
                   id,
                   InetAddress("127.0.0.1", 1),
-                  ConnectionClock::now()
+                  arena::runtime::OwnerClock::now()
               )
           )
     {
@@ -135,7 +136,7 @@ struct Client
              [this](auto, auto task)
              {
                  deadlines.push_back(std::move(task));
-                 return ConnectionTimer{};
+                 return arena::runtime::OwnerTimer{};
              }},
             [routes](auto metadata)
             {
@@ -292,7 +293,7 @@ member(const wire::SessionStateResponse& state, std::uint64_t player)
 
 struct OnlineProtocolTest : testing::Test
 {
-    ConnectionClock::time_point now{};
+    arena::runtime::OwnerClock::time_point now{};
     std::shared_ptr<OnlineRegistry> registry;
     std::shared_ptr<const MessageRegistry> routes;
 
@@ -756,7 +757,7 @@ TEST_F(
 struct AsyncLoginProtocolTest : OnlineProtocolTest
 {
     std::vector<PasswordLoginCompletion> completions;
-    std::vector<ConnectionClock::time_point> budgets;
+    std::vector<arena::runtime::OwnerClock::time_point> budgets;
     std::vector<std::string> correlations;
     std::atomic<unsigned> cancelled{0};
     bool inlineCompletion{false};
@@ -768,7 +769,7 @@ struct AsyncLoginProtocolTest : OnlineProtocolTest
             [this](
                 std::string account,
                 std::string credential,
-                ConnectionClock::time_point deadline,
+                arena::runtime::OwnerClock::time_point deadline,
                 std::string correlation,
                 PasswordLoginCompletion done
             ) -> std::
@@ -822,7 +823,7 @@ TEST_F(
     Client alice(801, routes);
     alice.send(password("alice"));
     ASSERT_EQ(completions.size(), 1);
-    EXPECT_GT(budgets[0], ConnectionClock::now());
+    EXPECT_GT(budgets[0], arena::runtime::OwnerClock::now());
     EXPECT_EQ(correlations[0], "connection-801-request-99");
     EXPECT_EQ(
         alice.context->session->loginState(),

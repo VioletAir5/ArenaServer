@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 
 #include "net/BackpressureFeature.h"
+
+#include "runtime/OwnerScheduler.h"
 using namespace service::gateway;
 static_assert(!std::is_base_of_v<ITransport, ConnectionHost>);
 static_assert(std::is_base_of_v<ConnectionChannel, ConnectionHost>);
@@ -64,9 +66,11 @@ struct ConnectionHostTest : ::testing::Test
         runtime = std::make_shared<ConnectionHost>(
             transport,
             std::make_shared<ConnectionContext>(
-                7, InetAddress("127.0.0.1", 1), ConnectionClock::now()
+                7,
+                InetAddress("127.0.0.1", 1),
+                arena::runtime::OwnerClock::now()
             ),
-            ConnectionScheduler{
+            arena::runtime::OwnerScheduler{
                 [this](auto action)
                 { posted.push_back(std::move(action)); },
                 [this](auto, auto action)
@@ -79,7 +83,9 @@ struct ConnectionHostTest : ::testing::Test
                                 action();
                         }
                     );
-                    return ConnectionTimer([live] { *live = false; });
+                    return arena::runtime::OwnerTimer(
+                        [live] { *live = false; }
+                    );
                 }
             },
             [](auto&, auto) {}
@@ -142,13 +148,13 @@ TEST_F(
     int fired = 0;
     runtime->start();
     auto timer = runtime->scheduleAt(
-        ConnectionClock::now(),
+        arena::runtime::OwnerClock::now(),
         [&](auto&) { ++fired; }
     );
     timer.reset();
     timers[0]();
     auto other = runtime->scheduleAt(
-        ConnectionClock::now(),
+        arena::runtime::OwnerClock::now(),
         [&](auto&) { ++fired; }
     );
     runtime->transportClosed();
@@ -271,7 +277,7 @@ TEST_F(
     runtime->start();
     std::weak_ptr<ConnectionHost> observed = runtime;
     auto timer = runtime->scheduleAt(
-        ConnectionClock::now(),
+        arena::runtime::OwnerClock::now(),
         [&](ConnectionChannel& channel)
         {
             inside = true;
@@ -304,7 +310,11 @@ TEST(BackpressureFeatureTest, RejectsInvalidConfiguration)
         std::invalid_argument
     );
     EXPECT_THROW(
-        BackpressureFeature(2, 4, ConnectionClock::duration::zero()),
+        BackpressureFeature(
+            2,
+            4,
+            arena::runtime::OwnerClock::duration::zero()
+        ),
         std::invalid_argument
     );
 }
@@ -406,7 +416,7 @@ TEST_F(ConnectionHostTest, ForeignChannelControlsRejectBeforeMutation)
             );
             EXPECT_THROW(
                 channel.scheduleAt(
-                    ConnectionClock::now(),
+                    arena::runtime::OwnerClock::now(),
                     [](ConnectionChannel&) {}
                 ),
                 std::logic_error
@@ -449,11 +459,11 @@ TEST(
         std::make_shared<ConnectionContext>(
             7,
             InetAddress("127.0.0.1", 1),
-            ConnectionClock::now()
+            arena::runtime::OwnerClock::now()
         ),
-        ConnectionScheduler{
+        arena::runtime::OwnerScheduler{
             [](auto) {},
-            [](auto, auto) { return ConnectionTimer{}; }
+            [](auto, auto) { return arena::runtime::OwnerTimer{}; }
         },
         std::move(handler)
     );
@@ -478,11 +488,11 @@ TEST(
         std::make_shared<ConnectionContext>(
             7,
             InetAddress("127.0.0.1", 1),
-            ConnectionClock::now()
+            arena::runtime::OwnerClock::now()
         ),
-        ConnectionScheduler{
+        arena::runtime::OwnerScheduler{
             [](auto action) { action(); },
-            [](auto, auto) { return ConnectionTimer{}; }
+            [](auto, auto) { return arena::runtime::OwnerTimer{}; }
         },
         [](auto&, auto) {}
     );
@@ -501,7 +511,7 @@ TEST(ConnectionAuthLifecycleTest, CloseHandleMayDisconnectInline)
     auto context = std::make_shared<ConnectionContext>(
         7,
         InetAddress("127.0.0.1", 1),
-        ConnectionClock::now()
+        arena::runtime::OwnerClock::now()
     );
     int closed = 0;
     context->session->setCloseRequest(
@@ -535,12 +545,13 @@ struct ConnectionHostDrainTest : ::testing::Test
             std::make_shared<ConnectionContext>(
                 7,
                 InetAddress("127.0.0.1", 1),
-                ConnectionClock::now()
+                arena::runtime::OwnerClock::now()
             ),
-            ConnectionScheduler{
+            arena::runtime::OwnerScheduler{
                 [this](auto action)
                 { posted.push_back(std::move(action)); },
-                [](auto, auto) { return ConnectionTimer{}; }
+                [](auto, auto)
+                { return arena::runtime::OwnerTimer{}; }
             },
             [handler = std::move(handler)](auto) { return handler; },
             [](auto&, const auto&) {}

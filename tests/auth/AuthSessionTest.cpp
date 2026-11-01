@@ -17,6 +17,7 @@
 
 #include "auth/JwtTokens.h"
 #include "auth/LoginAuthenticator.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace
 {
@@ -539,7 +540,7 @@ struct Client
               std::make_shared<ConnectionContext>(
                   id,
                   InetAddress("127.0.0.1", 1),
-                  ConnectionClock::now(),
+                  arena::runtime::OwnerClock::now(),
                   std::make_shared<RejectionCounters>()
               )
           )
@@ -549,7 +550,7 @@ struct Client
             context,
             {[this](auto action)
              { posts.push_back(std::move(action)); },
-             [](auto, auto) { return ConnectionTimer{}; }},
+             [](auto, auto) { return arena::runtime::OwnerTimer{}; }},
             [routes](auto ctx)
             { return makePreLoginHandshakeHandler(ctx, routes); }
         );

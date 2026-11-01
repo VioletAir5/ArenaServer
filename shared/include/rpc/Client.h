@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -19,6 +20,9 @@
 
 namespace arena::internal_rpc
 {
+inline constexpr std::uint32_t protocolVersion = 1;
+inline constexpr std::size_t maxServiceHops = 8;
+
 namespace detail
 {
 struct Operation;
@@ -34,6 +38,9 @@ struct Context
     /// Bounded public correlation identity; never include
     /// credentials.
     std::string correlationId;
+    /// Validated visited services, including the current handler's
+    /// owner.
+    std::vector<std::string> servicePath{};
 };
 
 struct Options

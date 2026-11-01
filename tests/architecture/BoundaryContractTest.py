@@ -47,14 +47,23 @@ def main():
 
     baseline = module.analyze(root, contract, policy)
     check(baseline['passed'], str(baseline['issues']))
-    check(len(baseline['contracts']['declared']) == 7, 'actual Storage contract coverage changed')
+    check(len(baseline['contracts']['declared']) == 8, 'actual Auth/Storage contract coverage changed')
     check(baseline['contracts']['declared'] == baseline['contracts']['registered'],
           'a declared method is missing an actual dispatch registration')
     check(all(not cycles for cycles in baseline['cycles'].values()), 'baseline dependency cycle')
     check({entry['method'] for entry in baseline['contracts']['native_and_python_calls']} ==
-          {'account.find', 'match.allocate_ids', 'match.save_result', 'match.get', 'settlement.get', 'health.ready'},
+          {'account.find', 'auth.authenticate', 'match.allocate_ids', 'match.save_result', 'match.get', 'settlement.get', 'health.ready'},
           'current native method coverage must follow real source calls')
-    cases.append(dict(name='current_production_sources_and_seven_rpc_contracts', passed=True))
+    check(baseline['contracts']['qualified_declared'] == baseline['contracts']['qualified_registered']
+          and len(baseline['contracts']['qualified_declared']) == 9,
+          'service-qualified registrations must include both real health handlers')
+    check({'auth/auth.authenticate', 'auth/health.ready', 'storage/health.ready'} <=
+          set(baseline['contracts']['qualified_declared']), 'native listener coverage missing')
+    messages, _ = module._proto((root/'shared/proto/auth.proto').read_text())
+    check(messages['AuthenticateRequest']['proposed_epoch'] == ('uint64', 1)
+          and messages['AuthenticateRequest']['credential_kind'] == ('CredentialKind', 2),
+          'nested enum must not hide its enclosing message fields')
+    cases.append(dict(name='current_production_sources_and_nine_qualified_rpc_contracts', passed=True))
 
     def mutation(name, mutate, code):
         with tempfile.TemporaryDirectory(prefix='arena-boundary-') as directory:
@@ -205,6 +214,94 @@ def main():
         path.write_text(value)
     mutation('literal_registration_rows_must_match_actual_loop_binding',
              mismatched_loop_binding, 'contract_registration_dynamic')
+    def native_source_change(tree, old, new):
+        path = tree/'services/auth/app/main.cpp'
+        value = path.read_text()
+        check(old in value, 'native registration fixture no longer matches actual source')
+        path.write_text(value.replace(old, new, 1))
+
+    def auth_contract_change(tree, edit):
+        path = tree/'services/auth/contract.json'
+        value = json.loads(path.read_text())
+        edit(value)
+        text(path, json.dumps(value))
+
+    mutation('native_method_must_have_a_contract',
+        lambda tree: native_source_change(tree, '"auth.authenticate",', '"auth.extra",'),
+        'contract_orphan')
+    mutation('native_dynamic_method_cannot_hide_a_registration',
+        lambda tree: native_source_change(tree, '"auth.authenticate",', 'methodName,'),
+        'contract_registration_dynamic')
+    mutation('native_request_type_matches_actual_parser',
+        lambda tree: native_source_change(tree, 'arena::auth::AuthenticateRequest credential;',
+                                         'arena::storage::PlayerGetRequest credential;'),
+        'contract_registration')
+    mutation('native_reply_type_matches_actual_serialization',
+        lambda tree: auth_contract_change(tree, lambda value: value['methods'][1].update(
+            response='arena.storage.PlayerGetReply')), 'contract_response')
+    mutation('native_unconsumed_map_is_not_treated_as_a_listener',
+        lambda tree: native_source_change(tree, 'std::move(handlers)', 'Server::Handlers{}'),
+        'contract_registration_dynamic')
+    mutation('native_map_removal_is_rejected',
+        lambda tree: native_source_change(tree, '    Server server(',
+            '    handlers.erase("auth.authenticate");\n    Server server('),
+        'contract_registration_dynamic')
+    mutation('native_duplicate_method_is_rejected',
+        lambda tree: native_source_change(tree, '    Server server(',
+            '    handlers.emplace("health.ready", [](auto, auto, auto) {});\n    Server server('),
+        'contract_registration_dynamic')
+    mutation('native_service_cannot_omit_its_contract',
+        lambda tree: text(tree/'services/lobby/app/Uncatalogued.cpp',
+            'void bind() { Server::Handlers handlers; '
+            'handlers.emplace("lobby.extra", [](auto, auto, auto) {}); '
+            'Server server(executor, config, std::move(handlers)); }\n'),
+        'contract_native_undeclared')
+    mutation('native_declared_budget_must_match_real_server',
+        lambda tree: auth_contract_change(tree, lambda value: value['transport'].update(
+            max_timeout_ms=2000)), 'contract_transport')
+    mutation('native_explicit_wrong_target_is_not_inferred_away',
+        lambda tree: text(tree/'services/lobby/src/BadTarget.cpp',
+            'void forward() { arena::rpc::Request wire; wire.set_method("auth.authenticate"); '
+            'wire.set_target_service("storage"); }\n'), 'rpc_undeclared')
+
+    def ambiguous_payload(tree):
+        text(tree/'shared/proto/ambiguous.proto',
+             'syntax = "proto3"; package arena.other; message AuthenticateReply { uint64 id=1; }\n')
+        auth_contract_change(tree, lambda value: value['methods'][1].update(response='AuthenticateReply'))
+    mutation('ambiguous_short_proto_name_requires_qualification', ambiguous_payload, 'contract_proto')
+    mutation('native_protocol_version_tag_is_stable',
+        lambda tree: text(tree/'shared/proto/rpc.proto',
+            (tree/'shared/proto/rpc.proto').read_text().replace(
+                'uint32 protocol_version = 8;', 'uint32 protocol_version = 15;')),
+        'rpc_envelope')
+
+    mutation('malformed_native_payload_schema_reports_a_diagnostic',
+        lambda tree: text(tree/'shared/proto/auth.proto',
+            'syntax = "proto3"; package arena.auth; message AuthenticateRequest { uint64 epoch=1;'),
+        'proto_parse')
+
+    def native_registration_decoy(tree):
+        path = tree/'services/auth/app/main.cpp'
+        value = path.read_text()
+        start = value.index('    handlers.emplace(\n        "auth.authenticate",')
+        begin = value.index('(', start)
+        end = module._balanced_end(module._cpp(value), begin, '(', ')') + 2
+        decoy = '    const char* decoy = R"ARENA(' + value[start:end] + ')ARENA";\n'
+        path.write_text(value[:start] + decoy + value[end:])
+    mutation('raw_string_cannot_replace_an_actual_native_registration',
+             native_registration_decoy, 'contract_registration')
+    mutation('explicit_dynamic_rpc_target_cannot_be_inferred_away',
+        lambda tree: text(tree/'services/lobby/src/BadDynamicTarget.cpp',
+            'void forward() { arena::rpc::Request wire; wire.set_method("auth.authenticate"); '
+            'wire.set_target_service(runtimeTarget); }\n'), 'dynamic_rpc_target')
+    def serialized_reply_decoy(tree):
+        path = 'services/auth/DecoyReply.cpp'
+        text(tree/path, 'const char* decoy = R"(arena::auth::AuthenticateReply grant; '
+                       'grant.SerializeAsString();)";\n')
+        auth_contract_change(tree, lambda value: value['methods'][1].update(response_implementation=path))
+    mutation('reply_serialization_inside_a_string_is_not_a_handler',
+             serialized_reply_decoy, 'contract_response')
+
     report = dict(passed=True, scope='normal source boundary and executable contract acceptance',
         cases=cases, elapsed_seconds=time.monotonic()-started,
         source_inventory=baseline['inventory'], baseline_cycles=baseline['cycles'],

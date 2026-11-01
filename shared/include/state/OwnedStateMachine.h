@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 
@@ -74,6 +75,56 @@ template <typename Definition> consteval bool validDefinition()
     }
     return true;
 }
+/** @brief Tests exact transition-count reachability without replaying
+ * events. */
+template <typename Definition>
+bool reachableAtRevision(
+    typename Definition::State target, std::uint64_t revision
+) noexcept
+{
+    constexpr auto size = Definition::states.size();
+    using Reachable = std::array<bool, size>;
+    using Matrix = std::array<Reachable, size>;
+    const auto index = [](typename Definition::State state)
+    {
+        for (std::size_t i = 0; i < size; ++i)
+            if (Definition::states[i] == state)
+                return i;
+        return size;
+    };
+    const auto destination = index(target);
+    if (destination == size)
+        return false;
+    Matrix edges{};
+    for (const auto rule : Definition::rules)
+        edges[index(rule.from)][index(rule.to)] = true;
+    Reachable reached{};
+    reached[index(Definition::initial)] = true;
+    while (revision)
+    {
+        if (revision & 1)
+        {
+            Reachable next{};
+            for (std::size_t from = 0; from < size; ++from)
+                for (std::size_t to = 0; to < size; ++to)
+                    next[to] = next[to] ||
+                               (reached[from] && edges[from][to]);
+            reached = next;
+        }
+        revision >>= 1;
+        if (!revision)
+            break;
+        Matrix squared{};
+        for (std::size_t from = 0; from < size; ++from)
+            for (std::size_t via = 0; via < size; ++via)
+                for (std::size_t to = 0; to < size; ++to)
+                    squared[from][to] = squared[from][to] ||
+                                        (edges[from][via] &&
+                                         edges[via][to]);
+        edges = squared;
+    }
+    return reached[destination];
+}
 } // namespace detail
 
 // Construct and mutate on one executor thread. Foreign access rejects
@@ -89,11 +140,26 @@ public:
     static_assert(std::is_enum_v<State> && std::is_enum_v<Event>);
     static_assert(detail::validDefinition<Definition>());
 
-    // Infrastructure callers may supply a starting revision;
-    // domain entities always construct with revision zero.
+    // Infrastructure callers may supply a starting revision. Fresh
+    // domain entities start at zero; recovery uses the validated
+    // snapshot constructor.
     explicit OwnedStateMachine(std::uint64_t revision = 0)
         : m_revision(revision)
     {
+    }
+    /** @brief Rehydrates one validated state on its new construction
+     * owner. */
+    explicit OwnedStateMachine(Snapshot<State> restored)
+        : m_state(restored.state)
+        , m_revision(restored.revision)
+    {
+        if (!detail::reachableAtRevision<Definition>(
+                restored.state,
+                restored.revision
+            ))
+            throw std::invalid_argument(
+                "invalid restored state machine snapshot"
+            );
     }
     OwnedStateMachine(const OwnedStateMachine&) = delete;
     OwnedStateMachine& operator=(const OwnedStateMachine&) = delete;

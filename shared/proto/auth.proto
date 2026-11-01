@@ -1,0 +1,25 @@
+syntax = "proto3";
+package arena.auth;
+
+// Only the authenticated Lobby role may request identity verification and signing.
+message AuthenticateRequest {
+  enum CredentialKind {
+    PASSWORD = 0;
+    JWT = 1;
+  }
+  uint64 proposed_epoch = 1;
+  CredentialKind credential_kind = 2;
+  string account = 3;
+  string credential = 4;
+}
+
+// A signed candidate is installed only after Lobby rechecks its authority revision.
+message AuthenticateReply {
+  uint64 player_id = 1;
+  uint64 epoch = 2;
+  int64 expires_at_unix = 3;
+  string session_token = 4;
+  bool resumed = 5;
+  uint64 previous_epoch = 6;
+  int64 previous_expires_at_unix = 7;
+}

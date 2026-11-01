@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,6 +28,14 @@ OnlineRegistryConfig withMaximum(std::size_t maximum)
     OnlineRegistryConfig config;
     config.maxPlayers = maximum;
     return config;
+}
+
+bool validConfiguration(const OnlineRegistryConfig& config)
+{
+    return config.maxPlayers && config.maxRooms &&
+           config.maxRoomMembers &&
+           config.grace > std::chrono::milliseconds::zero() &&
+           config.grace <= std::chrono::hours(1) && config.now;
 }
 
 bool sameBinding(
@@ -273,9 +282,13 @@ bool SessionLease::current() const
 
 void SessionLease::release() noexcept
 {
-    m_valid.store(false, std::memory_order_release);
+    // Revoke with presence and grace under the same authority lock so
+    // a checkpoint cannot capture an Online entry with an already
+    // revoked lease.
     if (auto directory = m_directory.lock())
         directory->detach(binding);
+    // A replaced or retired directory may no longer own this binding.
+    m_valid.store(false, std::memory_order_release);
 }
 
 OnlineRegistry::OnlineRegistry(std::size_t maximum)
@@ -283,17 +296,20 @@ OnlineRegistry::OnlineRegistry(std::size_t maximum)
 {
 }
 
-OnlineRegistry::OnlineRegistry(OnlineRegistryConfig config)
+OnlineRegistry::OnlineRegistry(
+    OnlineRegistryConfig config, RestoreTag
+)
     : m_state(std::make_unique<State>(std::move(config)))
 {
-    const auto& settings = m_state->config;
-    if (!settings.maxPlayers || !settings.maxRooms ||
-        !settings.maxRoomMembers ||
-        settings.grace <= std::chrono::milliseconds::zero() ||
-        settings.grace > std::chrono::hours(1) || !settings.now)
+    if (!validConfiguration(m_state->config))
         throw std::invalid_argument(
             "invalid online registry limits or clock"
         );
+}
+
+OnlineRegistry::OnlineRegistry(OnlineRegistryConfig config)
+    : OnlineRegistry(std::move(config), RestoreTag{})
+{
     std::uint64_t seeds[2]{};
     if (RAND_bytes(
             reinterpret_cast<unsigned char*>(seeds),
@@ -322,8 +338,354 @@ OnlineRegistry::install(
     std::function<void()> kick
 )
 {
+    return installWith(
+        player,
+        connection,
+        std::move(resume),
+        [&tokens, player](std::uint64_t epoch)
+        { return tokens.issue(player, epoch); },
+        tokens.clock(),
+        std::move(kick)
+    );
+}
+
+std::expected<SessionGrant, service::auth::AuthError>
+OnlineRegistry::installVerified(
+    service::auth::IssuedToken token,
+    std::uint64_t connection,
+    std::optional<service::auth::TokenClaims> resume,
+    std::function<std::int64_t()> wallNow,
+    std::function<void()> kick
+)
+{
+    const auto player = token.claims.playerId;
+    const auto epoch = token.claims.epoch;
+    if (!epoch || token.encoded.empty() ||
+        token.encoded.size() > 4096 || !wallNow ||
+        token.claims.expiresAt <= wallNow())
+        return std::unexpected(
+            service::auth::AuthError::InvalidCredentials
+        );
+    return installWith(
+        player,
+        connection,
+        std::move(resume),
+        [token = std::move(token)](std::uint64_t) mutable
+            -> std::expected<
+                service::auth::IssuedToken,
+                service::auth::AuthError>
+        { return std::move(token); },
+        std::move(wallNow),
+        std::move(kick),
+        epoch
+    );
+}
+
+std::uint64_t OnlineRegistry::epochWatermark() const
+{
+    std::lock_guard lock(m_state->mutex);
+    return m_state->epoch;
+}
+
+RegistryCheckpoint OnlineRegistry::checkpoint() const
+{
+    std::lock_guard lock(m_state->mutex);
+    RegistryCheckpoint result;
+    result.epochWatermark = m_state->epoch;
+    result.sessionWatermark = m_state->sessionId;
+    result.stopped = m_state->stopped;
+    result.entries.reserve(m_state->players.size());
+    for (const auto& [id, entry] : m_state->players)
+    {
+        (void)id;
+        result.entries.push_back(
+            {entry.snapshot,
+             entry.binding,
+             entry.expiresAt,
+             entry.active && entry.active->m_valid.load(
+                                 std::memory_order_acquire
+                             )}
+        );
+    }
+    std::sort(
+        result.entries.begin(),
+        result.entries.end(),
+        [](const auto& left, const auto& right)
+        {
+            return left.snapshot.playerId.value() <
+                   right.snapshot.playerId.value();
+        }
+    );
+    result.rooms.reserve(m_state->rooms.size());
+    for (const auto& [id, room] : m_state->rooms)
+    {
+        RegistryRoomCheckpoint saved{
+            arena::domain::RoomId{id},
+            {},
+            room.managed
+        };
+        saved.players.reserve(room.players.size());
+        for (const auto player : room.players)
+            saved.players.emplace_back(player);
+        std::sort(
+            saved.players.begin(),
+            saved.players.end(),
+            [](const auto& left, const auto& right)
+            { return left.value() < right.value(); }
+        );
+        result.rooms.push_back(std::move(saved));
+    }
+    std::sort(
+        result.rooms.begin(),
+        result.rooms.end(),
+        [](const auto& left, const auto& right)
+        { return left.roomId.value() < right.roomId.value(); }
+    );
+    return result;
+}
+
+std::expected<std::shared_ptr<OnlineRegistry>, RegistryRecoveryError>
+OnlineRegistry::restore(
+    const RegistryCheckpoint& checkpoint,
+    OnlineRegistryConfig config,
+    std::function<std::int64_t()> wallNow,
+    KickFactory kickFactory
+)
+try
+{
+    using Error = RegistryRecoveryError;
+    if (!validConfiguration(config) || !wallNow)
+        return std::unexpected(Error::Configuration);
+    if (checkpoint.entries.size() > config.maxPlayers ||
+        checkpoint.rooms.size() > config.maxRooms)
+        return std::unexpected(Error::Capacity);
+    if (checkpoint.stopped &&
+        (!checkpoint.entries.empty() || !checkpoint.rooms.empty()))
+        return std::unexpected(Error::Entry);
+
+    std::unordered_map<std::uint64_t, const RegistryEntryCheckpoint*>
+        entries;
+    std::unordered_set<std::uint64_t> epochs, sessions, connections;
+    std::unordered_map<std::uint64_t, std::uint64_t> sessionOwners;
+    entries.reserve(checkpoint.entries.size());
+    for (const auto& entry : checkpoint.entries)
+    {
+        const auto& snapshot = entry.snapshot;
+        const auto player = snapshot.playerId.value();
+        const auto session = snapshot.sessionId.value();
+        if (!snapshot.epoch ||
+            snapshot.epoch > checkpoint.epochWatermark ||
+            session > checkpoint.sessionWatermark ||
+            !entries.emplace(player, &entry).second ||
+            !epochs.insert(snapshot.epoch).second ||
+            !sessions.insert(session).second)
+            return std::unexpected(Error::Identity);
+        sessionOwners.emplace(session, player);
+        if (entry.binding.playerId != snapshot.playerId ||
+            entry.binding.epoch != snapshot.epoch ||
+            !entry.binding.connectionId || entry.expiresAt <= 0 ||
+            (snapshot.roomId && !snapshot.roomEpoch))
+            return std::unexpected(Error::Entry);
+        switch (snapshot.presence)
+        {
+        case Presence::Online:
+            if (snapshot.connectionId != entry.binding.connectionId ||
+                snapshot.graceDeadline || !entry.leaseValid ||
+                !connections.insert(snapshot.connectionId).second)
+                return std::unexpected(Error::Entry);
+            if (!kickFactory)
+                return std::unexpected(Error::Callback);
+            break;
+        case Presence::Detached:
+            if (snapshot.connectionId || !snapshot.graceDeadline ||
+                entry.leaseValid)
+                return std::unexpected(Error::Entry);
+            break;
+        default:
+            return std::unexpected(Error::Entry);
+        }
+    }
+
+    std::unordered_set<std::uint64_t> roomIds, indexedPlayers,
+        cohortSessions;
+    for (const auto& room : checkpoint.rooms)
+    {
+        const auto id = room.roomId.value();
+        if (!roomIds.insert(id).second)
+            return std::unexpected(Error::Room);
+        if (room.players.size() > config.maxRoomMembers)
+            return std::unexpected(Error::Capacity);
+        if (static_cast<bool>(id & managedRoomBit) !=
+                room.managed.has_value() ||
+            (!room.managed && room.players.empty()))
+            return std::unexpected(Error::Room);
+        if (room.managed)
+        {
+            const auto& allocation = *room.managed;
+            if (!allocation.matchId ||
+                (allocation.matchId & managedRoomBit) ||
+                allocation.roomId != room.roomId ||
+                (managedRoomBit | allocation.matchId) != id ||
+                config.maxRoomMembers < 2 ||
+                allocation.members[0].playerId.value() >=
+                    allocation.members[1].playerId.value() ||
+                allocation.members[0].sessionId ==
+                    allocation.members[1].sessionId)
+                return std::unexpected(Error::Cohort);
+            for (const auto& member : allocation.members)
+            {
+                if (!member.roomEpoch ||
+                    member.roomEpoch == UINT64_MAX ||
+                    member.initialMmr > 10000 ||
+                    member.sessionId.value() >
+                        checkpoint.sessionWatermark ||
+                    !cohortSessions.insert(member.sessionId.value())
+                         .second)
+                    return std::unexpected(Error::Cohort);
+                const auto [owner, inserted] = sessionOwners.emplace(
+                    member.sessionId.value(),
+                    member.playerId.value()
+                );
+                if (!inserted &&
+                    owner->second != member.playerId.value())
+                    return std::unexpected(Error::Cohort);
+                const auto found = entries.find(
+                    member.playerId.value()
+                );
+                if (found != entries.end() &&
+                    found->second->snapshot.sessionId ==
+                        member.sessionId)
+                {
+                    const auto& current = found->second->snapshot;
+                    if (current.roomId != room.roomId ||
+                        current.roomEpoch != member.roomEpoch ||
+                        std::find(
+                            room.players.begin(),
+                            room.players.end(),
+                            member.playerId
+                        ) == room.players.end())
+                        return std::unexpected(Error::Cohort);
+                }
+            }
+        }
+        for (const auto player : room.players)
+        {
+            const auto found = entries.find(player.value());
+            if (!indexedPlayers.insert(player.value()).second ||
+                found == entries.end() ||
+                found->second->snapshot.roomId != room.roomId)
+                return std::unexpected(Error::Room);
+            if (room.managed)
+            {
+                const auto& current = found->second->snapshot;
+                const auto& members = room.managed->members;
+                const auto member = std::find_if(
+                    members.begin(),
+                    members.end(),
+                    [&](const auto& value)
+                    { return value.playerId == player; }
+                );
+                if (member == members.end() ||
+                    member->sessionId != current.sessionId ||
+                    member->roomEpoch != current.roomEpoch)
+                    return std::unexpected(Error::Cohort);
+            }
+        }
+    }
+    for (const auto& [player, entry] : entries)
+        if (entry->snapshot.roomId.has_value() !=
+            indexedPlayers.contains(player))
+            return std::unexpected(Error::Room);
+
+    // Prepare leases off-directory: a failed factory/allocation
+    // leaves the candidate empty, so its destructor cannot emit
+    // partial close effects.
+    auto candidate = std::shared_ptr<OnlineRegistry>(
+        new OnlineRegistry(std::move(config), RestoreTag{})
+    );
+    decltype(State::players) preparedPlayers;
+    decltype(State::rooms) preparedRooms;
+    preparedPlayers.reserve(checkpoint.entries.size());
+    preparedRooms.reserve(checkpoint.rooms.size());
+    for (const auto& entry : checkpoint.entries)
+    {
+        std::shared_ptr<SessionLease> lease;
+        if (entry.snapshot.presence == Presence::Online)
+        {
+            std::function<void()> kick;
+            try
+            {
+                kick = kickFactory(entry.binding);
+            }
+            catch (const std::bad_alloc&)
+            {
+                throw;
+            }
+            catch (...)
+            {
+                return std::unexpected(Error::Callback);
+            }
+            if (!kick)
+                return std::unexpected(Error::Callback);
+            lease = std::shared_ptr<SessionLease>(new SessionLease(
+                entry.binding,
+                entry.expiresAt,
+                wallNow,
+                std::move(kick),
+                candidate
+            ));
+        }
+        preparedPlayers.emplace(
+            entry.snapshot.playerId.value(),
+            State::Entry{
+                entry.snapshot,
+                entry.binding,
+                entry.expiresAt,
+                wallNow,
+                std::move(lease)
+            }
+        );
+    }
+    for (const auto& room : checkpoint.rooms)
+    {
+        State::Room prepared;
+        prepared.players.reserve(room.players.size());
+        for (const auto player : room.players)
+            prepared.players.insert(player.value());
+        prepared.managed = room.managed;
+        preparedRooms.emplace(
+            room.roomId.value(),
+            std::move(prepared)
+        );
+    }
+    candidate->m_state->players.swap(preparedPlayers);
+    candidate->m_state->rooms.swap(preparedRooms);
+    candidate->m_state->epoch = checkpoint.epochWatermark;
+    candidate->m_state->sessionId = checkpoint.sessionWatermark;
+    candidate->m_state->stopped = checkpoint.stopped;
+    return candidate;
+}
+catch (const std::bad_alloc&)
+{
+    return std::unexpected(RegistryRecoveryError::Allocation);
+}
+
+std::expected<SessionGrant, service::auth::AuthError>
+OnlineRegistry::installWith(
+    arena::domain::PlayerId player,
+    std::uint64_t connection,
+    std::optional<service::auth::TokenClaims> resume,
+    std::function<std::expected<
+        service::auth::IssuedToken,
+        service::auth::AuthError>(std::uint64_t)> issue,
+    std::function<std::int64_t()> wallNow,
+    std::function<void()> kick,
+    std::optional<std::uint64_t> approvedEpoch
+)
+{
     using service::auth::AuthError;
-    if (!connection || !kick || weak_from_this().expired())
+    if (!connection || !kick || !wallNow ||
+        weak_from_this().expired())
         throw std::invalid_argument(
             "online install requires identity, shared registry and "
             "closer"
@@ -339,7 +701,7 @@ OnlineRegistry::install(
                    found == m_state->players.end() ||
                    found->second.snapshot.epoch != resume->epoch ||
                    found->second.expiresAt != resume->expiresAt ||
-                   tokens.now() >= resume->expiresAt))
+                   wallNow() >= resume->expiresAt))
         return std::unexpected(AuthError::Superseded);
     if (found == m_state->players.end() &&
         m_state->players.size() >= m_state->config.maxPlayers)
@@ -350,14 +712,27 @@ OnlineRegistry::install(
             m_state->players.size() >= m_state->config.maxPlayers)
             return std::unexpected(AuthError::Unavailable);
     }
-    if (m_state->epoch == std::numeric_limits<std::uint64_t>::max() ||
+    if ((!approvedEpoch &&
+         m_state->epoch ==
+             std::numeric_limits<std::uint64_t>::max()) ||
         (!resume && m_state->sessionId ==
                         std::numeric_limits<std::uint64_t>::max()))
         return std::unexpected(AuthError::Unavailable);
-    const auto nextEpoch = m_state->epoch + 1;
-    auto token = tokens.issue(player, nextEpoch);
+    if (approvedEpoch &&
+        (!*approvedEpoch ||
+         (found != m_state->players.end() &&
+          *approvedEpoch <= found->second.snapshot.epoch)))
+        return std::unexpected(AuthError::Superseded);
+    const auto nextEpoch = approvedEpoch ? *approvedEpoch
+                                         : m_state->epoch + 1;
+    auto token = issue(nextEpoch);
     if (!token)
         return std::unexpected(token.error());
+    if (token->claims.playerId != player ||
+        token->claims.epoch != nextEpoch ||
+        token->claims.expiresAt <= wallNow() ||
+        token->encoded.empty())
+        return std::unexpected(AuthError::InvalidCredentials);
     const auto identity = resume ? found->second.snapshot.sessionId
                                  : arena::domain::SessionId{
                                        m_state->sessionId + 1
@@ -375,7 +750,7 @@ OnlineRegistry::install(
     auto lease = std::shared_ptr<SessionLease>(new SessionLease(
         {player, connection, nextEpoch},
         token->claims.expiresAt,
-        tokens.clock(),
+        wallNow,
         std::move(kick),
         weak_from_this()
     ));
@@ -383,7 +758,7 @@ OnlineRegistry::install(
         snapshot,
         lease->binding,
         token->claims.expiresAt,
-        tokens.clock(),
+        wallNow,
         lease
     };
     if (found != m_state->players.end() && found->second.active)
@@ -405,7 +780,7 @@ OnlineRegistry::install(
             m_state->removeRoom(found->second);
         found->second = std::move(replacement);
     }
-    m_state->epoch = nextEpoch;
+    m_state->epoch = std::max(m_state->epoch, nextEpoch);
     if (!resume)
         m_state->sessionId = identity.value();
     lock.unlock();

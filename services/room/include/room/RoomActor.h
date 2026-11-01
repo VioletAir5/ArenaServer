@@ -211,6 +211,13 @@ public:
     /** @brief Copies a bounded replay log with its matching rolling
      * checkpoint. */
     ReplayLog replayLog() const;
+    /** @brief Restores a validated committed state on its new owner
+     * thread. Retained replay starts at this checkpoint. Input
+     * sequences, controls, incarnation and absolute tick remain
+     * unchanged.
+     */
+    static std::expected<std::unique_ptr<RoomActor>, ReplayFailure>
+    restore(const Snapshot&, ActorConfig = {});
     /** @brief Replays a self-contained log and checks every recorded
      * checksum. */
     static std::expected<ReplayResult, ReplayFailure>

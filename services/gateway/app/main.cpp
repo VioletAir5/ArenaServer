@@ -48,6 +48,7 @@
 
 #include "auth/FilePasswordAccounts.h"
 #include "room/ReplayRecorder.h"
+#include "runtime/OwnerScheduler.h"
 #include "runtime/RuntimeConfig.h"
 #include "runtime/RuntimeControl.h"
 
@@ -587,7 +588,8 @@ try
                          )](
                             arena::domain::PlayerId player,
                             std::uint64_t match,
-                            ConnectionClock::time_point deadline,
+                            arena::runtime::OwnerClock::time_point
+                                deadline,
                             std::string correlation,
                             RoomService::SettlementCompletion complete
                         )
@@ -988,7 +990,7 @@ try
     if (online)
         upkeep = std::make_unique<OnlineRegistryMaintenance>(
             online,
-            connectionScheduler(context.get_executor())
+            arena::runtime::ownerScheduler(context.get_executor())
         );
     const ScheduledServiceCleanup actorCleanup{
         rooms,
@@ -996,9 +998,13 @@ try
         listenersReady
     };
     if (matcher)
-        matcher->start(connectionScheduler(context.get_executor()));
+        matcher->start(
+            arena::runtime::ownerScheduler(context.get_executor())
+        );
     if (rooms)
-        rooms->start(connectionScheduler(context.get_executor()));
+        rooms->start(
+            arena::runtime::ownerScheduler(context.get_executor())
+        );
     boost::asio::signal_set signals(context, SIGINT, SIGTERM, SIGHUP);
     boost::asio::steady_timer poll(context);
     std::unique_ptr<ITcpServer>

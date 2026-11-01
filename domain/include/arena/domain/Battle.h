@@ -58,6 +58,17 @@ public:
         , m_roomId(roomId)
     {
     }
+    /** @brief Rehydrates a validated battle lifecycle on the current
+     * owner. */
+    Battle(
+        BattleId id,
+        RoomId roomId,
+        service::state::Snapshot<State> restored
+    )
+        : Base(id, restored)
+        , m_roomId(roomId)
+    {
+    }
     RoomId roomId() const noexcept
     {
         return m_roomId;

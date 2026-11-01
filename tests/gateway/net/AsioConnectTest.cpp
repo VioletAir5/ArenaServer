@@ -18,6 +18,7 @@
 #include "net/TcpConnection.h"
 
 #include "ConnectionHostTestSupport.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace service::gateway
 {
@@ -254,7 +255,7 @@ TEST_F(AsioConnectTest, WatermarksAndHardLimitBoundOutput)
     int messages = 0;
     auto runtime = testHost(
         connection,
-        connectionScheduler(context.get_executor()),
+        arena::runtime::ownerScheduler(context.get_executor()),
         [&](auto)
         { return [&](ConnectionChannel&, auto) { ++messages; }; }
     );

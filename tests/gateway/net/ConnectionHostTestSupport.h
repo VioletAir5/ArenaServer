@@ -4,12 +4,14 @@
 #include "net/ConnectionHost.h"
 #include "net/ConnectionSchedulers.h"
 #include "net/TcpConnection.h"
+
+#include "runtime/OwnerScheduler.h"
 namespace service::gateway
 {
 template <class T>
 std::shared_ptr<ConnectionHost> testHost(
     const std::shared_ptr<T>& connection,
-    ConnectionScheduler scheduler,
+    arena::runtime::OwnerScheduler scheduler,
     ConnectionHandlerFactory handlers = {},
     ConnectionFeatureFactory features = {}
 )
@@ -17,7 +19,7 @@ std::shared_ptr<ConnectionHost> testHost(
     auto info = std::make_shared<ConnectionContext>(
         connection->id(),
         InetAddress("127.0.0.1", 1),
-        ConnectionClock::now()
+        arena::runtime::OwnerClock::now()
     );
     auto runtime = makeConnectionHost(
         connection,

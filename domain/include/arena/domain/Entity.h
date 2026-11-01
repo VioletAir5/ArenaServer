@@ -59,6 +59,13 @@ protected:
         : m_id(id)
     {
     }
+    /** @brief Restores a lifecycle snapshot without exposing live
+     * mutation. */
+    Entity(Id id, service::state::Snapshot<State> restored)
+        : m_id(id)
+        , m_lifecycle(restored)
+    {
+    }
     // No polymorphic ownership: final domain objects are destroyed as
     // themselves.
     ~Entity() = default;

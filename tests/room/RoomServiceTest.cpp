@@ -19,6 +19,8 @@
 #include "net/ConnectionSchedulers.h"
 #include "net/EventLoop.h"
 
+#include "runtime/OwnerScheduler.h"
+
 using namespace service::gateway;
 using namespace std::chrono_literals;
 namespace sim = service::room;
@@ -29,14 +31,14 @@ struct OwnerTimers
 {
     struct Timer
     {
-        ConnectionClock::time_point deadline;
+        arena::runtime::OwnerClock::time_point deadline;
         std::shared_ptr<bool> live;
         std::function<void()> action;
     };
     std::vector<Timer> timers;
     std::atomic<int> deferred{0};
     int schedules{0}, failAt{0};
-    ConnectionScheduler scheduler()
+    arena::runtime::OwnerScheduler scheduler()
     {
         return {
             [this](auto)
@@ -52,11 +54,12 @@ struct OwnerTimers
                     throw std::runtime_error("timer unavailable");
                 auto live = std::make_shared<bool>(true);
                 timers.push_back({when, live, std::move(action)});
-                return ConnectionTimer([live] { *live = false; });
+                return arena::runtime::OwnerTimer([live]
+                                                  { *live = false; });
             }
         };
     }
-    void due(ConnectionClock::time_point now)
+    void due(arena::runtime::OwnerClock::time_point now)
     {
         for (int limit = 0; limit < 20; ++limit)
         {
@@ -88,7 +91,7 @@ service::auth::JwtTokens tokens()
 }
 struct RoomServiceTest : testing::Test
 {
-    ConnectionClock::time_point now{};
+    arena::runtime::OwnerClock::time_point now{};
     OwnerTimers timers;
     std::shared_ptr<OnlineRegistry>
         online = std::make_shared<OnlineRegistry>();
@@ -127,7 +130,7 @@ struct RoomServiceTest : testing::Test
     }
     void at(std::chrono::milliseconds elapsed)
     {
-        now = ConnectionClock::time_point{} + elapsed;
+        now = arena::runtime::OwnerClock::time_point{} + elapsed;
         timers.due(now);
     }
     sim::Snapshot initialize(const SessionGrant& grant)
@@ -1056,7 +1059,7 @@ TEST_F(
     EXPECT_EQ(timers.deferred.load(), 0);
     ASSERT_EQ(
         timers.timers.back().deadline,
-        ConnectionClock::time_point{} + 100ms
+        arena::runtime::OwnerClock::time_point{} + 100ms
     );
 }
 
@@ -1077,7 +1080,7 @@ TEST_F(
     EXPECT_EQ(rooms->metrics().skippedWallSlots, 15U);
     EXPECT_EQ(
         timers.timers.back().deadline,
-        ConnectionClock::time_point{} + 1050ms
+        arena::runtime::OwnerClock::time_point{} + 1050ms
     );
     at(1049ms);
     EXPECT_EQ(rooms->metrics().ticks, 5U);
@@ -1605,7 +1608,9 @@ TEST(
         arena::domain::RoomId{7}
     ));
     RoomService rooms(online);
-    rooms.start(connectionScheduler(context.get_executor()));
+    rooms.start(
+        arena::runtime::ownerScheduler(context.get_executor())
+    );
     int replies = 0;
     ASSERT_TRUE(rooms.snapshot(
         grant->lease->binding,
@@ -1739,7 +1744,7 @@ TEST_F(
     auto alice = login();
     auto bob = login(43, 8);
     std::mutex wakeMutex;
-    std::vector<ConnectionScheduler::Action> wakes;
+    std::vector<arena::runtime::OwnerScheduler::Action> wakes;
     auto c = durableConfig();
     c.now = [this] { return now; };
     rooms = std::make_shared<RoomService>(online, std::move(c));
@@ -1811,7 +1816,7 @@ TEST_F(
     foreign.join();
     EXPECT_EQ(rooms->metrics().persistenceCommitted, 0U);
     EXPECT_TRUE(online->managedRoom(allocation.roomId));
-    std::vector<ConnectionScheduler::Action> ownerActions;
+    std::vector<arena::runtime::OwnerScheduler::Action> ownerActions;
     {
         std::lock_guard lock(wakeMutex);
         ASSERT_EQ(wakes.size(), 1U);

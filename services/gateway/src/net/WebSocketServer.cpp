@@ -29,10 +29,10 @@
 #include <boost/beast/websocket.hpp>
 
 #include "net/ConnectionHost.h"
-#include "net/ConnectionSchedulers.h"
 #include "net/ITransport.h"
 
 #include "ConnectionId.h"
+#include "runtime/OwnerScheduler.h"
 
 namespace service::gateway
 {
@@ -753,7 +753,7 @@ struct WebSocketServer::Impl : std::enable_shared_from_this<Impl>
                             auto host = makeConnectionHost(
                                 session,
                                 contextInfo,
-                                connectionScheduler(
+                                arena::runtime::ownerScheduler(
                                     session->executor()
                                 ),
                                 self->factory,

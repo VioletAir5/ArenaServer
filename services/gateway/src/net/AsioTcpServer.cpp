@@ -25,7 +25,8 @@
 
 #include "net/AsioConnect.h"
 #include "net/ConnectionHost.h"
-#include "net/ConnectionSchedulers.h"
+
+#include "runtime/OwnerScheduler.h"
 
 namespace service::gateway
 {
@@ -206,7 +207,9 @@ struct AsioWorker : std::enable_shared_from_this<AsioWorker>
             auto host = makeConnectionHost(
                 connection,
                 contextInfo,
-                connectionScheduler(connection->executor()),
+                arena::runtime::ownerScheduler(
+                    connection->executor()
+                ),
                 handlerFactory,
                 featureFactory
             );

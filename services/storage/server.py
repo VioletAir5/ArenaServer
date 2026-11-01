@@ -18,7 +18,7 @@ from shared.runtime.protocol import Protocol
 from shared.runtime.config import ConfigSnapshot, ConfigStore, ConfigReloader
 from shared.runtime.health import HealthServer
 from shared.runtime.rpc import (Server, Context, RpcError, INVALID_ARGUMENT, NOT_FOUND, UNAVAILABLE,
-    OVERLOADED, DEADLINE_EXCEEDED, CONFLICT, INTERNAL, OUTCOME_UNKNOWN)
+    OVERLOADED, DEADLINE_EXCEEDED, CONFLICT, INTERNAL, OUTCOME_UNKNOWN, validate_service_credentials)
 from .database import Database
 from .outbox import Publisher, consume_event
 from .repositories import MatchParticipant, _participants
@@ -470,8 +470,15 @@ class _RuntimeState:
 async def run_server(args):
     if not 0 <= args.port <= 65535:
         raise ValueError("invalid loopback port")
-    token = os.environ.get("ARENA_INTERNAL_TOKEN", "")
-    if not 32 <= len(token.encode()) <= 256:
+    caller_tokens = None
+    if 'ARENA_STORAGE_CALLER_TOKENS' in os.environ:
+        try:
+            caller_tokens = validate_service_credentials('storage',
+                json.loads(os.environ['ARENA_STORAGE_CALLER_TOKENS']))
+        except (ValueError, TypeError, UnicodeError):
+            raise ValueError('invalid Storage caller credential profile') from None
+    token = None if caller_tokens is not None else os.environ.get("ARENA_INTERNAL_TOKEN", "")
+    if caller_tokens is None and not 32 <= len(token.encode()) <= 256:
         raise ValueError("an internal service credential is required")
     node_id = os.environ.get('ARENA_NODE_ID','storage')
     if not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}',node_id):
@@ -501,6 +508,8 @@ async def run_server(args):
                              redis_store=projection, publish=args.publish)
     runtime = _RuntimeState(service,store,node_id) if controlled else None
     server = Server(protocol, service.handlers, service_token=token,
+                    service='storage' if caller_tokens is not None else '', caller_tokens=caller_tokens,
+                    max_timeout=1 if caller_tokens is not None else 5,
                     admission=runtime.admit if runtime is not None else None)
     health = HealthServer(runtime.status) if runtime is not None else None
     if runtime is not None:

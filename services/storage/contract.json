@@ -8,7 +8,7 @@
     "response": "arena.rpc.Response",
     "max_timeout_ms": 5000,
     "max_frame_bytes": 262144,
-    "compatibility": "protobuf-additive-no-version-negotiation",
+    "compatibility": "legacy-v0-or-explicit-v1-role-bound-profile",
     "automatic_transport_retries": 0
   },
   "common_errors": [
@@ -19,7 +19,9 @@
     "OUTCOME_UNKNOWN",
     "OVERLOADED",
     "UNAUTHENTICATED",
-    "UNAVAILABLE"
+    "UNAVAILABLE",
+    "INCOMPATIBLE_VERSION",
+    "CALL_CYCLE"
   ],
   "methods": [
     {
@@ -28,7 +30,8 @@
       "logical_owner": "storage",
       "callers": [
         "gateway",
-        "operations"
+        "operations",
+        "auth"
       ],
       "handler": "_ready",
       "request": null,
@@ -47,7 +50,8 @@
       "owner": "storage",
       "logical_owner": "auth",
       "callers": [
-        "gateway"
+        "gateway",
+        "auth"
       ],
       "target_callers": [
         "auth"

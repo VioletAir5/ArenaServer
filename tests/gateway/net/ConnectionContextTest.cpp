@@ -13,6 +13,7 @@
 #include "net/OnlineRegistry.h"
 
 #include "ProtocolTestHarness.h"
+#include "runtime/OwnerScheduler.h"
 
 using namespace service::gateway;
 
@@ -159,7 +160,8 @@ TEST(
     auto host = makeConnectionHost(
         transport,
         context,
-        {[](auto) {}, [](auto, auto) { return ConnectionTimer{}; }},
+        {[](auto) {},
+         [](auto, auto) { return arena::runtime::OwnerTimer{}; }},
         factory
     );
     EXPECT_TRUE(invoked);
@@ -181,9 +183,9 @@ TEST(
 )
 {
     auto transport = std::make_shared<test::MemoryTransport>();
-    ConnectionScheduler scheduler{
+    arena::runtime::OwnerScheduler scheduler{
         [](auto) {},
-        [](auto, auto) { return ConnectionTimer{}; }
+        [](auto, auto) { return arena::runtime::OwnerTimer{}; }
     };
     bool invoked = false;
     ConnectionHandlerFactory counting = [&](ConnectionContext::Ptr)
@@ -262,7 +264,7 @@ TEST(
             std::make_shared<test::MemoryTransport>(),
             std::move(context),
             {[](auto) {},
-             [](auto, auto) { return ConnectionTimer{}; }},
+             [](auto, auto) { return arena::runtime::OwnerTimer{}; }},
             handlers,
             fail
         ),

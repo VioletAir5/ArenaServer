@@ -3,6 +3,8 @@
  */
 #pragma once
 #include "net/ConnectionFeature.h"
+
+#include "runtime/OwnerScheduler.h"
 namespace service::gateway
 {
 // Policy only: transport always enforces its 1 MiB ceiling before
@@ -21,7 +23,8 @@ public:
     explicit BackpressureFeature(
         std::size_t low = kLowWaterMark,
         std::size_t high = kHighWaterMark,
-        ConnectionClock::duration timeout = kSlowClientTimeout
+        arena::runtime::OwnerClock::duration timeout =
+            kSlowClientTimeout
     );
     void onOutputBufferChanged(
         ConnectionChannel&, std::size_t, std::size_t
@@ -31,10 +34,10 @@ public:
 private:
     const std::size_t m_low, m_high;
     /// Stores the timeout.
-    const ConnectionClock::duration m_timeout;
+    const arena::runtime::OwnerClock::duration m_timeout;
     /// Stores the paused.
     bool m_paused{false};
     /// Stores the timer.
-    ConnectionTimer m_timer;
+    arena::runtime::OwnerTimer m_timer;
 };
 } // namespace service::gateway

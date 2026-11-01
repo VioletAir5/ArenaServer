@@ -17,6 +17,8 @@
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
 
+#include "runtime/OwnerScheduler.h"
+
 namespace
 {
 using namespace service::gateway;
@@ -72,7 +74,7 @@ struct MessageDispatchTest : testing::Test
         context = std::make_shared<ConnectionContext>(
             1,
             InetAddress("127.0.0.1", 1),
-            ConnectionClock::now(),
+            arena::runtime::OwnerClock::now(),
             std::make_shared<RejectionCounters>()
         );
     std::vector<std::function<void()>> posts;
@@ -90,12 +92,14 @@ struct MessageDispatchTest : testing::Test
         runtime = std::make_shared<ConnectionHost>(
             transport,
             context,
-            ConnectionScheduler{
+            arena::runtime::OwnerScheduler{
                 [&](auto task) { posts.push_back(std::move(task)); },
                 [&](auto, auto task)
                 {
                     deadlines.push_back(std::move(task));
-                    return ConnectionTimer([&] { ++cancellations; });
+                    return arena::runtime::OwnerTimer(
+                        [&] { ++cancellations; }
+                    );
                 }
             },
             makeArenaProtocolHandler(
@@ -996,7 +1000,7 @@ TEST_F(
             ASSERT_TRUE(request->execution);
             EXPECT_GT(
                 request->execution->deadline(),
-                ConnectionClock::now()
+                arena::runtime::OwnerClock::now()
             );
             EXPECT_FALSE(request->execution->correlationId().empty());
             request->execution->setCancellation([&] { ++cancelled; });

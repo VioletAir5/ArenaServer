@@ -19,8 +19,8 @@ CPP = {".h", ".hpp", ".hh", ".cpp", ".cc", ".c"}
 SQL = re.compile(r"\b(?:SELECT\s+(?:[^;]*\bFROM\b|(?:pg_catalog\.)?[a-z_]+\s*\()|INSERT\s+INTO\s+|UPDATE\s+(?:[a-z_]+\.)?[a-z_]+\s+SET\s+|DELETE\s+FROM\s+|(?:CREATE|ALTER|DROP)\s+TABLE\s+)", re.I | re.S)
 CPP_TOKEN = re.compile(r'//[^\n]*|/\*.*?\*/|R"(?P<delim>[^ ()\\\t\r\n]{0,16})\(.*?\)(?P=delim)"|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.S)
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.M)
-COMMON_REQUEST = {"request_id": ("uint64",1), "correlation_id": ("string",2), "deadline_unix_ms": ("uint64",3), "method": ("string",4), "idempotency_key": ("string",5), "payload": ("bytes",6), "service_token": ("string",7)}
-COMMON_RESPONSE = {"request_id": ("uint64",1), "correlation_id": ("string",2), "status": ("Status",3), "retryable": ("bool",4), "payload": ("bytes",5)}
+COMMON_REQUEST = {"request_id": ("uint64",1), "correlation_id": ("string",2), "deadline_unix_ms": ("uint64",3), "method": ("string",4), "idempotency_key": ("string",5), "payload": ("bytes",6), "service_token": ("string",7), "protocol_version": ("uint32",8), "caller_service": ("string",9), "service_path": ("string",10), "target_service": ("string",11)}
+COMMON_RESPONSE = {"request_id": ("uint64",1), "correlation_id": ("string",2), "status": ("Status",3), "retryable": ("bool",4), "payload": ("bytes",5), "protocol_version": ("uint32",6)}
 
 
 def _line(text, offset):
@@ -38,6 +38,11 @@ def _cpp(text):
         value = match.group()
         return re.sub(r"[^\n]", " ", value) if value.startswith(("//", "/*")) else value
     return CPP_TOKEN.sub(replace, text)
+
+
+def _cpp_code(text):
+    """Mask literals for code-position discovery while retaining exact offsets."""
+    return CPP_TOKEN.sub(lambda match: re.sub(r"[^\n]", " ", match.group()), _cpp(text))
 
 
 def _strings(text):
@@ -136,16 +141,101 @@ def _cmake_commands(text):
         yield match.group(1).lower(),shlex.split(clean[start:pos-1],posix=True),_line(clean,match.start())
 
 
+def _balanced_end(text, at, opening, closing):
+    """Match one source delimiter while ignoring string and character literals."""
+    depth = 0
+    for_position = at
+    while for_position < len(text):
+        token = CPP_TOKEN.match(text, for_position)
+        if token:
+            for_position = token.end()
+            continue
+        value = text[for_position]
+        if value == opening:
+            depth += 1
+        elif value == closing:
+            depth -= 1
+            if depth == 0:
+                return for_position
+        for_position += 1
+    raise ValueError('unclosed source delimiter')
+
+
 def _proto(text):
-    clean=_cpp(text)
-    result={}
-    for match in re.finditer(r"\bmessage\s+(\w+)\s*\{([^{}]*)\}",clean,re.S):
-        result[match.group(1)]={m.group(2):(m.group(1),int(m.group(3))) for m in re.finditer(r"(?:repeated\s+|optional\s+)?([\w.]+)\s+(\w+)\s*=\s*(\d+)\s*;",match.group(2))}
-    statuses=set()
-    match=re.search(r"\benum\s+Status\s*\{([^{}]*)\}",clean,re.S)
+    clean = _cpp(text)
+    result = {}
+    for match in re.finditer(r"\bmessage\s+(\w+)\s*\{", clean):
+        begin = match.end() - 1
+        end = _balanced_end(clean, begin, '{', '}')
+        body = clean[begin + 1:end]
+        # Nested enum/message fields are not fields of this message.
+        direct = []
+        position = 0
+        while position < len(body):
+            if body[position] == '{':
+                position = _balanced_end(body, position, '{', '}') + 1
+            else:
+                direct.append(body[position])
+                position += 1
+        result[match.group(1)] = {
+            m.group(2): (m.group(1), int(m.group(3)))
+            for m in re.finditer(r"(?:repeated\s+|optional\s+)?([\w.]+)\s+(\w+)\s*=\s*(\d+)\s*;", ''.join(direct))}
+    statuses = set()
+    match = re.search(r"\benum\s+Status\s*\{([^{}]*)\}", clean, re.S)
     if match:
-        statuses={m.group(1) for m in re.finditer(r"(\w+)\s*=\s*\d+\s*;",match.group(1))}
-    return result,statuses
+        statuses = {m.group(1) for m in re.finditer(r"(\w+)\s*=\s*\d+\s*;", match.group(1))}
+    return result, statuses
+
+
+def _native_registrations(text):
+    """Inspect actual native Server handler maps; unsupported mutation fails closed."""
+    clean = _cpp(text)
+    code = _cpp_code(text)
+    registered, handlers, problems = {}, {}, []
+    maps = list(re.finditer(r'\b(?:arena::internal_rpc::)?Server::Handlers\s+(\w+)\s*;', code))
+    constructors = []
+    for constructor in re.finditer(r'\b(?:arena::internal_rpc::)?Server\s+\w+\s*\(', code):
+        begin = constructor.end() - 1
+        try:
+            end = _balanced_end(clean, begin, '(', ')')
+            constructors.append(code[begin:end + 1])
+        except ValueError:
+            problems.append((_line(clean, begin), 'unclosed native Server construction'))
+    for declaration in maps:
+        registry = declaration.group(1)
+        if not any(re.search(r'\bstd::move\s*\(\s*' + re.escape(registry) + r'\s*\)', body)
+                   for body in constructors):
+            problems.append((_line(clean, declaration.start()), 'native handler registry is not consumed by a Server'))
+        pattern = r'\b' + re.escape(registry) + r'\s*(?:\.\s*(\w+)\s*\(|(\[)|=)'
+        for mutation in re.finditer(pattern, code):
+            line = _line(clean, mutation.start())
+            if mutation.group(1) != 'emplace':
+                problems.append((line, 'unsupported native handler map mutation'))
+                continue
+            begin = mutation.end() - 1
+            try:
+                end = _balanced_end(clean, begin, '(', ')')
+            except ValueError:
+                problems.append((line, 'unclosed native handler registration'))
+                continue
+            body = clean[begin + 1:end]
+            body_code = code[begin + 1:end]
+            first = re.match(r'\s*"([a-z][a-z0-9_.]*)"\s*,\s*(\[)', body)
+            if not first:
+                problems.append((line, 'native registration requires a literal method and inline handler'))
+                continue
+            name = first.group(1)
+            if name in registered:
+                problems.append((line, 'duplicate native handler registration'))
+            parsed = []
+            for candidate in re.finditer(r'\b((?:\w+::)+\w+)\s+(\w+)\s*;', body_code):
+                if re.search(r'\b' + re.escape(candidate.group(2)) + r'\s*\.\s*ParseFromString\s*\(', body_code):
+                    parsed.append(candidate.group(1).replace('::', '.'))
+            if len(parsed) > 1:
+                problems.append((line, 'native handler parses multiple unsupported request types'))
+            registered[name] = (parsed[0] if len(parsed) == 1 else None, name, line)
+            handlers[name] = (body, line)
+    return registered, handlers, problems
 
 
 def _module_path(node, path):
@@ -308,7 +398,10 @@ def analyze(root, contract_path=None, policy_path=None):
         strings=[]
         if PurePosixPath(path).suffix in CPP:
             clean=_cpp(text)
+            code=_cpp_code(text)
             for match in INCLUDE.finditer(clean):
+                if not code[match.start():match.end()].lstrip().startswith('#'):
+                    continue
                 name=match.group(1)
                 line=_line(text,match.start())
                 if any(name==header or header.endswith('/') and name.startswith(header) for header in policy['database_headers']) and not is_sql_allowed:
@@ -325,13 +418,24 @@ def analyze(root, contract_path=None, policy_path=None):
                     issue('unresolved_project_include',path,line,f'project include not found: {name}')
             strings=list(_strings(text))
             if not is_sql_allowed:
-                for execution in re.finditer(r'\b(?:PQexec(?:Params|Prepared)?|sqlite3_exec|mysql_query)\s*\(',clean):
+                for execution in re.finditer(r'\b(?:PQexec(?:Params|Prepared)?|sqlite3_exec|mysql_query)\s*\(',code):
                     issue('database_driver',path,_line(text,execution.start()),'direct native database execution belongs to Storage persistence')
-            for match in re.finditer(r'\.set_method\s*\((.*?)\)',clean,re.S):
-                args=match.group(1).strip()
+            for match in re.finditer(r'\b(\w+)\.set_method\s*\((.*?)\)',code,re.S):
+                args=clean[match.start(2):match.end(2)].strip()
                 literal=re.fullmatch(r'"([a-z][a-z0-9_.]*)"',args)
                 if literal:
-                    rpc_calls.append(dict(source=path,caller=owner,method=literal.group(1),line=_line(text,match.start())))
+                    targets = set()
+                    for target_match in re.finditer(r'\b' + re.escape(match.group(1)) + r'\.set_target_service\s*\((.*?)\)', code, re.S):
+                        argument = clean[target_match.start(1):target_match.end(1)].strip()
+                        target_literal = re.fullmatch(r'"([a-z][a-z0-9_-]*)"', argument)
+                        if target_literal:
+                            targets.add(target_literal.group(1))
+                        else:
+                            issue('dynamic_rpc_target', path, _line(text, target_match.start()),
+                                  'explicit service target must be a declared literal')
+                    if len(targets) > 1:
+                        issue('dynamic_rpc_target', path, _line(text, match.start()), 'one request variable has ambiguous service targets')
+                    rpc_calls.append(dict(source=path,caller=owner,method=literal.group(1),target=next(iter(targets)) if len(targets)==1 else None,line=_line(text,match.start())))
                 elif owner!='shared':
                     issue('dynamic_rpc_method',path,_line(text,match.start()),'service RPC method must be a declared literal')
         elif path.endswith('.py'):
@@ -403,8 +507,35 @@ def analyze(root, contract_path=None, policy_path=None):
                 dependency('build',targets.get(source,path),line,targets[target])
     # Validate contract identity and every registration against real handlers,
     # proto types, envelope fields and public status enum.
-    proto,statuses=_proto(sources.get('shared/proto/rpc.proto',''))
-    storage_proto,_=_proto(sources.get('shared/proto/storage.proto',''))
+    try:
+        proto,statuses=_proto(sources.get('shared/proto/rpc.proto',''))
+    except ValueError as error:
+        issue('proto_parse', 'shared/proto/rpc.proto', 1, str(error))
+        proto, statuses = {}, set()
+    payload_proto = {}
+    short_proto = defaultdict(list)
+    for proto_path, proto_source in sources.items():
+        if not proto_path.endswith('.proto'):
+            continue
+        try:
+            messages, _ = _proto(proto_source)
+        except ValueError as error:
+            issue('proto_parse', proto_path, 1, str(error))
+            continue
+        package = re.search(r'\bpackage\s+([\w.]+)\s*;', _cpp(proto_source))
+        prefix = package.group(1) + '.' if package else ''
+        for message in messages:
+            payload_proto[prefix + message] = proto_path
+            short_proto[message].append(proto_path)
+    for message, paths in short_proto.items():
+        if len(paths) == 1:
+            payload_proto[message] = paths[0]
+    native_implementations = {c.get('implementation') for _, c in contract_files
+                              if isinstance(c, dict) and c.get('registration_kind') == 'native_server'}
+    for path, source in sources.items():
+        if PurePosixPath(path).suffix in CPP and re.search(r'\bServer::Handlers\s+\w+', _cpp_code(source)) and re.search(r'\bServer\s+\w+\s*\(', _cpp_code(source)):
+            if path not in native_implementations:
+                issue('contract_native_undeclared', path, 1, 'native Server handler registration requires a service contract')
     for name,expected in (('Request',COMMON_REQUEST),('Response',COMMON_RESPONSE)):
         for field,spec in expected.items():
             if proto.get(name,{}).get(field)!=spec:
@@ -424,10 +555,26 @@ def analyze(root, contract_path=None, policy_path=None):
             issue('contract_owner',str(current_path),1,'contract service and actual implementation owner must agree')
         if service=='storage' and current.get('physical_sql_owner')!='storage':
             issue('contract_owner',str(current_path),1,'Storage owns physical SQL')
-        registered,handlers,registration_problems=_registrations(trees.get(implementation,ast.Module(body=[],type_ignores=[])),current.get('service_class','StorageService'))
+        native = current.get('registration_kind') == 'native_server'
+        if native:
+            registered, handlers, registration_problems = _native_registrations(sources.get(implementation, ''))
+            default = re.search(r'\bmaxBudget\s*\{\s*(\d+)\s*\}', _cpp_code(sources.get('shared/include/rpc/Server.h', '')))
+            actual_maximum = int(default.group(1)) if default else None
+            implementation_source = _cpp_code(sources.get(implementation, ''))
+            assignments = list(re.finditer(r'\b\w+\.maxBudget\s*=\s*([^;]+);', implementation_source))
+            for assignment in assignments:
+                literal = re.fullmatch(r'(\d+)ms|std::chrono::milliseconds\s*\(\s*(\d+)\s*\)', assignment.group(1).strip())
+                if not literal:
+                    actual_maximum = None
+                    break
+                actual_maximum = int(literal.group(1) or literal.group(2))
+            if current.get('transport', {}).get('max_timeout_ms') != actual_maximum:
+                issue('contract_transport', implementation, 1, 'native Server budget differs from its service contract')
+        else:
+            registered,handlers,registration_problems=_registrations(trees.get(implementation,ast.Module(body=[],type_ignores=[])),current.get('service_class','StorageService'))
         for line,message in registration_problems:
             issue('contract_registration_dynamic',implementation,line,message)
-        all_registered.update(registered)
+        all_registered.update({(service, name): value for name, value in registered.items()})
         local_declared={}
         methods=current.get('methods',[])
         if not isinstance(methods,list) or not methods:
@@ -438,10 +585,10 @@ def analyze(root, contract_path=None, policy_path=None):
                 issue('contract_fields',str(current_path),1,'method declaration must be an object')
                 continue
             name=method.get('name')
-            if not isinstance(name,str) or not name or name in declared:
+            if not isinstance(name,str) or not name or (service, name) in declared:
                 issue('contract_duplicate',str(current_path),1,f'duplicate/empty method {name}')
                 continue
-            declared[name]=method
+            declared[(service, name)]=method
             local_declared[name]=method
             required=('owner','logical_owner','callers','handler','request','response','deadline_ms','errors','idempotency','cancellation')
             if any(key not in method for key in required):
@@ -473,7 +620,7 @@ def analyze(root, contract_path=None, policy_path=None):
             if idem.get('kind')=='semantic_key' and not idem.get('key'):
                 issue('contract_idempotency',str(current_path),1,f'{name} semantic deduplication requires a key')
             for direction in ('request','response'):
-                if method[direction] is not None and (not isinstance(method[direction],str) or method[direction] not in storage_proto):
+                if method[direction] is not None and (not isinstance(method[direction],str) or method[direction] not in payload_proto):
                     issue('contract_proto',str(current_path),1,f'{name} {direction} type does not exist: {method[direction]}')
             actual=registered.get(name)
             if actual is None:
@@ -483,6 +630,21 @@ def analyze(root, contract_path=None, policy_path=None):
             if request!=method['request'] or handler!=method['handler']:
                 issue('contract_registration',implementation,line,f'{name} actual request/handler differs from declaration')
             node=handlers.get(handler) if isinstance(handler,str) else None
+            if native:
+                if node is None:
+                    issue('contract_handler', implementation, line, f'{name} native handler missing')
+                if method['response'] is not None:
+                    response_path = method.get('response_implementation', implementation)
+                    if not isinstance(response_path, str) or _owner(response_path) != service or response_path not in sources:
+                        issue('contract_response', implementation, line, f'{name} response implementation must belong to its service')
+                    else:
+                        response_text = _cpp_code(sources[response_path])
+                        response_type = str(method['response']).replace('.', '::')
+                        emitted = any(re.search(r'\b' + re.escape(match.group(1)) + r'\s*\.\s*Serialize(?:AsString|ToString|ToArray)\s*\(', response_text)
+                                      for match in re.finditer(r'\b' + re.escape(response_type) + r'\s+(\w+)\s*;', response_text))
+                        if not emitted:
+                            issue('contract_response', response_path, 1, f'{name} does not serialize declared reply {method["response"]}')
+                continue
             if node is None:
                 issue('contract_handler',implementation,line,f'{name} handler missing')
             else:
@@ -521,7 +683,14 @@ def analyze(root, contract_path=None, policy_path=None):
     registered=all_registered
     runtime=[]
     for call in rpc_calls:
-        method=declared.get(call['method'])
+        candidates = [value for (service, name), value in declared.items()
+                      if name == call['method'] and call['caller'] in value.get('callers', [])
+                      and (not call.get('target') or service == call['target'])]
+        if len(candidates) != 1:
+            named = [value for (service, name), value in declared.items() if name == call['method'] and (not call.get('target') or service == call['target'])]
+            if len(named) == 1:
+                candidates = named
+        method = candidates[0] if len(candidates) == 1 else None
         if method is None:
             issue('rpc_undeclared',call['source'],call['line'],f'RPC {call["method"]} has no owner contract')
             continue
@@ -538,7 +707,7 @@ def analyze(root, contract_path=None, policy_path=None):
         for cycle in cycles[kind]:
             issue(kind+'_cycle','',1,' -> '.join(cycle))
     issues.sort(key=lambda i:(i['path'],i['line'],i['code'],i['message']))
-    return dict(schema_version=1,passed=not issues,issues=issues,inventory=dict(files=len(sources),modules=sorted({_owner(p) for p in sources})),contracts=dict(declared=sorted(declared),registered=sorted(registered),native_and_python_calls=rpc_calls,data_tables=sorted(tables)),graphs=dict(build=build,include=includes,python_import=imports,rpc=runtime),cycles=cycles,limitations=['Static literal source policy; arbitrary macro-generated or runtime-generated source requires separate compiler/runtime checks.','Current Gateway embeds Auth/Match/Room libraries; no independent service deployment is claimed.','Caller declarations are build contracts, not a substitute for runtime caller identity authorization.'])
+    return dict(schema_version=1,passed=not issues,issues=issues,inventory=dict(files=len(sources),modules=sorted({_owner(p) for p in sources})),contracts=dict(declared=sorted({name for service,name in declared}),registered=sorted({name for service,name in registered}),qualified_declared=sorted(service+'/'+name for service,name in declared),qualified_registered=sorted(service+'/'+name for service,name in registered),native_and_python_calls=rpc_calls,data_tables=sorted(tables)),graphs=dict(build=build,include=includes,python_import=imports,rpc=runtime),cycles=cycles,limitations=['Static literal source policy; arbitrary macro-generated or runtime-generated source requires separate compiler/runtime checks.','Gateway currently embeds Match/Room workflows; independent Auth is implemented, while Lobby business migration remains pending.','Caller declarations are build contracts, not a substitute for runtime caller identity authorization.'])
 
 
 def main():

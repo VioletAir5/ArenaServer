@@ -11,16 +11,18 @@ from google.protobuf.message import DecodeError
 
 OK, INVALID_ARGUMENT, NOT_FOUND, UNAVAILABLE, OVERLOADED = range(5)
 DEADLINE_EXCEEDED, CANCELLED, CONFLICT, INTERNAL, OUTCOME_UNKNOWN, UNAUTHENTICATED = range(5, 11)
+INCOMPATIBLE_VERSION, CALL_CYCLE = 11, 12
+PROTOCOL_VERSION, MAX_SERVICE_HOPS = 1, 8
 MAX_FRAME = 256 * 1024
 
 
 class RpcError(Exception):
     """Stable public failure; never expose SQL or backend diagnostics."""
     def __init__(self, status, *, retryable=False):
-        if type(status) is not int or not 1 <= status <= 10:
+        if type(status) is not int or not 1 <= status <= CALL_CYCLE:
             raise ValueError("invalid RPC status")
         super().__init__("RPC request failed")
-        self.status, self.retryable = status, bool(retryable) and status != OUTCOME_UNKNOWN
+        self.status, self.retryable = status, bool(retryable) and status not in (OUTCOME_UNKNOWN, INCOMPATIBLE_VERSION, CALL_CYCLE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,7 @@ class Context:
     correlation_id: str
     deadline: float
     idempotency_key: str
+    service_path: tuple[str, ...] = ()
 
     def remaining(self):
         return max(0.0, self.deadline - time.monotonic())
@@ -49,6 +52,61 @@ def _metadata(request):
             and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request.correlation_id)
             and re.fullmatch(r"[a-z][a-z0-9_.]{0,63}", request.method)
             and len(request.idempotency_key.encode()) <= 128)
+
+
+def _service_name(value):
+    return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value) is not None
+
+
+def validate_service_credentials(service, caller_tokens):
+    """Validate a role-bound profile before an application allocates resources."""
+    if (not _service_name(service) or not isinstance(caller_tokens, dict)
+            or not 1 <= len(caller_tokens) <= 32):
+        raise ValueError("invalid service credential profile")
+    result = dict(caller_tokens)
+    if any(not _service_name(caller) or not isinstance(token, str)
+           or not 32 <= len(token.encode()) <= 256 for caller, token in result.items()):
+        raise ValueError("invalid service credential profile")
+    return result
+
+
+def _checked_service_path(caller, target, path):
+    if not _service_name(caller) or not _service_name(target):
+        raise RpcError(INVALID_ARGUMENT)
+    values = tuple(path)
+    if not values:
+        raise RpcError(INVALID_ARGUMENT)
+    if len(values) >= MAX_SERVICE_HOPS:
+        raise RpcError(CALL_CYCLE)
+    visited = set()
+    for value in values:
+        if not _service_name(value):
+            raise RpcError(INVALID_ARGUMENT)
+        if value == target or value in visited:
+            raise RpcError(CALL_CYCLE)
+        visited.add(value)
+    if values[-1] != caller:
+        raise RpcError(INVALID_ARGUMENT)
+    return values
+
+
+def _incoming_service_path(request, service, caller_tokens):
+    versioned = (service or request.protocol_version or request.caller_service
+                 or request.target_service or request.service_path)
+    if not service:
+        if versioned:
+            raise RpcError(INCOMPATIBLE_VERSION)
+        return ()
+    if request.protocol_version != PROTOCOL_VERSION:
+        raise RpcError(INCOMPATIBLE_VERSION)
+    if service and request.target_service != service:
+        raise RpcError(INVALID_ARGUMENT)
+    if caller_tokens is not None:
+        expected = caller_tokens.get(request.caller_service)
+        if expected is None or not hmac.compare_digest(request.service_token.encode(), expected.encode()):
+            raise RpcError(UNAUTHENTICATED)
+    path = _checked_service_path(request.caller_service, request.target_service, request.service_path)
+    return path + (request.target_service,)
 
 
 async def _read(reader):
@@ -107,13 +165,18 @@ class Server:
     Use a bounded worker adapter for synchronous dependencies.
     """
     def __init__(self, protocol, handlers, *, max_connections=128,
-                 read_timeout=1, max_timeout=5, service_token=None, admission=None):
+                 read_timeout=1, max_timeout=5, service_token=None, admission=None,
+                 service="", caller_tokens=None):
         if type(max_connections) is not int or not 1 <= max_connections <= 4096:
             raise ValueError("invalid connection limit")
         if service_token is not None and (not isinstance(service_token, str) or not 32 <= len(service_token) <= 256):
             raise ValueError('internal service token must be 32..256 characters')
         if admission is not None and not callable(admission):
             raise ValueError('admission must be callable')
+        if bool(service) != (caller_tokens is not None) or (service and service_token is not None):
+            raise ValueError("service profiles require explicit caller credentials")
+        self._service = service
+        self._caller_tokens = validate_service_credentials(service, caller_tokens) if service else None
         self._admission = admission
         self.admission_rejected = 0
         self._token = service_token
@@ -175,7 +238,8 @@ class Server:
         async with deadline_scope(limit):
             await _write(writer, self.protocol.Response(request_id=request.request_id,
                 correlation_id=request.correlation_id[:64], status=status,
-                retryable=retryable, payload=payload))
+                retryable=retryable, payload=payload,
+                protocol_version=PROTOCOL_VERSION if self._service else 0))
 
     async def _serve(self, reader, writer):
         operation = peer = request = context = None
@@ -187,11 +251,13 @@ class Server:
                 raise RpcError(INVALID_ARGUMENT)
             if self._token is not None and not hmac.compare_digest(request.service_token.encode(), self._token.encode()):
                 raise RpcError(UNAUTHENTICATED)
+            path = _incoming_service_path(request, self._service, self._caller_tokens)
+            request.ClearField("service_token")
             remaining = (request.deadline_unix_ms - time.time() * 1000) / 1000
             if remaining <= 0:
                 raise RpcError(DEADLINE_EXCEEDED)
             context = Context(request.request_id, request.correlation_id,
-                time.monotonic() + min(remaining, self.max_timeout), request.idempotency_key)
+                time.monotonic() + min(remaining, self.max_timeout), request.idempotency_key, path)
             handler = self.handlers.get(request.method)
             if handler is None:
                 raise RpcError(NOT_FOUND)
@@ -279,13 +345,18 @@ class Server:
 
 class Client:
     """Explicit cancellation and finite admission; never automatically retry."""
-    def __init__(self, protocol, host, port, *, max_inflight=128, service_token=""):
+    def __init__(self, protocol, host, port, *, max_inflight=128, service_token="",
+                 caller_service="", target_service=""):
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("invalid loopback endpoint")
         if type(max_inflight) is not int or not 1 <= max_inflight <= 4096:
             raise ValueError("invalid inflight limit")
         if not isinstance(service_token, str) or len(service_token) > 256:
             raise ValueError('invalid internal service token')
+        if (bool(caller_service) != bool(target_service) or
+                caller_service and (not _service_name(caller_service) or not _service_name(target_service))):
+            raise ValueError("invalid RPC service profile")
+        self._caller, self._target = caller_service, target_service
         self._token = service_token
         self.protocol, self.host, self.port = protocol, host, port
         self.max_inflight, self.inflight, self._sequence = max_inflight, 0, 0
@@ -304,6 +375,13 @@ class Client:
             deadline_unix_ms=int(time.time() * 1000 +
                                  max(0, deadline - time.monotonic()) * 1000),
             idempotency_key=idempotency_key, payload=payload, service_token=self._token)
+        if self._caller:
+            path = context.service_path if context is not None and context.service_path else (self._caller,)
+            request.service_path.extend(_checked_service_path(self._caller, self._target, path))
+            request.caller_service, request.target_service = self._caller, self._target
+            request.protocol_version = PROTOCOL_VERSION
+        elif context is not None and context.service_path:
+            raise RpcError(INVALID_ARGUMENT)
         if not _metadata(request) or request.ByteSize() > MAX_FRAME:
             raise RpcError(INVALID_ARGUMENT)
         if time.monotonic() >= deadline:
@@ -322,8 +400,11 @@ class Client:
                 response = self.protocol.Response.FromString(await _read(reader))
                 if (response.request_id != request.request_id
                         or response.correlation_id != request.correlation_id
-                        or not 0 <= response.status <= 10):
+                        or not 0 <= response.status <= CALL_CYCLE):
                     raise RpcError(INTERNAL)
+                if (response.protocol_version != request.protocol_version and not
+                        (response.protocol_version == PROTOCOL_VERSION and response.status == INCOMPATIBLE_VERSION)):
+                    raise RpcError(INCOMPATIBLE_VERSION)
                 finished = True
                 if response.status != OK:
                     raise RpcError(response.status, retryable=response.retryable)

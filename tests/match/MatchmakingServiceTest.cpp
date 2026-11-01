@@ -20,6 +20,7 @@
 #include "protocol/EnvelopeCodec.hpp"
 
 #include "../gateway/net/ProtocolTestHarness.h"
+#include "runtime/OwnerScheduler.h"
 
 using namespace service::gateway;
 using namespace std::chrono_literals;
@@ -38,7 +39,7 @@ struct Scheduler
     std::vector<Timer> timers;
     int schedules{0}, failAt{0};
     bool failPost{false};
-    ConnectionScheduler get()
+    arena::runtime::OwnerScheduler get()
     {
         return {
             [this](auto action)
@@ -54,7 +55,8 @@ struct Scheduler
                     throw std::runtime_error("timer failed");
                 auto live = std::make_shared<bool>(true);
                 timers.push_back({live, std::move(action)});
-                return ConnectionTimer([live] { *live = false; });
+                return arena::runtime::OwnerTimer([live]
+                                                  { *live = false; });
             }
         };
     }
