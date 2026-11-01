@@ -60,6 +60,7 @@ add_subdirectory(auth)
 add_subdirectory(match)
 add_subdirectory(room)
 add_subdirectory(storage)
+add_subdirectory(architecture)
 add_subdirectory(shared/rpc)
 
 include(GoogleTest)

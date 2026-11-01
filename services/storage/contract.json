@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "service": "storage",
+  "implementation": "services/storage/server.py",
+  "physical_sql_owner": "storage",
+  "transport": {
+    "request": "arena.rpc.Request",
+    "response": "arena.rpc.Response",
+    "max_timeout_ms": 5000,
+    "max_frame_bytes": 262144,
+    "compatibility": "protobuf-additive-no-version-negotiation",
+    "automatic_transport_retries": 0
+  },
+  "common_errors": [
+    "CANCELLED",
+    "DEADLINE_EXCEEDED",
+    "INTERNAL",
+    "INVALID_ARGUMENT",
+    "OUTCOME_UNKNOWN",
+    "OVERLOADED",
+    "UNAUTHENTICATED",
+    "UNAVAILABLE"
+  ],
+  "methods": [
+    {
+      "name": "health.ready",
+      "owner": "storage",
+      "logical_owner": "storage",
+      "callers": [
+        "operations"
+      ],
+      "handler": "_ready",
+      "request": null,
+      "response": null,
+      "deadline_ms": 5000,
+      "errors": [],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "propagate-to-worker-before-release"
+    },
+    {
+      "name": "account.find",
+      "owner": "storage",
+      "logical_owner": "auth",
+      "callers": [
+        "gateway"
+      ],
+      "target_callers": [
+        "auth"
+      ],
+      "handler": "_account",
+      "request": "FindAccountRequest",
+      "response": "FindAccountReply",
+      "deadline_ms": 5000,
+      "errors": [
+        "NOT_FOUND"
+      ],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "propagate-to-worker-before-release"
+    },
+    {
+      "name": "player.get",
+      "owner": "storage",
+      "logical_owner": "lobby",
+      "callers": [
+        "gateway"
+      ],
+      "target_callers": [
+        "lobby"
+      ],
+      "handler": "_player",
+      "request": "PlayerGetRequest",
+      "response": "PlayerGetReply",
+      "deadline_ms": 5000,
+      "errors": [
+        "NOT_FOUND"
+      ],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "propagate-to-worker-before-release"
+    },
+    {
+      "name": "match.allocate_ids",
+      "owner": "storage",
+      "logical_owner": "match",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "_allocate",
+      "request": "AllocateIdsRequest",
+      "response": "AllocateIdsReply",
+      "deadline_ms": 5000,
+      "errors": [
+        "CONFLICT"
+      ],
+      "idempotency": {
+        "kind": "non_idempotent",
+        "key": null,
+        "automatic_retries": 0,
+        "unknown_outcome": "discard-unconfirmed-block-never-reuse"
+      },
+      "cancellation": "commit-may-have-succeeded"
+    },
+    {
+      "name": "match.save_result",
+      "owner": "storage",
+      "logical_owner": "room",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "_save",
+      "request": "SaveResultRequest",
+      "response": "SaveResultReply",
+      "deadline_ms": 5000,
+      "errors": [
+        "CONFLICT",
+        "OUTCOME_UNKNOWN"
+      ],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "match.match_id",
+        "payload": "complete-immutable-terminal-result",
+        "automatic_retries": 0,
+        "durable_application_max_attempts": {
+          "default": 8,
+          "min": 1,
+          "max": 64,
+          "includes_first_attempt": true
+        }
+      },
+      "cancellation": "commit-may-have-succeeded-query-or-replay-same-match-id"
+    },
+    {
+      "name": "match.get",
+      "owner": "storage",
+      "logical_owner": "room",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "_match",
+      "request": "MatchGetRequest",
+      "response": "MatchGetReply",
+      "deadline_ms": 5000,
+      "errors": [
+        "NOT_FOUND"
+      ],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "propagate-to-worker-before-release"
+    },
+    {
+      "name": "settlement.get",
+      "owner": "storage",
+      "logical_owner": "storage",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "_settlement",
+      "request": "SettlementGetRequest",
+      "response": "SettlementGetReply",
+      "deadline_ms": 5000,
+      "errors": [
+        "NOT_FOUND"
+      ],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "propagate-to-worker-before-release"
+    }
+  ],
+  "data_owners": {
+    "arena.account": "auth",
+    "arena.player": "lobby",
+    "arena.inventory": "storage",
+    "arena.game_match": "room",
+    "arena.match_player": "room",
+    "arena.settlement": "storage",
+    "arena.outbox": "storage",
+    "arena.asset_transfer": "storage",
+    "arena.asset_ledger": "storage",
+    "arena.consumer_receipt": "storage",
+    "arena.outbox_delivery": "storage",
+    "arena.settlement_reward_projection": "storage",
+    "arena.runtime_ids": "storage",
+    "arena.item": "storage",
+    "public.arena_schema_migrations": "storage"
+  },
+  "service_class": "StorageService"
+}

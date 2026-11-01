@@ -130,6 +130,53 @@ class Acceptance:
             "AllocateIdsReply", count=0), INVALID_ARGUMENT)
         return dict(auth_required=True, canonical_player=reply.player.player_id)
 
+    async def wire_contract(self):
+        from shared.runtime.rpc import NOT_FOUND, INVALID_ARGUMENT
+        contract = json.loads((self.args.repository_root/'services/storage/contract.json').read_text())
+        declared = {value["name"]: value for value in contract["methods"]}
+        require(len(declared) == 7, "all deployed Storage APIs require contracts")
+        require(set(declared) == {"account.find", "player.get", "match.allocate_ids",
+            "match.save_result", "match.get", "settlement.get", "health.ready"},
+            "wire acceptance must cover every registered method")
+        request_fields = self.protocol.Request.DESCRIPTOR.fields_by_name
+        response_fields = self.protocol.Response.DESCRIPTOR.fields_by_name
+        require(all(name in request_fields for name in
+            ("deadline_unix_ms", "correlation_id", "idempotency_key", "method")),
+            "request envelope lost the deadline/idempotency contract")
+        require(all(name in response_fields for name in ("status", "retryable", "correlation_id")),
+            "response envelope lost the error contract")
+        for name, value in declared.items():
+            require(value["owner"] == "storage" and value["logical_owner"]
+                and 0 < value["deadline_ms"] <= 5000 and "errors" in value
+                and value["idempotency"]["automatic_retries"] == 0,
+                "incomplete contract for "+name)
+            for direction in ("request", "response"):
+                if value[direction] is not None:
+                    self.protocol.message("arena.storage."+value[direction])
+            # Each actual handler must reject a malformed payload through the
+            # same authenticated TCP transport used by production clients.
+            await self.expect(lambda name=name: self.client.call(name, b"\xff"), INVALID_ARGUMENT)
+        require(await self.client.call("health.ready") == b"", "readiness reply must be empty")
+        player = await self.call("player.get", "PlayerGetRequest", "PlayerGetReply", player_id=42)
+        require(player.player.player_id == 42 and player.player.account_id == 1,
+                "player.get returned another canonical identity")
+        for method, request, reply, field in (
+            ("player.get", "PlayerGetRequest", "PlayerGetReply", "player_id"),
+            ("match.get", "MatchGetRequest", "MatchGetReply", "match_id"),
+            ("settlement.get", "SettlementGetRequest", "SettlementGetReply", "settlement_id")):
+            await self.expect(lambda: self.call(method, request, reply, **{field: (1 << 63)-1}), NOT_FOUND)
+        await self.expect(lambda: self.client.call("missing.method"), NOT_FOUND)
+        payload = self.message("AllocateIdsRequest", count=1).SerializeToString()
+        ranges = [self.message("AllocateIdsReply").FromString(await self.client.call(
+            "match.allocate_ids", payload, idempotency_key="same-key-does-not-deduplicate"))
+            for _ in range(2)]
+        require(ranges[0].first == ranges[0].last and ranges[1].first == ranges[1].last
+                and ranges[0].last < ranges[1].first,
+                "non-idempotent allocation must not reuse a block on the same transport key")
+        return dict(declared_methods=sorted(declared), malformed_payloads_rejected=7,
+                    readiness_empty_reply=True, canonical_player_lookup=True,
+                    id_allocation_non_idempotent=True, automatic_retries=0)
+
     def result(self, match_id, *, state="completed", reason="completed"):
         return self.message("MatchRecord", match_id=match_id, room_id=(1 << 63)|match_id,
             state=state, result_version=1, final_tick=100, final_checksum=(1 << 64)-1,
@@ -466,6 +513,7 @@ class Acceptance:
     async def run(self):
         for name, action in (
             ("authenticated_canonical_account_and_validation", self.auth_and_lookup),
+            ("all_registered_rpc_wire_contracts", self.wire_contract),
             ("persist_restart_idempotent_result_with_redis_down", self.persist_restart_replay),
             ("abort_and_atomic_fk_failure", self.abort_and_rollback),
             ("concurrent_durable_ids_and_idempotent_result", self.concurrent_id_and_result),

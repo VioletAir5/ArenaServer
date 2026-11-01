@@ -2,9 +2,11 @@
 
 This module provides the reviewed PostgreSQL 14+ schema, ordered migrations and a synchronous Python asset-transfer entry point.
 It includes transaction-scoped Account/Match repositories and a bounded Python connection pool.
-The storage process now provides settlement and outbox workers through internal RPC. Gateway still uses its file account snapshot and in-memory
-session, match and room services. Applying this schema does not make those paths
-persistent.
+The Storage process exposes authenticated internal RPC. Gateway can enable
+`PersistentStorage` for canonical account/MMR reads, durable match-ID blocks,
+terminal results and atomic settlement. The file-account mode remains available.
+Live sessions, queued tickets and active rooms are still process-local; storing
+terminal results does not provide active-room recovery.
 
 ## Files and ownership
 
@@ -13,13 +15,16 @@ persistent.
 - `migrations/001_initial.down.sql`: destructive rollback in explicit dependency
   order, including functions, domains and the schema. It uses no `CASCADE`.
 - `migrations/002_asset_transfer.up.sql` / `.down.sql`: additive immutable transfer receipts and explicit rollback.
+- `migrations/003_settlement_outbox.up.sql` / `.down.sql`: ledger and reliable delivery state.
+- `migrations/004_runtime_ids.up.sql` / `.down.sql`: durable match-ID block reservations.
+- `migrations/005_result_controls.up.sql` / `.down.sql`: final dx/dy controls.
 - `assets.py`: atomic transfer SQL; the fresh and pooled paths share one transaction executor.
 - `transactions.py`: retry budget, stable storage errors, single COMMIT owner and exact loan release.
 - `database.py`: bounded Psycopg pool and transaction-scoped UnitOfWork.
 - `repositories.py`: parameterized Account/Player and Match persistence, immutable records.
 - `application.py`: SQL-free atomic account/player registration workflow.
 - `migrate.py`: Python standard-library orchestration of one `psql` process.
-  Only reviewed versions 001 through 004 are supported; it does not discover arbitrary migrations.
+  Only reviewed versions 001 through 005 are supported; it does not discover arbitrary migrations.
 - `fixtures/seed.sql`: separate, deterministic test data. It is not run by `up`
   and must not be treated as production accounts or runtime settlement output.
 
@@ -37,7 +42,7 @@ standard library and psql. Asset transfers use Python 3.10+, Psycopg and libpq
 | `item` | Explicit item ID; unique lowercase catalog code of 1..64 bytes; bounded display name. |
 | `inventory` | Composite `(player_id, item_id)` PK and both FKs; nonnegative signed-bigint quantity and revision. |
 | `game_match` | One authoritative battle ID and room ID; `forming`/`running`/`completed`/`aborted` with consistent nullable result fields and finite timestamps; winner must be a participant. |
-| `match_player` | Composite `(match_id, player_id)` PK; unique slot 1 or 2; FKs to match/player; logical session and membership epoch; initial MMR, last input sequence and final integer position. |
+| `match_player` | Composite `(match_id, player_id)` PK; unique slot 1 or 2; FKs to match/player; logical session and membership epoch; initial MMR, last input sequence, final integer position and last dx/dy controls in -1..1. |
 | `settlement` | One settlement per terminal match; unique nonzero UUID idempotency key; 32-byte request hash; bounded object payload; consistent attempt/retry/commit/failure fields. |
 | `asset_transfer` | Nonzero UUID PK; source/destination player and item FKs; distinct players; positive bigint quantity; finite creation time; immutable successful command identity. |
 | `outbox` | Nonzero UUID event ID; FK to a committed settlement; one global `settlement.committed` event per source; bounded object payload; pending/published delivery fields. |
@@ -89,9 +94,12 @@ These guards cover ordinary DML, not privileged TRUNCATE/DDL or disabled trigger
 Outbox inserts start pending/unattempted; each update records at
 most one attempt, and published events retain immutable identity and payload.
 A publication timestamp must not precede the event's `available_at`.
-A future write transaction must compare the stored request hash and outcome before reporting idempotent
-success. The successful-transfer receipt journal is separate from settlement. There is no reward distribution, durable retry worker,
-per-recipient outbox or exactly-once delivery implementation in this change.
+The settlement repository compares canonical command hashes before returning a
+replay. The successful-transfer receipt journal is separate from settlement.
+Completed results award inventory and create a ledger/receipt/outbox atomically;
+an opt-in publisher consumes events with receipt deduplication. Delivery is at
+least once. There is no per-recipient external broker or network exactly-once
+protocol.
 
 The JSONB payload checks require an object of at most 65536 bytes in PostgreSQL's
 rendered text representation. They do not validate application-specific fields or
@@ -156,8 +164,8 @@ The runner owns `public.arena_schema_migrations` with these five columns:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `version` | `smallint` PK, positive | Ordered supported versions 1 through 4. |
-| `name` | `text NOT NULL` | The reviewed migration name matching versions 001 through 004. |
+| `version` | `smallint` PK, positive | Ordered supported versions 1 through 5. |
+| `name` | `text NOT NULL` | The reviewed migration name matching versions 001 through 005. |
 | `up_sha256` | `text NOT NULL` | SHA256 of the exact up-file bytes. |
 | `down_sha256` | `text NOT NULL` | SHA256 of the exact down-file bytes. |
 | `applied_at` | `timestamptz NOT NULL` | Database application time. |
@@ -166,11 +174,11 @@ Both checksums must be 64 lowercase hexadecimal characters. Existing column
 order/types/NOT NULL properties and the version PK are checked before history is
 used. Unknown versions, gaps, renamed migrations and changed up **or down** bytes
 fail closed, including for `status`. Accepted history is empty with no `arena`
-schema, or a matching nonempty ordered prefix of `[1,2,3,4]` with the schema present.
+schema, or a matching nonempty ordered prefix of `[1,2,3,4,5]` with the schema present.
 An existing 001 deployment can be upgraded without rewriting its reviewed files
-or data: `up` applies its missing suffix through 004. From an empty database,
-`up` applies all four in one transaction. `down` rolls every applied migration
-back in reverse order (004, 003, 002, then 001), including the migration ledger; it is not a one-version downgrade.
+or data: `up` applies its missing suffix through 005. From an empty database,
+`up` applies all five in one transaction. `down` rolls every applied migration
+back in reverse order (005, 004, 003, 002, then 001), including the migration ledger; it is not a one-version downgrade.
 These checks detect migration history/artifact drift; they do not fingerprint
 every live business object against arbitrary manual DDL edits. Preserve all
 applied migration bytes and add a new reviewed version for future changes.
@@ -195,26 +203,43 @@ Success returns exit code **0** and one JSON object on stdout, after psql confir
 COMMIT. For example:
 
 ```json
-{"action":"up","state":"applied","version":4,"changed":true,"up_sha256":"<64 hex>","down_sha256":"<64 hex>"}
+{"action":"up","state":"applied","version":5,"changed":true,"up_sha256":"<64 hex>","down_sha256":"<64 hex>"}
 ```
 
-`state` is `applied` or `unapplied`; `version` is 1, 2, 3, 4 or null. `changed` is false for
+`state` is `applied` or `unapplied`; `version` is 1, 2, 3, 4, 5 or null. `changed` is false for
 `status` and repeated no-ops. Hashes identify the applied head; when unapplied (including after `down`), they
-identify the latest local supported migration (004), while `version` is null. Failure returns **2**, writes a
+identify the latest local supported migration (005), while `version` is null. Failure returns **2**, writes a
 short diagnostic to stderr and emits no success JSON. Server errors include a
 SQLSTATE when available, without query text, credentials or connection details.
 
-## Runtime integration still required
+## Gateway persistence mode
 
-The gateway must reserve durable match-ID blocks from Storage and retain stable
-session and idempotency identities across handoff. `work.ids` supplies the durable
-allocator; a local counter or random boot seed does not establish uniqueness.
-A conflicting existing match must pass canonical payload comparison before it
-can be called a replay.
+After applying all migrations, start Storage with the descriptor generated by
+CMake. In the Gateway environment set `ARENA_STORAGE_PORT`, the same private
+`ARENA_INTERNAL_TOKEN`, `ARENA_SETTLEMENT_SPOOL_DIR` and `ARENA_JWT_KEY`, then run
+`build/services/gateway/app/ArenaServer asio handshake`. The spool directory must
+be private and has one process owner. `ARENA_STORAGE_TIMEOUT_MS` defaults to
+1000 ms (range 1..5000); `ARENA_STORAGE_ID_BLOCK` defaults to 128 (range 1..1024).
 
-C++ gateway authentication/result hooks and a production outbox transport still
-need wiring. The migration CLI performs maintenance DDL only; never call it from
-a connection owner or room tick loop.
+The adapter primes confirmed durable ID blocks before admission, performs account
+RPC/KDF away from the connection owner, and fsyncs frozen terminal results before
+attempting `match.save_result`. Room remains Settling until a canonical committed
+acknowledgment arrives. A process restart replays durable pending results and can
+query committed results for an authenticated participant. Save admission alone
+is not fsync completion. Process-local sessions and active rooms do not survive
+Gateway restart. Exhausted records become `.failed`; they need explicit operator
+requeue and do not acquire a fresh automatic retry budget.
+
+`MatchRepository.get_for_result` obtains the match's transaction advisory lock
+before reading/creating the parent. It serializes concurrent identical result
+writes before unique-index/state transitions. Its signed-bigint namespace is
+separate from the migration runner's two-int namespace. SERIALIZABLE stale
+snapshots still retry the whole transaction. A conflicting payload returns
+CONFLICT; a lost COMMIT reply requires the same immutable match identity.
+
+The migration CLI performs maintenance DDL only; never call it from a connection
+owner or room tick loop. Global session fencing, active-room recovery and remote
+libpq hard cancellation remain separate work.
 
 ## Verification
 
@@ -358,7 +383,8 @@ tests; missing dependencies cause configure failure rather than a silent skip.
 ## Repository and pooled transaction interface
 
 Install the pinned `psycopg` and `psycopg_pool` versions in `requirements.txt`.
-The repository interface is synchronous Python; the separate RPC process uses bounded workers. The C++ gateway remains unwired.
+The repository interface is synchronous Python; the separate RPC process uses
+bounded workers. Gateway accesses that process through `PersistentStorage`.
 Call it from a storage worker, not a connection owner or room tick thread.
 
 ```python
@@ -393,7 +419,7 @@ not a sandbox against hostile introspection. Callback side effects outside SQL
 remain prohibited because an entire callback can run again.
 
 AccountRepository supports create/get/find_by_name, state changes, player
-creation and lookup. MatchRepository supports create/get/start/finish/abort; it
+creation and lookup. MatchRepository supports create/get/get_for_result/start/finish/abort; it
 locks the parent before reading or modifying a roster, uses explicit transitions
 and preserves the database guards. Use create's optional `created_at` for a
 historical event so a later `started_at` does not precede database creation time.
@@ -466,7 +492,8 @@ Retries use bounded jitter; exhausted/permanent failures become dead letters.
 `SettlementOutboxAcceptance` covers repeated delivery and six SIGKILL crash points.
 
 Additive migration 003 owns ledger/outbox support; 004 owns monotonic durable
-match-ID block reservations. Gaps are allowed; reserved IDs cannot be reused.
+match-ID block reservations; 005 persists final directional controls. Gaps are
+allowed; reserved IDs cannot be reused.
 Install both storage and `shared/runtime/requirements.txt`, build
 `arena_rpc_proto`, apply all migrations, and launch:
 
@@ -481,11 +508,36 @@ The authenticated loopback process exposes account/player lookup, ID reservation
 atomic terminal match/settlement writes and queries. The typed contract is
 `shared/proto/storage.proto`. The current server reward policy grants 10 units of
 item 1 to each completed-match participant; aborts award nothing. Redis projection
-runs only after acknowledged PG commit. The C++ gateway still needs this process
-wired into its existing in-memory journey.
+runs only after acknowledged PG commit. `--publish` enables a single bounded
+outbox worker; it is off by default and joins before pool shutdown.
 
 Worker cancellation retains admission until SQL and cancellation actually finish.
 A loan observer detaches before pool return so stale cancellation cannot target
 the next borrower. SQL timeouts use the request budget. Before libpq 17, remote
 cancel network I/O is not hard bounded; local Unix-socket functional acceptance
 does not establish remote outage deadlines or production performance SLOs.
+## Executable architecture contracts
+
+`contract.json` declares every deployed Storage method's physical and logical
+owner, current caller, deadline, public errors, cancellation and idempotency.
+The current shared service credential is not a per-method caller ACL. Auth/Lobby
+process separation remains planned; Gateway currently embeds those workflows.
+
+Run the source boundary check and negative contract fixtures from the repository
+root:
+
+```sh
+python3 tools/architecture/boundary_lint.py --root . \
+  --report build/architecture/boundary-lint.json \
+  --dot build/architecture/dependencies.dot
+ctest --test-dir build -R '^ArchitectureBoundary' --output-on-failure
+ctest --test-dir build -R '^(InternalRpcBoundary|StorageRpcAcceptance|PersistentGatewayJourney)$' --output-on-failure
+```
+
+The linter derives build/include/import/RPC graphs from current sources and
+checks table ownership against actual CREATE TABLE statements. It rejects SQL
+and database drivers outside Storage persistence, undeclared APIs and dependency
+cycles. CTest injects violations in private source copies, including Lobby using
+Room implementation, Auth reading Player SQL and an actual two-service RPC
+cycle. Static literal checks do not prove arbitrary generated C++ or runtime
+code; compiler and real PostgreSQL/TCP tests remain required.
