@@ -371,6 +371,19 @@ class Acceptance:
             return coroutine(None)
         for operation in (None,coroutine,generator,coroutine_result):
             self.error(lambda:database.run(operation,self.budget),"invalid_operation")
+        for invalid_budget in (None, True, .1, object()):
+            callbacks = []
+            requests = database.stats.get("requests_num", 0)
+            try:
+                database.run(lambda work:callbacks.append(work), invalid_budget)
+            except ValueError:
+                pass
+            else:
+                raise Failure("invalid retry budget was admitted")
+            require(not callbacks and database.stats.get("requests_num", 0) == requests,
+                    "invalid retry budget borrowed a connection or ran business code")
+            require(database.run(lambda u:u.accounts.get(1),self.budget).value.account_id == 1,
+                    "invalid retry budget poisoned subsequent transactions on its owner thread")
         self.error(lambda:database.run(lambda _:database.run(lambda u:u.accounts.get(1)),self.budget),
                    "nested_transaction",attempts=1)
         require(database.run(lambda u:u.accounts.get(1),self.budget).value.account_id==1,
@@ -381,7 +394,8 @@ class Acceptance:
             self.error(lambda:database.run(lambda u:u.matches.get_for_result(invalid),self.budget),
                        "invalid_request",attempts=1)
         self.released(database,replenish=True)
-        return dict(async_generator_rejected=True,nested_rejected=True, invalid_ids_rejected=True)
+        return dict(async_generator_rejected=True,nested_rejected=True, invalid_ids_rejected=True,
+                    invalid_budgets_rejected_before_checkout=True, owner_recovers_after_invalid_budget=True)
 
     def pool_full_and_shutdown(self):
         rounds = []

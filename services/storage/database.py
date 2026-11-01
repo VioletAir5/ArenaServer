@@ -226,6 +226,8 @@ class Database:
     def run(self, operation, budget=RetryBudget(), *, _request_guard=None, **retry_options):
         if getattr(self._local, "running", False):
             raise StorageError("nested_transaction")
+        if not isinstance(budget, RetryBudget):
+            raise ValueError("budget must be a RetryBudget")
         if (not callable(operation) or inspect.iscoroutinefunction(operation)
                 or inspect.isgeneratorfunction(operation) or inspect.isasyncgenfunction(operation)):
             raise StorageError("invalid_operation")
@@ -241,10 +243,10 @@ class Database:
             finally:
                 session.revoke()
         self._local.running = True
-        parent = current_guard()
-        guard = _request_guard or RequestGuard(time.monotonic()+budget.max_elapsed,
-                                              parent=parent)
         try:
+            parent = current_guard()
+            guard = _request_guard or RequestGuard(time.monotonic()+budget.max_elapsed,
+                                                  parent=parent)
             with guard_scope(guard):
                 return _run_transaction(self._borrow, invoke, budget, _guard=guard, **retry_options)
         finally:
