@@ -18,6 +18,8 @@
 
 namespace service::gateway
 {
+class RequestExecution;
+
 using MsgId = arena::protocol::MsgId;
 using ErrorCode = arena::protocol::ErrorCode;
 
@@ -37,6 +39,9 @@ struct RequestMessage
     // Metadata is immutable; session mutation still requires the
     // connection owner.
     ConnectionContext::Ptr context;
+    /// Dispatcher-provided execution fence; absent only in direct
+    /// legacy calls.
+    std::shared_ptr<RequestExecution> execution{};
 };
 
 using MessageReply = std::

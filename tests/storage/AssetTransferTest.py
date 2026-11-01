@@ -128,17 +128,32 @@ class Acceptance:
         self.query("CREATE TABLE public.asset_probe(id integer PRIMARY KEY,value integer NOT NULL CHECK(value>=0));"
                    "INSERT INTO public.asset_probe VALUES(1,0),(2,0)")
 
-    def _bounded_serialization_rejection(self, error, budget):
-        require(error.category in ("retry_exhausted", "budget_exhausted") and error.sqlstate == "40001",
-                "unexpected bounded rejection: " + str(self.error_details(error)))
-        require(error.last_failure_category == "serialization" and error.failures
-                and all(state == "40001" for state in error.failures),
-                "bounded rejection lost serialization history")
+    def _bounded_contention_rejection(self, error, budget):
+        # A finite lock wait may terminate an otherwise retryable serialization
+        # history. Only 40001 may precede this final, non-retried 55P03.
+        lock_timeout = error.category == "lock_timeout"
+        if lock_timeout:
+            require(error.sqlstate == "55P03"
+                    and error.last_failure_category == "lock_timeout"
+                    and error.failures and error.failures[-1] == "55P03"
+                    and all(state == "40001" for state in error.failures[:-1]),
+                    "unexpected lock-timeout history: " + str(self.error_details(error)))
+        else:
+            require(error.category in ("retry_exhausted", "budget_exhausted")
+                    and error.sqlstate == "40001",
+                    "unexpected bounded rejection: " + str(self.error_details(error)))
+            require(error.last_failure_category == "serialization" and error.failures
+                    and all(state == "40001" for state in error.failures),
+                    "bounded rejection lost serialization history")
         require(1 <= error.attempts <= budget.max_attempts
                 and len(error.failures) == error.attempts
-                and len(error.delays) <= error.attempts,
+                and len(error.delays) <= error.attempts
+                and math.isfinite(error.elapsed) and error.elapsed >= 0,
                 "bounded rejection exceeded attempt accounting")
-        if error.category == "retry_exhausted":
+        if lock_timeout:
+            require(len(error.delays) == error.attempts-1,
+                    "lock timeout was retried automatically or lost retry accounting")
+        elif error.category == "retry_exhausted":
             require(error.attempts == budget.max_attempts and len(error.delays) == error.attempts-1,
                     "attempt cap was not enforced exactly")
         else:
@@ -219,7 +234,7 @@ class Acceptance:
                 "did not classify all 100 workers/1000 command identities")
         for request,error in rejected:
             self.record(error)
-            self._bounded_serialization_rejection(error,self.budget)
+            self._bounded_contention_rejection(error,self.budget)
         for request,result in successful:
             self.record(result)
             require(not result.value.replayed and result.value.transfer_id == request.transfer_id
@@ -293,7 +308,7 @@ class Acceptance:
         budget = replace(self.budget,max_attempts=1)
         error = self.error(lambda:self.api.transfer(factory,request,budget),
                            "retry_exhausted","40001",1)
-        self._bounded_serialization_rejection(error,budget)
+        self._bounded_contention_rejection(error,budget)
         require(raced and self.balances(214)=={42:(10,0),43:(0,0)}
                 and self.receipt_count(request.transfer_id)==0,
                 "funded bounded rejection retained writes or a successful receipt")
@@ -367,20 +382,7 @@ class Acceptance:
                 {r.transfer_id for r,_ in successful+rejected}=={r.transfer_id for r in requests},
                 "high-contention report did not classify every submitted UUID")
         for request,error in rejected:
-            require(error.category in ("retry_exhausted","budget_exhausted") and error.sqlstate=="40001",
-                    "unexpected bounded rejection: "+str(self.error_details(error)))
-            require(error.last_failure_category=="serialization" and error.failures and
-                    all(state=="40001" for state in error.failures),"bounded rejection lost serialization history")
-            require(1<=error.attempts<=self.budget.max_attempts and
-                    len(error.failures)==error.attempts and len(error.delays)<=error.attempts,
-                    "bounded rejection exceeded attempt accounting")
-            if error.category=="retry_exhausted":
-                require(error.attempts==self.budget.max_attempts and
-                        len(error.delays)==error.attempts-1,"attempt cap was not enforced exactly")
-            else:
-                require(error.elapsed>=self.budget.max_elapsed,"budget rejected before its elapsed limit")
-            require(all(delay<=min(self.budget.max_delay,self.budget.base_delay*(2**index))
-                        for index,delay in enumerate(error.delays)),"bounded rejection exceeded jitter ceiling")
+            self._bounded_contention_rejection(error,self.budget)
         expected = {211:{42:[10000,0],43:[10000,0]},
                     212:{42:[10000,0],43:[10000,0]},213:{42:[10000,0]}}
         successes = Counter()
@@ -625,7 +627,9 @@ class Acceptance:
             hold.execute("SELECT * FROM arena.inventory WHERE player_id=42 AND item_id=240 FOR UPDATE")
             budget=self.api.RetryBudget(lock_timeout_ms=50,statement_timeout_ms=1000)
             request=self.request(item=240)
-            self.error(lambda:self.api.transfer(self.connect,request,budget),"lock_timeout","55P03",1)
+            error=self.error(lambda:self.api.transfer(self.connect,request,budget),"lock_timeout","55P03",1)
+            self.report["lock_timeout_oracle"] = self.error_details(error)
+            self._bounded_contention_rejection(error,budget)
             require(not self.receipt_count(request.transfer_id),"lock timeout committed a receipt")
         finally:
             hold.close()

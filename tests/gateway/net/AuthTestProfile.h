@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <iostream>
 
 #include "net/LoginHandler.h"
@@ -78,6 +79,18 @@ inline ConnectionHandlerFactory makeAuthTestFactory(
                                                    // a default key.
     if (!presence)
         config.now = [] { return 1700000000LL; };
+    else
+        // Host wall-clock corrections are outside transport/session
+        // acceptance. Keep token expiry advancing with real elapsed
+        // time; grace deadlines and room ticks also use steady time.
+        config.now = [started = std::chrono::steady_clock::now()]
+        {
+            return 1700000000LL +
+                   std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::steady_clock::now() - started
+                   )
+                       .count();
+        };
     if (!registry)
         registry = std::make_shared<OnlineRegistry>();
     auto routes = makeLoginMessageRegistry(

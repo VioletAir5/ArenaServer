@@ -20,6 +20,7 @@ class Acceptance:
         self.args, self.cluster = args, cluster
         self.database = "arena_rpc_storage"
         self.process, self.port = None, None
+        self.publish_outbox = False
         self.log = []
         self.token = "private-fixture-token-" + "x"*40
         from shared.runtime.protocol import Protocol
@@ -41,12 +42,15 @@ class Acceptance:
             cursor = connection.execute(sql, values or None)
             return cursor.fetchall() if cursor.description else []
 
-    def start(self):
+    def start(self, *, publish=None):
+        if publish is not None:
+            self.publish_outbox = publish
         environment = self.cluster.environment(self.database)
         environment.update(ARENA_INTERNAL_TOKEN=self.token, PYTHONDONTWRITEBYTECODE="1")
         self.process = subprocess.Popen([sys.executable, "-m", "services.storage.server",
             "--descriptor", str(self.args.descriptor), "--port", "0", "--workers", "2",
-            "--redis-socket", str(self.cluster.root/"missing-redis.sock")],
+            "--redis-socket", str(self.cluster.root/"missing-redis.sock")] +
+            (["--publish"] if self.publish_outbox else []),
             cwd=self.args.repository_root, env=environment, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         with selectors.DefaultSelector() as selector:
@@ -73,6 +77,9 @@ class Acceptance:
         require(stopped["worker"]["active"] == 0 and stopped["pool"]["checked_out"] == 0,
                 "Storage process leaked worker slots or PostgreSQL loans")
         require(stopped["pool"]["closed"], "Storage pool remained open")
+        publisher = stopped["publisher"]
+        require(publisher["closed"] and not publisher["active"],
+                "outbox worker remained active when the pool closed")
         self.log.append(stopped)
 
     async def call(self, method, request_name, reply_name, **values):
@@ -201,10 +208,20 @@ class Acceptance:
         return dict(abort_no_reward=True, failed_roster_rolled_back=True)
 
     async def concurrent_id_and_result(self):
+        from shared.runtime.rpc import RpcError, CONFLICT
+        def outcome(reply):
+            if isinstance(reply, RpcError):
+                return dict(kind="RpcError", status=reply.status, retryable=reply.retryable)
+            if isinstance(reply, BaseException):
+                return dict(kind=type(reply).__name__)
+            return dict(kind="SaveResultReply", checksum=reply.match.final_checksum,
+                        replayed=reply.replayed, event_id=reply.settlement.event_id)
         ranges = await asyncio.gather(*(self.call("match.allocate_ids", "AllocateIdsRequest",
             "AllocateIdsReply", count=3) for _ in range(2)))
         identities = [identity for value in ranges for identity in range(value.first, value.last+1)]
         require(len(set(identities)) == 6, "concurrent allocator returned overlapping ranges")
+        balances = self.query("SELECT player_id,quantity,revision FROM arena.inventory WHERE item_id=1 "
+                              "AND player_id IN (42,43) ORDER BY player_id")
         value = self.result(identities[0])
         # A private trigger widens the actual unique-key race, without mocking PG.
         self.query("CREATE FUNCTION arena.rpc_insert_barrier() RETURNS trigger LANGUAGE plpgsql AS "
@@ -213,26 +230,65 @@ class Acceptance:
                    "FOR EACH ROW EXECUTE FUNCTION arena.rpc_insert_barrier()")
         try:
             replies = await asyncio.gather(*(self.call("match.save_result", "SaveResultRequest",
-                "SaveResultReply", match=value) for _ in range(2)))
-            require(sum(not reply.replayed for reply in replies) == 1,
-                    "concurrent duplicate results did not produce one original commit")
-            from shared.runtime.rpc import RpcError, CONFLICT
+                "SaveResultReply", match=value) for _ in range(2)), return_exceptions=True)
+            self.report["concurrent_duplicate_outcomes"] = [outcome(reply) for reply in replies]
+            require(all(not isinstance(reply, BaseException) for reply in replies)
+                    and sum(not reply.replayed for reply in replies) == 1,
+                    "concurrent duplicate results did not produce one original commit: "
+                    + json.dumps(self.report["concurrent_duplicate_outcomes"]))
+            require(replies[0].match == replies[1].match
+                    and replies[0].settlement.event_id == replies[1].settlement.event_id
+                    and sum(not reply.settlement.replayed for reply in replies) == 1,
+                    "concurrent duplicate results did not retain one canonical match/receipt")
             conflict_a = self.result(identities[1])
             conflict_b = self.result(identities[1])
             conflict_b.final_checksum = 42
+            commands = (conflict_a, conflict_b)
             contested = await asyncio.gather(*(self.call("match.save_result", "SaveResultRequest",
-                "SaveResultReply", match=command) for command in (conflict_a, conflict_b)),
-                return_exceptions=True)
+                "SaveResultReply", match=command) for command in commands), return_exceptions=True)
+            self.report["concurrent_result_outcomes"] = [outcome(reply) for reply in contested]
+            self.report["concurrent_result_database"] = dict(
+                terminal=[(state, int(checksum)) for state, checksum in self.query(
+                    "SELECT state,final_checksum FROM arena.game_match WHERE match_id=%s",
+                    (identities[1],))],
+                ledger=self.query("SELECT count(*) FROM arena.asset_ledger WHERE settlement_id=%s",
+                                  (identities[1],))[0][0],
+                receipt=self.query("SELECT count(*) FROM arena.settlement WHERE match_id=%s",
+                                   (identities[1],))[0][0])
             require(sum(isinstance(reply, RpcError) and reply.status == CONFLICT
                         for reply in contested) == 1,
-                    "concurrent mismatched result did not reject exactly one payload")
-            require(self.query("SELECT count(*) FROM arena.asset_ledger WHERE settlement_id IN (%s,%s)",
-                               (identities[0], identities[1]))[0][0] == 4,
-                    "concurrent result commands duplicated or orphaned reward credits")
+                    "concurrent mismatched result did not reject exactly one payload: "
+                    + json.dumps(self.report["concurrent_result_outcomes"]))
+            winners = [(index, reply) for index, reply in enumerate(contested)
+                       if not isinstance(reply, BaseException)]
+            require(len(winners) == 1 and not winners[0][1].replayed,
+                    "concurrent mismatched result did not acknowledge exactly one original winner")
+            winner_index, winner = winners[0]
+            canonical = self.message("MatchRecord")
+            canonical.CopyFrom(winner.match)
+            for field in ("created_unix_ms", "started_unix_ms", "finished_unix_ms"):
+                canonical.ClearField(field)
+            require(canonical == commands[winner_index],
+                    "acknowledged winner does not match its full original payload")
+            found = await self.call("match.get", "MatchGetRequest", "MatchGetReply",
+                                    match_id=identities[1])
+            require(found.match == winner.match, "mismatched loser overwrote the canonical result")
+            for identity in identities[:2]:
+                counts = self.query("SELECT "
+                    "(SELECT count(*) FROM arena.asset_ledger WHERE settlement_id=%s),"
+                    "(SELECT count(*) FROM arena.settlement WHERE match_id=%s),"
+                    "(SELECT count(*) FROM arena.outbox WHERE settlement_id=%s)",
+                    (identity, identity, identity))[0]
+                require(counts == (2,1,1), "concurrent result left duplicate/orphan credits or receipts")
+            require(self.query("SELECT player_id,quantity,revision FROM arena.inventory WHERE item_id=1 "
+                               "AND player_id IN (42,43) ORDER BY player_id")
+                    == [(player, quantity+20, revision+2) for player, quantity, revision in balances],
+                    "concurrent result commands changed assets beyond two authoritative rewards")
         finally:
             self.query("DROP TRIGGER rpc_insert_barrier ON arena.game_match")
             self.query("DROP FUNCTION arena.rpc_insert_barrier()")
-        return dict(concurrent_id_ranges=2, distinct_ids=6, concurrent_result_replays=2,
+        return dict(concurrent_id_ranges=2, distinct_ids=6, concurrent_duplicate_requests=2,
+                    concurrent_result_replays=1, original_commits=2, exact_inventory_once=True,
                     concurrent_conflict_rejected=True)
 
     async def database_outage_recovery(self):
@@ -253,7 +309,14 @@ class Acceptance:
                        "-c log_min_messages=warning -c timezone=UTC")
             restarted = run([self.cluster.tool("pg_ctl"), "-D", self.cluster.data, "-l", self.cluster.log,
                              "-w", "-t", "15", "-o", options, "start"], self.cluster.base, timeout=20)
-            require(restarted.returncode == 0, "could not restart private PostgreSQL")
+            if restarted.returncode:
+                self.report["pg_restart_failure"] = dict(
+                    returncode=restarted.returncode, stdout=restarted.stdout,
+                    stderr=restarted.stderr, server_log=(
+                        self.cluster.log.read_text(errors="replace")[-12000:]
+                        if self.cluster.log.exists() else "missing"))
+            require(restarted.returncode == 0, "could not restart private PostgreSQL: "
+                    + restarted.stdout + restarted.stderr)
         deadline = time.monotonic()+5
         while True:
             try:
@@ -310,6 +373,96 @@ class Acceptance:
             await worker.close()
             database.close()
 
+    async def wait_for(self, check, message, *, timeout=8):
+        deadline = time.monotonic()+timeout
+        while True:
+            value = check()
+            if value:
+                return value
+            require(time.monotonic() < deadline, message)
+            await asyncio.sleep(.005)
+
+    async def runtime_outbox(self):
+        pending = self.query("SELECT count(*) FROM arena.outbox WHERE state='pending'")[0][0]
+        require(pending > 0, "default-off publisher unexpectedly drained fixture events")
+        balances = self.query("SELECT player_id,quantity FROM arena.inventory WHERE item_id=1 "
+                              "AND player_id IN (42,43) ORDER BY player_id")
+        target = int(self.saved_match.match_id)
+        event = self.query("SELECT event_id FROM arena.outbox WHERE settlement_id=%s", (target,))[0][0]
+        self.stop()
+        require(not self.log[-1]["publisher"]["enabled"], "publisher default changed")
+        # Sequence increments survive transaction rollback, proving every ack
+        # retry failed after the consumer had already committed its receipt.
+        self.query("CREATE SEQUENCE arena.rpc_ack_failures")
+        self.query("CREATE FUNCTION arena.rpc_ack_failure() RETURNS trigger LANGUAGE plpgsql AS "
+                   "$body$ BEGIN PERFORM nextval('arena.rpc_ack_failures'); "
+                   "RAISE EXCEPTION 'private acknowledgement barrier' USING ERRCODE='40001'; END $body$")
+        self.query("CREATE TRIGGER rpc_ack_failure BEFORE UPDATE ON arena.outbox FOR EACH ROW "
+                   f"WHEN (NEW.state='published' AND NEW.settlement_id={target}) "
+                   "EXECUTE FUNCTION arena.rpc_ack_failure()")
+        self.start(publish=True)
+        try:
+            await self.wait_for(lambda: self.query("SELECT is_called AND last_value>=3 "
+                "FROM arena.rpc_ack_failures")[0][0], "runtime publisher did not exhaust the injected ack retries")
+            require(self.query("SELECT count(*) FROM arena.consumer_receipt "
+                               "WHERE consumer='reward_audit' AND event_id=%s", (event,))[0][0] == 1,
+                    "consumer did not commit before acknowledgement failure")
+            require(self.query("SELECT state FROM arena.outbox WHERE event_id=%s",
+                               (event,))[0][0] == "pending", "failed acknowledgement marked the event published")
+        finally:
+            self.query("DROP TRIGGER rpc_ack_failure ON arena.outbox")
+            self.query("DROP FUNCTION arena.rpc_ack_failure()")
+        await self.wait_for(lambda: self.query("SELECT count(*) FROM arena.outbox "
+            "WHERE state='pending'")[0][0] == 0, "runtime publisher did not drain the durable backlog")
+        attempts = self.query("SELECT attempt_count FROM arena.outbox WHERE event_id=%s", (event,))[0][0]
+        require(attempts >= 2, "post-delivery acknowledgement failure was not redelivered")
+        require(self.query("SELECT count(*) FROM arena.consumer_receipt "
+                           "WHERE consumer='reward_audit' AND event_id=%s", (event,))[0][0] == 1,
+                "runtime redelivery duplicated the consumer receipt")
+        require(self.query("SELECT count(*),sum(quantity) FROM arena.settlement_reward_projection "
+                           "WHERE consumer='reward_audit' AND event_id=%s", (event,))[0] == (2,20),
+                "runtime redelivery duplicated or lost the ledger projection")
+        require(self.query("SELECT player_id,quantity FROM arena.inventory WHERE item_id=1 "
+                           "AND player_id IN (42,43) ORDER BY player_id") == balances,
+                "consumer redelivery minted producer rewards again")
+        self.query("DROP SEQUENCE arena.rpc_ack_failures")
+
+        # Stop during actual SQL, not merely between polling iterations. The
+        # pump must finish consume+ack before StorageService closes the pool.
+        self.query("CREATE FUNCTION arena.rpc_slow_consumer() RETURNS trigger LANGUAGE plpgsql AS "
+                   "$body$ BEGIN PERFORM pg_sleep(0.15); RETURN NEW; END $body$")
+        self.query("CREATE TRIGGER rpc_slow_consumer BEFORE INSERT ON arena.consumer_receipt "
+                   "FOR EACH ROW EXECUTE FUNCTION arena.rpc_slow_consumer()")
+        try:
+            allocated = await self.call("match.allocate_ids", "AllocateIdsRequest", "AllocateIdsReply", count=1)
+            value = self.result(allocated.first)
+            reply = await self.call("match.save_result", "SaveResultRequest", "SaveResultReply", match=value)
+            live_event = reply.settlement.event_id
+            await self.wait_for(lambda: self.query("SELECT count(*) FROM pg_stat_activity "
+                "WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active' "
+                "AND query LIKE 'INSERT INTO arena.consumer_receipt(consumer,event_id,payload_hash)%'")[0][0],
+                "runtime consumer did not enter the private PostgreSQL barrier")
+            self.stop()
+        finally:
+            self.query("DROP TRIGGER rpc_slow_consumer ON arena.consumer_receipt")
+            self.query("DROP FUNCTION arena.rpc_slow_consumer()")
+        stopped = self.log[-1]
+        require(stopped["publisher"]["enabled"] and stopped["publisher"]["max_workers"] == 1
+                and stopped["publisher"]["deduplicated"] >= 1 and stopped["publisher"]["errors"] >= 1,
+                "runtime publisher did not report its bounded retry/dedup lifecycle")
+        require(self.query("SELECT state FROM arena.outbox WHERE event_id=%s",
+                           (live_event,))[0][0] == "published", "shutdown abandoned an in-flight acknowledgement")
+        require(self.query("SELECT count(*) FROM arena.consumer_receipt "
+                           "WHERE consumer='reward_audit' AND event_id=%s", (live_event,))[0][0] == 1,
+                "shutdown lost or duplicated the in-flight consumer receipt")
+        after = self.query("SELECT player_id,quantity FROM arena.inventory WHERE item_id=1 "
+                           "AND player_id IN (42,43) ORDER BY player_id")
+        require(after == [(player, quantity+10) for player, quantity in balances],
+                "runtime consumption changed assets beyond the new producer reward")
+        return dict(default_off_preserved=True, pending_drained=pending,
+            redelivery_attempts=attempts, consumer_receipts=1, reward_projection_rows=2,
+            shutdown_during_consume=True, publisher=stopped["publisher"])
+
     async def run(self):
         for name, action in (
             ("authenticated_canonical_account_and_validation", self.auth_and_lookup),
@@ -317,7 +470,8 @@ class Acceptance:
             ("abort_and_atomic_fk_failure", self.abort_and_rollback),
             ("concurrent_durable_ids_and_idempotent_result", self.concurrent_id_and_result),
             ("private_pg_outage_same_process_recovery", self.database_outage_recovery),
-            ("bounded_worker_actual_pg_cancellation_and_reuse", self.worker_cancellation)):
+            ("bounded_worker_actual_pg_cancellation_and_reuse", self.worker_cancellation),
+            ("opt_in_runtime_outbox_drain_dedup_and_inflight_shutdown", self.runtime_outbox)):
             await self.case(name, action)
         self.stop()
         self.report["service_shutdowns"] = self.log

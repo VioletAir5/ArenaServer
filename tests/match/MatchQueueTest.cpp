@@ -950,4 +950,180 @@ TEST(
     EXPECT_EQ(queue.metrics().retained, 0U);
 }
 
+TEST(MatchQueueTest, DurableIdsReplayBeforeAdmissionAndRemainBounded)
+{
+    auto c = config();
+    c.maxTickets = c.maxQueued = 2;
+    std::uint64_t next = 100;
+    std::size_t calls = 0;
+    c.ticketIdSource = [&]() -> std::optional<std::uint64_t>
+    {
+        ++calls;
+        const auto value = next;
+        next += 100;
+        return value;
+    };
+    MatchQueue queue(c);
+    const auto
+        first = queue.join(player(1), session(1), 10, 1500, origin);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->ticketId.value(), 100U);
+    const auto retry = queue.join(
+        player(1),
+        session(1),
+        10,
+        1500,
+        origin + 1ms
+    );
+    const auto alias = queue.join(
+        player(1),
+        session(1),
+        20,
+        1500,
+        origin + 2ms
+    );
+    ASSERT_TRUE(retry);
+    ASSERT_TRUE(alias);
+    EXPECT_EQ(retry->ticketId, first->ticketId);
+    EXPECT_EQ(alias->ticketId, first->ticketId);
+    EXPECT_EQ(calls, 1U);
+    ASSERT_TRUE(
+        queue.join(player(2), session(2), 30, 1500, origin + 3ms)
+    );
+    const auto full = queue.join(
+        player(3),
+        session(3),
+        40,
+        1500,
+        origin + 4ms
+    );
+    ASSERT_FALSE(full);
+    EXPECT_EQ(full.error(), QueueError::Capacity);
+    EXPECT_EQ(calls, 2U);
+    const auto pairs = queue.advance(origin + 5ms);
+    ASSERT_EQ(pairs.size(), 1U);
+    EXPECT_EQ(pairs.front().first.matchId, 100U);
+    EXPECT_EQ(pairs.front().second.matchId, 100U);
+}
+
+TEST(
+    MatchQueueTest,
+    DurableIdSourceRejectsUnavailableInvalidAndReusedValues
+)
+{
+    auto c = config();
+    const std::vector<std::optional<std::uint64_t>>
+        ids{std::nullopt, 0, UINT64_C(1) << 63, 900, 900, 899, 901};
+    std::size_t index = 0;
+    c.ticketIdSource = [&] { return ids.at(index++); };
+    MatchQueue queue(c);
+    for (std::uint64_t id = 1; id <= ids.size(); ++id)
+    {
+        const auto result = queue.join(
+            player(id),
+            session(id),
+            id,
+            1500,
+            origin
+        );
+        if (id == 4 || id == 7)
+        {
+            ASSERT_TRUE(result);
+            EXPECT_EQ(
+                result->ticketId.value(),
+                id == 4 ? 900U : 901U
+            );
+        }
+        else
+        {
+            ASSERT_FALSE(result);
+            EXPECT_EQ(result.error(), QueueError::Capacity);
+        }
+    }
+    EXPECT_EQ(queue.metrics().joined, 2U);
+    EXPECT_EQ(queue.metrics().queued, 2U);
+}
+
+TEST(
+    MatchQueueTest,
+    DurableIdSourceFailureAndReentryCannotCorruptTheQueue
+)
+{
+    auto c = config();
+    MatchQueue* current = nullptr;
+    bool fail = true;
+    c.ticketIdSource = [&]() -> std::optional<std::uint64_t>
+    {
+        EXPECT_THROW(current->metrics(), std::logic_error);
+        if (fail)
+        {
+            fail = false;
+            throw std::runtime_error("allocator unavailable");
+        }
+        return 55;
+    };
+    MatchQueue queue(c);
+    current = &queue;
+    const auto unavailable = queue.join(
+        player(1),
+        session(1),
+        1,
+        1500,
+        origin
+    );
+    ASSERT_FALSE(unavailable);
+    EXPECT_EQ(unavailable.error(), QueueError::Capacity);
+    EXPECT_EQ(queue.metrics().joined, 0U);
+    const auto
+        retry = queue.join(player(1), session(1), 1, 1500, origin);
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(retry->ticketId.value(), 55U);
+}
+
+TEST(MatchQueueTest, DurableIdSourceSurvivesQueueObjectReplacement)
+{
+    auto c = config();
+    std::uint64_t next = 700;
+    c.ticketIdSource = [&]() -> std::optional<std::uint64_t>
+    { return next++; };
+    std::uint64_t previous = 0;
+    {
+        MatchQueue first(c);
+        const auto result = first.join(
+            player(1),
+            session(1),
+            1,
+            1500,
+            origin
+        );
+        ASSERT_TRUE(result);
+        previous = result->ticketId.value();
+    }
+    MatchQueue replacement(c);
+    const auto result = replacement.join(
+        player(1),
+        session(2),
+        2,
+        1500,
+        origin
+    );
+    ASSERT_TRUE(result);
+    EXPECT_GT(result->ticketId.value(), previous);
+}
+
+TEST(
+    MatchQueueTest,
+    DurableIdSourceAcceptsTheLargestSignedPostgresIdentity
+)
+{
+    auto c = config();
+    c.ticketIdSource = []() -> std::optional<std::uint64_t>
+    { return (UINT64_C(1) << 63) - 1; };
+    MatchQueue queue(c);
+    const auto
+        result = queue.join(player(1), session(1), 1, 1500, origin);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->ticketId.value(), (UINT64_C(1) << 63) - 1);
+}
+
 } // namespace

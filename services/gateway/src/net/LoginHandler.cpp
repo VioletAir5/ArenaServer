@@ -5,6 +5,7 @@
 #include "net/LoginHandler.h"
 
 #include "net/MatchHandler.h"
+#include "net/RequestExecution.h"
 #include "net/RoomHandler.h"
 
 namespace service::gateway
@@ -55,6 +56,57 @@ ErrorCode routeError(OnlineError error)
     }
     return arena::protocol::ERR_INTERNAL;
 }
+
+ErrorCode loginError(service::auth::AuthError error)
+{
+    return error == service::auth::AuthError::Unavailable
+               ? arena::protocol::ERR_UNAVAILABLE
+               : arena::protocol::ERR_UNAUTHENTICATED;
+}
+
+/** @brief Installs a verified identity only when invoked by the live
+ * owner. */
+MessageReply installLogin(
+    const RequestMessage& request,
+    PasswordLoginResult player,
+    const std::optional<service::auth::TokenClaims>& resume,
+    const service::auth::JwtTokens& tokens,
+    OnlineRegistry& sessions
+)
+{
+    const auto session = request.context->session;
+    if (session->loginState() !=
+        ConnectionSession::LoginState::Pending)
+        return std::unexpected(arena::protocol::ERR_UNAUTHENTICATED);
+    if (!player)
+        return std::unexpected(loginError(player.error()));
+    auto grant = sessions.install(
+        *player,
+        request.connectionId,
+        resume,
+        tokens,
+        session->closeRequest()
+    );
+    if (!grant)
+        return std::unexpected(loginError(grant.error()));
+    if (!session->bind(grant->lease))
+    {
+        grant->lease->release();
+        return std::unexpected(arena::protocol::ERR_UNAUTHENTICATED);
+    }
+    arena::protocol::Envelope reply;
+    auto* response = reply.mutable_login_response();
+    response->set_accepted(true);
+    response->set_session_token(std::move(grant->token));
+    response->set_player_id(player->value());
+    response->set_session_epoch(grant->lease->binding.epoch);
+    response->set_session_id(grant->snapshot.sessionId.value());
+    response->set_room_id(
+        grant->snapshot.roomId ? grant->snapshot.roomId->value() : 0
+    );
+    response->set_resumed(grant->resumed);
+    return reply;
+}
 } // namespace
 
 std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
@@ -63,10 +115,12 @@ std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
     std::shared_ptr<const service::auth::JwtTokens> tokens,
     std::shared_ptr<OnlineRegistry> sessions,
     std::shared_ptr<MatchmakingService> matchmaking,
-    std::shared_ptr<RoomService> rooms
+    std::shared_ptr<RoomService> rooms,
+    AsyncPasswordLogin asyncPasswords,
+    DurableSettlementLookup settlementLookup
 )
 {
-    if (!passwords || !tokens || !sessions)
+    if ((!passwords && !asyncPasswords) || !tokens || !sessions)
         throw std::invalid_argument(
             "login routes require authentication dependencies"
         );
@@ -85,82 +139,84 @@ std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
     );
     routes->registerHandler(
         arena::protocol::MSG_LOGIN_REQUEST,
-        [passwords, tokens, sessions](auto request, auto complete)
+        [passwords,
+         tokens,
+         sessions,
+         asyncPasswords](auto request, auto complete)
         {
             using service::auth::AuthError;
             const auto fail = [&](AuthError error)
-            {
-                complete(
-                    std::unexpected(
-                        error == AuthError::Unavailable
-                            ? arena::protocol::ERR_UNAVAILABLE
-                            : arena::protocol::ERR_UNAUTHENTICATED
-                    )
-                );
-            };
-            const auto session = request->context->session;
-            if (session->loginState() !=
+            { complete(std::unexpected(loginError(error))); };
+            if (request->context->session->loginState() !=
                 ConnectionSession::LoginState::Pending)
                 return fail(AuthError::Superseded);
-            const auto& login = request->envelope.login_request();
-            std::optional<service::auth::TokenClaims> resume;
-            std::expected<arena::domain::PlayerId, AuthError>
-                player = std::unexpected(
-                    AuthError::InvalidCredentials
-                );
-            if (login.credential_kind() ==
+            // This closure only prepares owning values on foreign
+            // threads. installLogin is evaluated lazily after the
+            // dispatcher's fence.
+            const auto finish =
+                [request, tokens, sessions, complete](
+                    PasswordLoginResult player,
+                    std::optional<service::auth::TokenClaims> resume =
+                        {}
+                )
+            {
+                auto action = [request,
+                               tokens,
+                               sessions,
+                               player = std::move(player),
+                               resume = std::move(resume)]() mutable
+                {
+                    return installLogin(
+                        *request,
+                        std::move(player),
+                        resume,
+                        *tokens,
+                        *sessions
+                    );
+                };
+                if (request->execution)
+                    request->execution->completeOnOwner(
+                        std::move(action)
+                    );
+                else
+                    complete(action());
+            };
+            const auto& credential = request->envelope
+                                         .login_request();
+            if (credential.credential_kind() ==
                 arena::protocol::CREDENTIAL_PASSWORD)
-                player = passwords->authenticate(
-                    login.account(),
-                    login.credential()
+            {
+                if (!asyncPasswords)
+                    return finish(passwords->authenticate(
+                        credential.account(),
+                        credential.credential()
+                    ));
+                const auto execution = request->execution;
+                if (!execution)
+                    return fail(AuthError::Unavailable);
+                auto accepted = asyncPasswords(
+                    credential.account(),
+                    credential.credential(),
+                    execution->deadline(),
+                    execution->correlationId(),
+                    [finish](PasswordLoginResult result)
+                    { finish(std::move(result)); }
                 );
-            else if (
-                login.credential_kind() ==
-                arena::protocol::CREDENTIAL_JWT
-            )
-            {
-                // JWT subject is authoritative; a client cannot
-                // substitute an account.
-                if (!login.account().empty())
-                    return fail(AuthError::InvalidToken);
-                auto claims = tokens->verify(login.credential());
-                if (!claims)
-                    return fail(claims.error());
-                resume = *claims;
-                player = claims->playerId;
+                if (!accepted)
+                    return fail(accepted.error());
+                execution->setCancellation(std::move(*accepted));
+                return;
             }
-            if (!player)
-                return fail(player.error());
-            auto grant = sessions->install(
-                *player,
-                request->connectionId,
-                resume,
-                *tokens,
-                session->closeRequest()
-            );
-            if (!grant)
-                return fail(grant.error());
-            if (!session->bind(grant->lease))
-            {
-                grant->lease->release();
-                return fail(AuthError::Superseded);
-            }
-            arena::protocol::Envelope reply;
-            auto* response = reply.mutable_login_response();
-            response->set_accepted(true);
-            response->set_session_token(std::move(grant->token));
-            response->set_player_id(player->value());
-            response->set_session_epoch(grant->lease->binding.epoch);
-            response->set_session_id(
-                grant->snapshot.sessionId.value()
-            );
-            response->set_room_id(
-                grant->snapshot.roomId
-                    ? grant->snapshot.roomId->value()
-                    : 0
-            );
-            response->set_resumed(grant->resumed);
-            complete(std::move(reply));
+            if (credential.credential_kind() !=
+                    arena::protocol::CREDENTIAL_JWT ||
+                !credential.account().empty())
+                return fail(AuthError::InvalidToken);
+            // JWT subject is authoritative; the client cannot replace
+            // it.
+            auto claims = tokens->verify(credential.credential());
+            if (!claims)
+                return fail(claims.error());
+            finish(claims->playerId, *claims);
         },
         MessageRouteOptions{false}
     );
@@ -254,7 +310,12 @@ std::shared_ptr<const MessageRegistry> makeLoginMessageRegistry(
             std::move(matchmaking)
         );
     if (rooms)
-        registerRoomRoutes(*routes, sessions, std::move(rooms));
+        registerRoomRoutes(
+            *routes,
+            sessions,
+            std::move(rooms),
+            std::move(settlementLookup)
+        );
     routes->seal();
     return routes;
 }

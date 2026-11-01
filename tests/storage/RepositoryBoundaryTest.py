@@ -203,6 +203,77 @@ class Acceptance:
         return dict(account_case_sensitive=True, parameterized_name=name, full_uint64_roundtrip=True,
                     forming_running_completed=True, forming_aborted=True)
 
+    def result_identity_serialization(self):
+        database = self.pool(max_size=3, max_waiting=3, acquire_timeout=1)
+        sample = database.run(lambda u: u.matches.get_for_result(1001), self.budget).value
+        require(sample.match_id == 1001 and len(sample.participants) == 2,
+                "result lookup did not materialize the canonical roster")
+        migration_key = (1095910734 << 32) | 1296648018
+        rounds = []
+        for identity, rollback in ((MAX_ID, False), (1 << 63, True)):
+            entered, release = threading.Event(), threading.Event()
+            def advisory_count(*, granted=None):
+                predicate = "" if granted is None else " AND granted=" + str(granted).lower()
+                return self.query("SELECT count(*) FROM pg_locks WHERE locktype='advisory' "
+                    "AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+                    "AND objsubid=1 AND classid=%s::oid AND objid=%s::oid"+predicate,
+                    (identity >> 32, identity & 0xffffffff))[0][0]
+            def owner(uow):
+                require(uow.matches.get_for_result(identity) is None, "fresh identity already exists")
+                value = uow.matches.create(identity, identity, self.participants())
+                entered.set()
+                require(release.wait(5), "identity owner was not released")
+                if rollback:
+                    raise self.tx.StorageError("invalid_request")
+                return value
+            def competitor(uow):
+                value = uow.matches.get_for_result(identity)
+                return value if value is not None else uow.matches.create(
+                    identity, identity, self.participants(), if_absent=True)
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                owned = workers.submit(database.run, owner, self.budget)
+                try:
+                    require(entered.wait(5), "identity owner did not reach its real PG lock")
+                    require(advisory_count(granted=True) == 1,
+                            "result reservation was not a transaction-level bigint lock")
+                    waiting = workers.submit(database.run, competitor, self.budget)
+                    self.until(lambda: advisory_count(granted=False) == 1,
+                               "same absent identity did not serialize before result insertion")
+                    require(not waiting.done(), "same identity passed its still-held reservation")
+                    independent = ((identity ^ (1 << 63)) or 1, identity ^ (1 << 32))
+                    for other in independent:
+                        database.run(lambda u: u.matches.get_for_result(other), self.budget)
+                    with self.pg.connect(**self.connection_kwargs()) as migration:
+                        migration.execute("SELECT pg_advisory_xact_lock(%s,%s)",
+                                          (1095910734, 1296648018))
+                        require(database.run(lambda u: u.matches.get_for_result(
+                            migration_key), self.budget).value is None,
+                            "result bigint namespace collided with migration's int-pair namespace")
+                    require(self.query("SELECT count(*) FROM pg_locks WHERE locktype='advisory' "
+                        "AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+                        "AND classid=%s::oid AND objid=%s::oid",
+                        (1095910734,1296648018))[0][0] == 0,
+                        "migration/result namespace probe retained a transaction lock")
+                finally:
+                    release.set()
+                if rollback:
+                    self.error(owned.result, "invalid_request", attempts=1)
+                else:
+                    require(owned.result().value.match_id == identity, "identity owner lost its commit")
+                resolved = waiting.result(timeout=5)
+            require(resolved.value.match_id == identity and advisory_count() == 0,
+                    "commit/rollback left an identity reservation or lost the canonical match")
+            if not rollback:
+                require(resolved.attempts == 2 and resolved.failures == ("40001",),
+                        "waiting did not retain SERIALIZABLE's stale snapshot/full-UoW retry")
+            rounds.append(dict(match_id=str(identity), owner_rolled_back=rollback,
+                waiter_attempts=resolved.attempts, waiter_failures=resolved.failures,
+                independent_identities=[str(value) for value in independent],
+                advisory_locks_after=advisory_count()))
+        self.released(database, replenish=True)
+        return dict(full_uint64=True, same_identity_serialized=True, distinct_identities_independent=True,
+            migration_namespace_separate=True, stale_snapshot_retry_preserved=True, rounds=rounds)
+
     def atomicity_and_scope(self):
         database = self.pool()
         retained = []
@@ -306,6 +377,8 @@ class Acceptance:
                 "invalid operation left the owner thread marked active")
         for invalid in (0,-1,True,MAX_ID+1):
             self.error(lambda:database.run(lambda u:u.accounts.get(invalid),self.budget),
+                       "invalid_request",attempts=1)
+            self.error(lambda:database.run(lambda u:u.matches.get_for_result(invalid),self.budget),
                        "invalid_request",attempts=1)
         self.released(database,replenish=True)
         return dict(async_generator_rejected=True,nested_rejected=True, invalid_ids_rejected=True)
@@ -470,6 +543,7 @@ class Acceptance:
                 account_id = self.identity()
                 made, pids = [],[]
                 def operation(uow):
+                    uow.matches.get_for_result(account_id)
                     ObserveCommit.retained.append(uow.accounts)
                     made.append(uow.accounts.create(account_id,"boundary_deferred_"+str(index),DIGEST))
                     return made[-1]
@@ -478,6 +552,10 @@ class Acceptance:
                 error = self.error(lambda:database.run(operation,self.budget),
                                    "integrity_error","23503",attempts=1)
                 require(len(made)==1 and not error.delays,"deferred violation did not fail only at commit")
+                require(self.query("SELECT count(*) FROM pg_locks WHERE locktype='advisory' "
+                    "AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+                    "AND objsubid=1")[0][0] == 0,
+                    "failed COMMIT retained a transaction identity reservation")
                 require(self.query("SELECT count(*) FROM arena.account WHERE account_id=%s",(account_id,))[0][0]==0
                         and self.query("SELECT count(*) FROM public.boundary_fk_child")[0][0]==0,
                         "real COMMIT failure left partial rows")
@@ -494,7 +572,8 @@ class Acceptance:
             self.query("DROP TRIGGER boundary_deferred_account ON arena.account;"
                        "DROP FUNCTION public.boundary_commit_failure();"
                        "DROP TABLE public.boundary_fk_child;DROP TABLE public.boundary_fk_parent")
-        return dict(repetitions=3,actual_commit_failures=ObserveCommit.failures,rounds=rounds)
+        return dict(repetitions=3,actual_commit_failures=ObserveCommit.failures,rounds=rounds,
+                    identity_locks_released_on_commit_failure=True)
 
     def serialization_commit_retry(self):
         setup = self.pool()
@@ -694,6 +773,7 @@ class Acceptance:
         self.setup()
         for name,action in (
             ("repository_roundtrips_and_full_uint64",self.repository_roundtrips),
+            ("result_identity_serialization_full_uint64_and_release",self.result_identity_serialization),
             ("atomicity_and_scoped_repositories",self.atomicity_and_scope),
             ("sql_free_real_application",self.sql_free_application),
             ("invalid_and_nested_operations",self.invalid_and_nested_operations),

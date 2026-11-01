@@ -273,9 +273,11 @@ struct MatchmakingService::State : std::enable_shared_from_this<State>
                         auto bound = online->allocateMatch(
                             pair.first.matchId,
                             {{{pair.first.playerId,
-                               pair.first.sessionId},
+                               pair.first.sessionId,
+                               pair.first.mmr},
                               {pair.second.playerId,
-                               pair.second.sessionId}}}
+                               pair.second.sessionId,
+                               pair.second.mmr}}}
                         );
                         if (bound)
                         {

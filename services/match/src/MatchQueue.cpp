@@ -246,8 +246,35 @@ struct MatchQueue::State
             );
         if (inEligibility)
             throw std::logic_error(
-                "match eligibility must not reenter its queue"
+                "match queue callback must not reenter its queue"
             );
+    }
+
+    /** @brief Consumes a durable range value only for a fresh
+     * admission. */
+    std::optional<std::uint64_t> ticketId()
+    {
+        if (!config.ticketIdSource)
+            return allocateTicketId();
+        std::optional<std::uint64_t> value;
+        inEligibility = true;
+        try
+        {
+            value = config.ticketIdSource();
+        }
+        catch (...)
+        {
+            inEligibility = false;
+            return {};
+        }
+        inEligibility = false;
+        if (!value || !*value || *value >= (std::uint64_t{1} << 63) ||
+            *value <= lastDurableId)
+            return {};
+        // Gaps after a later allocation failure are safe; IDs never
+        // roll back.
+        lastDurableId = *value;
+        return value;
     }
 
     /** @brief Enforces owner affinity and monotonic command ordering.
@@ -730,6 +757,9 @@ struct MatchQueue::State
     /// Guards callback reentry without introducing cross-thread
     /// mutable access.
     bool inEligibility{false};
+    /// Highest valid durable identity consumed, including any
+    /// allocation gap.
+    std::uint64_t lastDurableId{0};
     /// Ordered IDs also preserve admission order because command time
     /// is monotonic.
     std::map<std::uint64_t, std::unique_ptr<Entry>> tickets;
@@ -868,7 +898,7 @@ QueueResult MatchQueue::join(
         state.counts.queued >= state.config.maxQueued)
         return state.reject(QueueError::Capacity);
 
-    const auto id = allocateTicketId();
+    const auto id = state.ticketId();
     if (!id)
         return state.reject(QueueError::Capacity);
     auto entry = std::make_unique<State::Entry>(

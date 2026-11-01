@@ -82,6 +82,9 @@ struct MatchParticipant
     arena::domain::PlayerId playerId;
     /// Logical session sampled by the matching owner.
     arena::domain::SessionId sessionId;
+    /// Server rating captured by this ticket, never re-read at
+    /// settlement.
+    std::uint32_t initialMmr{1500};
     bool operator==(const MatchParticipant&) const = default;
 };
 
@@ -95,6 +98,8 @@ struct MatchRoomMember
     arena::domain::SessionId sessionId;
     /// Exact membership fence captured by atomic allocation.
     std::uint64_t roomEpoch;
+    /// Immutable rating belonging to this allocation cohort.
+    std::uint32_t initialMmr{1500};
     bool operator==(const MatchRoomMember&) const = default;
 };
 

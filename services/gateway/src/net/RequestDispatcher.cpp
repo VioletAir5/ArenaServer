@@ -4,10 +4,13 @@
  */
 #include "net/RequestDispatcher.h"
 
-#include <atomic>
+#include <limits>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
+
+#include "net/RequestExecution.h"
 
 namespace service::gateway
 {
@@ -41,6 +44,27 @@ struct RequestDispatcher::State
             if (auto callback = std::exchange(drained, {}))
                 callback();
     }
+
+    struct CompletionScope
+    {
+        State& state;
+        explicit CompletionScope(State& owner)
+            : state(owner)
+        {
+            ++state.replyDepth;
+        }
+        ~CompletionScope()
+        {
+            --state.replyDepth;
+            try
+            {
+                state.notifyDrained();
+            }
+            catch (...)
+            {
+            }
+        }
+    };
 
     void
     log(std::string_view event,
@@ -99,35 +123,80 @@ struct RequestDispatcher::State
         ConnectionChannel& channel,
         std::uint64_t id,
         std::uint64_t ticket,
-        MessageReply result
+        RequestExecution::OwnerAction action,
+        bool cancelled = false
     )
     {
         const auto found = pending.find(id);
         if (stopped || found == pending.end() ||
             found->second.generation != ticket)
             return;
+        // Removing the pending entry must not let a reentrant drain
+        // overtake the owner action or its accepted reply.
+        CompletionScope completion(*this);
         auto entry = std::move(found->second);
         pending.erase(found);
         entry.timer.reset();
-        if (ConnectionClock::now() >= entry.deadline)
-            result = std::unexpected(arena::protocol::ERR_TIMEOUT);
+        const bool expired = ConnectionClock::now() >= entry.deadline;
+        const bool disconnected = !channel.connected() ||
+                                  context->session->superseded();
+        entry.metadata.request->execution->retire(
+            cancelled || expired || disconnected
+        );
+        // Cancellation can reenter the host and close it inline.
+        if (stopped || !channel.connected() ||
+            context->session->superseded())
+        {
+            log("request_end",
+                *entry.metadata.request,
+                arena::protocol::ERR_OK,
+                "cancelled");
+            return;
+        }
+        MessageReply result = std::unexpected(
+            arena::protocol::ERR_TIMEOUT
+        );
+        if (!expired)
+        {
+            try
+            {
+                result = action();
+            }
+            catch (const BusinessError& error)
+            {
+                result = std::unexpected(error.code());
+            }
+            catch (...)
+            {
+                result = std::unexpected(
+                    arena::protocol::ERR_INTERNAL
+                );
+            }
+        }
         respond(channel, entry.metadata, std::move(result));
         notifyDrained();
     }
 
     void stop() noexcept
     {
+        if (stopped)
+            return;
         stopped = true;
         drained = {};
-        for (const auto& [id, entry] : pending)
+        // Cancellation hooks may reenter shutdown. Remove all entries
+        // before invoking them and never hold an iterator across one.
+        auto cancelled = std::move(pending);
+        pending.clear();
+        for (auto& [id, entry] : cancelled)
         {
             (void)id;
+            entry.timer.reset();
+            entry.metadata.request->execution->retire(true);
             log("request_end",
                 *entry.metadata.request,
                 arena::protocol::ERR_OK,
                 "cancelled");
         }
-        pending.clear();
     }
 };
 
@@ -211,7 +280,13 @@ void RequestDispatcher::dispatch(
             channel,
             request->requestId,
             found->second.generation,
-            std::unexpected(arena::protocol::ERR_DUPLICATE_REQUEST)
+            []() -> MessageReply
+            {
+                return std::unexpected(
+                    arena::protocol::ERR_DUPLICATE_REQUEST
+                );
+            },
+            true
         );
         return;
     }
@@ -233,42 +308,51 @@ void RequestDispatcher::dispatch(
         return reject(arena::protocol::ERR_UNAUTHENTICATED);
     if (m_state->pending.size() >= kMaxPendingRequests)
         return reject(arena::protocol::ERR_TOO_MANY_REQUESTS);
+    if (m_state->generation ==
+        std::numeric_limits<std::uint64_t>::max())
+        return reject(arena::protocol::ERR_UNAVAILABLE);
 
     const auto id = request->requestId;
     const auto ticket = ++m_state->generation;
     const auto deadline = ConnectionClock::now() +
                           route->options.timeout;
+    const std::weak_ptr<State> weak = m_state;
+    auto execution = std::make_shared<RequestExecution>(
+        deadline,
+        "connection-" + std::to_string(request->connectionId) +
+            "-request-" + std::to_string(id),
+        [weak, post = channel.poster(), id, ticket](
+            RequestExecution::OwnerAction action
+        )
+        {
+            // Business threads retain only a weak state and the
+            // bounded owner endpoint, never a borrowed channel.
+            return post(
+                [weak, id, ticket, action = std::move(action)](
+                    ConnectionChannel& owner
+                ) mutable
+                {
+                    if (auto state = weak.lock())
+                        state->finish(
+                            owner,
+                            id,
+                            ticket,
+                            std::move(action)
+                        );
+                }
+            );
+        }
+    );
+    auto owned = std::make_shared<RequestMessage>(*request);
+    owned->execution = execution;
+    metadata.request = owned;
     m_state->pending.emplace(
         id,
         State::Pending{metadata, ticket, deadline, ConnectionTimer{}}
     );
-    const std::weak_ptr<State> weak = m_state;
-    const auto claimed = std::make_shared<std::atomic<bool>>(false);
     const RequestCompletion complete =
-        [weak, post = channel.poster(), claimed, id, ticket](
-            MessageReply result
-        )
-    {
-        if (claimed->exchange(true, std::memory_order_relaxed))
-            return;
-        // No state or channel is acquired on the business thread. A
-        // full mailbox leaves the bounded request pending until its
-        // existing deadline fires.
-        post(
-            [weak, id, ticket, result = std::move(result)](
-                ConnectionChannel& owner
-            ) mutable
-            {
-                if (auto state = weak.lock())
-                    state->finish(
-                        owner,
-                        id,
-                        ticket,
-                        std::move(result)
-                    );
-            }
-        );
-    };
+        [execution](MessageReply result)
+    { execution->complete(std::move(result)); };
     try
     {
         auto timer = channel.scheduleAt(
@@ -280,17 +364,39 @@ void RequestDispatcher::dispatch(
                         owner,
                         id,
                         ticket,
-                        std::unexpected(arena::protocol::ERR_TIMEOUT)
+                        []() -> MessageReply
+                        {
+                            return std::unexpected(
+                                arena::protocol::ERR_TIMEOUT
+                            );
+                        },
+                        true
                     );
             }
         );
         m_state->pending.at(id).timer = std::move(timer);
-        m_state->log(
-            "request_handler",
-            *request,
-            arena::protocol::ERR_OK
+    }
+    catch (...)
+    {
+        // Without a timer, a rejected mailbox post could otherwise
+        // leave an admitted request permanently pending.
+        m_state->finish(
+            channel,
+            id,
+            ticket,
+            []() -> MessageReply
+            {
+                return std::unexpected(arena::protocol::ERR_INTERNAL);
+            },
+            true
         );
-        route->handler(request, complete);
+        return;
+    }
+    try
+    {
+        m_state
+            ->log("request_handler", *owned, arena::protocol::ERR_OK);
+        route->handler(std::move(owned), complete);
     }
     catch (const BusinessError& error)
     {

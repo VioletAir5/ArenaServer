@@ -1,12 +1,14 @@
 """Loopback Storage RPC: SQL-free orchestration over scoped repositories."""
 import argparse
 import asyncio
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone, timedelta
 import json
 import os
 from pathlib import Path
 import signal
 import sys
+import threading
 from uuid import UUID, uuid5
 
 from google.protobuf.message import DecodeError
@@ -14,24 +16,28 @@ from shared.runtime.protocol import Protocol
 from shared.runtime.rpc import (Server, RpcError, INVALID_ARGUMENT, NOT_FOUND, UNAVAILABLE,
     OVERLOADED, DEADLINE_EXCEEDED, CONFLICT, INTERNAL, OUTCOME_UNKNOWN)
 from .database import Database
+from .outbox import Publisher, consume_event
 from .repositories import MatchParticipant, _participants
 from .redis_store import RedisStore, CacheError
 from .settlement import SettlementCommand, Reward
-from .transactions import StorageError
+from .transactions import RetryBudget, StorageError
 from .worker import Worker
 
 _ID_NAMESPACE = UUID("98e4ecb1-df9f-4588-9554-378c79291c25")
 
 
 def _millis(value):
-    return 0 if value is None else int(value.timestamp()*1000)
+    if value is None:
+        return 0
+    delta = value - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return delta.days * 86400000 + delta.seconds * 1000 + delta.microseconds // 1000
 
 
 def _instant(value, fallback):
     if not value:
         return fallback
     try:
-        return datetime.fromtimestamp(value/1000, timezone.utc)
+        return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=value)
     except (ValueError, OverflowError, OSError):
         raise StorageError("invalid_request") from None
 
@@ -54,12 +60,90 @@ def _storage_error(error):
     return RpcError(UNAVAILABLE, retryable=category in ("connection_error", "pool_closed"))
 
 
+class _PublisherTransactions:
+    """Apply the same finite transaction policy to claim, consume and ack."""
+    def __init__(self, database):
+        self.database = database
+        self.budget = RetryBudget(max_attempts=3, max_elapsed=1,
+            base_delay=.001, max_delay=.01, lock_timeout_ms=100,
+            statement_timeout_ms=250)
+
+    def run(self, operation):
+        return self.database.run(operation, budget=self.budget)
+
+
+class OutboxPump:
+    """One worker drains at-least-once events without blocking the RPC owner."""
+    def __init__(self, database):
+        transactions = _PublisherTransactions(database)
+        self._transactions = transactions
+        self._publisher = Publisher(transactions)
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._executor = self._future = None
+        self._counts = dict(enabled=True, active=False, closed=False, max_workers=1,
+            passes=0, claimed=0, published=0, failed=0, errors=0, consumed=0,
+            deduplicated=0)
+
+    @property
+    def stats(self):
+        with self._lock:
+            return dict(self._counts)
+
+    def start(self):
+        if self._executor is not None or self._stop.is_set():
+            raise RuntimeError("outbox pump requires a fresh instance")
+        self._executor = ThreadPoolExecutor(max_workers=1,
+            thread_name_prefix="arena-outbox")
+        self._future = self._executor.submit(self._run)
+
+    def _deliver(self, event):
+        replayed = consume_event(self._transactions, event).value
+        with self._lock:
+            self._counts["deduplicated" if replayed else "consumed"] += 1
+
+    def _run(self):
+        with self._lock:
+            self._counts["active"] = True
+        try:
+            while not self._stop.is_set():
+                try:
+                    # One pass owns SQL resources; shutdown joins it before
+                    # pool closure. No executor submission queue accumulates.
+                    result = self._publisher.run_once(self._deliver, limit=1)
+                except Exception:
+                    with self._lock:
+                        self._counts["errors"] += 1
+                else:
+                    with self._lock:
+                        self._counts["passes"] += 1
+                        for key in ("claimed", "published", "failed"):
+                            self._counts[key] += result[key]
+                self._stop.wait(.05)
+        finally:
+            with self._lock:
+                self._counts["active"] = False
+
+    async def close(self):
+        self._stop.set()
+        if self._future is not None:
+            # Cancelling this waiter never abandons a SQL-using worker and then
+            # closes its pool. The caller must finish close before pool.close.
+            await asyncio.shield(asyncio.wrap_future(self._future))
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+        with self._lock:
+            self._counts["closed"] = True
+
+
 class StorageService:
     """Own the worker and optional disposable Redis projections."""
-    def __init__(self, protocol, database, *, max_workers=4, redis_store=None):
+    def __init__(self, protocol, database, *, max_workers=4, redis_store=None,
+                 publish=False):
         self.protocol, self.database = protocol, database
         self.worker = Worker(database, max_workers=max_workers)
         self.redis = redis_store
+        self.publisher = OutboxPump(database) if publish else None
         self._projections = set()
         self.projection_rejected = self.projection_failed = 0
         self.handlers = {}
@@ -72,6 +156,10 @@ class StorageService:
             ("settlement.get", "SettlementGetRequest", self._settlement)):
             self.handlers[method] = self._handler(request, handler)
         self.handlers["health.ready"] = self._ready
+
+    def start(self):
+        if self.publisher is not None:
+            self.publisher.start()
 
     def message(self, name, **values):
         return self.protocol.message("arena.storage."+name)(**values)
@@ -112,7 +200,8 @@ class StorageService:
             finished_unix_ms=_millis(match.finished_at),
             participants=[dict(player_id=p.player_id, slot=p.slot, session_id=p.session_id,
                 membership_epoch=p.membership_epoch, initial_mmr=p.initial_mmr,
-                last_input_seq=p.last_input_seq, final_x=p.final_x, final_y=p.final_y)
+                last_input_seq=p.last_input_seq, final_x=p.final_x, final_y=p.final_y,
+                last_dx=p.last_dx, last_dy=p.last_dy)
                 for p in match.participants])
 
     @staticmethod
@@ -170,14 +259,14 @@ class StorageService:
             raise RpcError(INVALID_ARGUMENT)
         participants = _participants(tuple(MatchParticipant(
             p.player_id, p.slot, p.session_id, p.membership_epoch, p.initial_mmr,
-            p.last_input_seq, p.final_x, p.final_y) for p in value.participants))
+            p.last_input_seq, p.final_x, p.final_y, p.last_dx, p.last_dy) for p in value.participants))
         # The authoritative policy is stable across retries and restarts.
         rewards = tuple(Reward(p.player_id, 1, 10) for p in participants) if value.state == "completed" else ()
         command = SettlementCommand(value.match_id, value.match_id,
             uuid5(_ID_NAMESPACE, "settlement:"+str(value.match_id)),
             uuid5(_ID_NAMESPACE, "event:"+str(value.match_id)), rewards, value.result_version)
         def persist(work):
-            current = work.matches.get(value.match_id)
+            current = work.matches.get_for_result(value.match_id)
             replayed = current is not None
             if current is not None:
                 if not self._same_result(current, value, participants):
@@ -238,6 +327,8 @@ class StorageService:
 
     async def close(self):
         await self.worker.close()
+        if self.publisher is not None:
+            await self.publisher.close()
         if self._projections:
             await asyncio.gather(*tuple(self._projections), return_exceptions=True)
         if self.redis is not None:
@@ -260,7 +351,8 @@ async def run_server(args):
     database = Database(kwargs=parameters, max_size=args.workers, max_waiting=args.workers,
                         acquire_timeout=.2)
     projection = RedisStore(unix_socket_path=args.redis_socket, namespace="arena") if args.redis_socket else None
-    service = StorageService(protocol, database, max_workers=args.workers, redis_store=projection)
+    service = StorageService(protocol, database, max_workers=args.workers,
+                             redis_store=projection, publish=args.publish)
     server = Server(protocol, service.handlers, service_token=token)
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -268,13 +360,16 @@ async def run_server(args):
         loop.add_signal_handler(sig, stopped.set)
     try:
         port = await server.start("127.0.0.1", args.port)
+        service.start()
         print(json.dumps(dict(service="storage", port=port, state="listening")), flush=True)
         await stopped.wait()
     finally:
         await server.close(grace=1)
         await service.close()
         print(json.dumps(dict(service="storage", state="stopped", worker=service.worker.stats,
-            pool=database.stats, projection_failed=service.projection_failed)), flush=True)
+            pool=database.stats, projection_failed=service.projection_failed,
+            publisher=service.publisher.stats if service.publisher is not None else
+                dict(enabled=False, active=False, closed=True))), flush=True)
 
 
 def main():
@@ -283,6 +378,8 @@ def main():
     parser.add_argument("--port", type=int, default=7105)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--redis-socket", type=Path)
+    parser.add_argument("--publish", action="store_true",
+                        help="drain committed outbox events into the deduplicated reward audit")
     args = parser.parse_args()
     sys.dont_write_bytecode = True
     try:

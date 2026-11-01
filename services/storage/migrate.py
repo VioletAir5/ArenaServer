@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the reviewed PostgreSQL 001 through 004 migrations atomically through psql."""
+"""Apply the reviewed PostgreSQL 001 through 005 migrations atomically through psql."""
 
 import argparse
 import hashlib
@@ -13,7 +13,7 @@ import sys
 
 
 STORAGE = Path(__file__).resolve().parent
-SUPPORTED_MIGRATIONS = ((1, "001_initial"), (2, "002_asset_transfer"), (3, "003_settlement_outbox"), (4, "004_runtime_ids"))
+SUPPORTED_MIGRATIONS = ((1, "001_initial"), (2, "002_asset_transfer"), (3, "003_settlement_outbox"), (4, "004_runtime_ids"), (5, "005_result_controls"))
 MAX_SQL_BYTES = 1024 * 1024
 PROCESS_TIMEOUT = 90
 

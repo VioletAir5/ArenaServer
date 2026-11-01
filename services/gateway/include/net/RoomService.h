@@ -13,6 +13,7 @@
 
 namespace service::gateway
 {
+struct RoomSettlement;
 struct RoomServiceConfig
 {
     /// Bounds active actors and retained finished managed results
@@ -38,6 +39,29 @@ struct RoomServiceConfig
     /// Optional full-session archive sink; disk I/O runs off the
     /// owner.
     std::shared_ptr<service::room::ReplayRecorder> replays;
+    /// Nonblocking admission of one immutable terminal intent. A true
+    /// return transfers retry/spool ownership; completion true means
+    /// acknowledged PG commit, while completion false is terminal and
+    /// must not reset its budget. False/throw means no ownership and
+    /// permits bounded owner admission retry.
+    std::function<bool(
+        const ManagedRoom&,
+        const RoomSettlement&,
+        std::function<void(bool)>
+    )>
+        persistSettlement;
+    /// Maximum attempts to hand a result to the durable adapter, not
+    /// RPC retries.
+    std::size_t persistenceAdmissionAttempts{8};
+    /// Exponential admission backoff, independently bounded from
+    /// simulation.
+    std::chrono::milliseconds persistenceRetryBase{100},
+        persistenceRetryMax{5000};
+    /// Wall time is frozen once per lifecycle fact and never enters
+    /// checksum.
+    std::function<std::chrono::system_clock::time_point()> wallNow{
+        std::chrono::system_clock::now
+    };
     /// Injectable monotonic clock; only the management owner calls
     /// it.
     std::function<ConnectionClock::time_point()> now{
@@ -60,6 +84,13 @@ struct RoomMetrics
     /// results.
     std::uint64_t battlesStarted{0}, battlesCompleted{0},
         battlesAborted{0};
+    /// Durable admission and acknowledgement counters; memory mode
+    /// leaves zero.
+    std::uint64_t persistenceSubmitted{0}, persistenceRejected{0},
+        persistenceFailed{0}, persistenceCommitted{0};
+    /// Bounded owner-held terminal intents; blocked means operator
+    /// action needed.
+    std::size_t pendingSettlements{0}, blockedSettlements{0};
 };
 struct RoomInputReply
 {
@@ -96,8 +127,8 @@ struct RoomReadyMember
     /// grace.
     Presence presence{Presence::Online};
 };
-/** @brief Immutable in-memory result; no economy or durable storage
- * side effects. */
+/** @brief Immutable terminal intent; visible after durable
+ * acknowledgement when configured. */
 struct RoomSettlement
 {
     /// One result per match; resultId equals matchId for this
@@ -115,6 +146,13 @@ struct RoomSettlement
     /// Final reference-state positions and sequence fences for both
     /// participants.
     std::vector<service::room::PlayerState> players;
+    /// Frozen lifecycle timestamps; zero started time means no
+    /// Playing phase.
+    std::uint64_t createdUnixMs{0}, startedUnixMs{0},
+        finishedUnixMs{0};
+    /// Simulation lifecycle facts are excluded from its deterministic
+    /// hash.
+    std::uint64_t startedTick{0}, playedTicks{0};
 };
 /** @brief Owns recovery state, including sequence fences and any
  * final result. */
@@ -134,8 +172,9 @@ struct RoomStatus
     /// steps.
     std::uint64_t startedTick, finishedTick, playedTicks,
         durationTicks;
-    /// Immutable result, present from Settling until bounded
-    /// retention expires.
+    /// Memory mode exposes the frozen intent from Settling; durable
+    /// mode publishes it only after commit acknowledgement and
+    /// bounded retention.
     std::optional<RoomSettlement> settlement;
 };
 

@@ -1,3 +1,5 @@
+#include <atomic>
+#include <barrier>
 #include <memory>
 #include <span>
 #include <sstream>
@@ -11,6 +13,7 @@
 #include "net/ArenaProtocol.h"
 #include "net/ConnectionHost.h"
 #include "net/PacketBuffer.h"
+#include "net/RequestExecution.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
 
@@ -976,4 +979,269 @@ TEST_F(
     EXPECT_EQ(order, (std::vector<std::string>{"reply", "drained"}));
 }
 
+TEST_F(
+    MessageDispatchTest,
+    OwnerActionCannotRunAfterTimeoutOrFinishReusedId
+)
+{
+    std::vector<std::shared_ptr<RequestExecution>> executions;
+    unsigned cancelled = 0, mutations = 0;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_LOGIN_REQUEST,
+        [&](auto request, auto)
+        {
+            ASSERT_TRUE(request->execution);
+            EXPECT_GT(
+                request->execution->deadline(),
+                ConnectionClock::now()
+            );
+            EXPECT_FALSE(request->execution->correlationId().empty());
+            request->execution->setCancellation([&] { ++cancelled; });
+            executions.push_back(request->execution);
+        },
+        MessageRouteOptions{false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_LOGIN_REQUEST);
+    request.set_request_id(501);
+    request.mutable_login_request();
+    receive(request);
+    ASSERT_EQ(executions.size(), 1);
+    std::thread worker(
+        [&]
+        {
+            EXPECT_TRUE(
+                executions[0]->completeOnOwner(
+                    [&]() -> MessageReply
+                    {
+                        ++mutations;
+                        wire::Envelope reply;
+                        reply.mutable_login_response()->set_accepted(
+                            true
+                        );
+                        return reply;
+                    }
+                )
+            );
+        }
+    );
+    worker.join();
+    ASSERT_EQ(posts.size(), 1);
+    deadlines[0]();
+    EXPECT_EQ(response().error().code(), wire::ERR_TIMEOUT);
+    EXPECT_EQ(cancelled, 1);
+    transport->output.clear();
+    receive(request);
+    ASSERT_EQ(executions.size(), 2);
+    posts[0]();
+    EXPECT_EQ(mutations, 0);
+    EXPECT_TRUE(transport->output.empty());
+    EXPECT_TRUE(
+        executions[1]->completeOnOwner(
+            [&]() -> MessageReply
+            {
+                ++mutations;
+                wire::Envelope reply;
+                reply.mutable_login_response()->set_accepted(true);
+                return reply;
+            }
+        )
+    );
+    EXPECT_TRUE(response().login_response().accepted());
+    EXPECT_EQ(mutations, 1);
+    EXPECT_EQ(cancelled, 1);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    DisconnectConsumesLateCancellationRegistrationOnce
+)
+{
+    std::shared_ptr<RequestExecution> execution;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_LOGIN_REQUEST,
+        [&](auto request, auto) { execution = request->execution; },
+        MessageRouteOptions{false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_LOGIN_REQUEST);
+    request.set_request_id(502);
+    request.mutable_login_request();
+    receive(request);
+    ASSERT_TRUE(execution);
+    runtime->transportClosed();
+    std::atomic<unsigned> cancelled{0};
+    std::vector<std::thread> threads;
+    for (unsigned i = 0; i != 8; ++i)
+        threads.emplace_back(
+            [&] { execution->setCancellation([&] { ++cancelled; }); }
+        );
+    for (auto& thread : threads)
+        thread.join();
+    EXPECT_EQ(cancelled.load(), 1);
+    EXPECT_FALSE(execution->completeOnOwner(
+        []() -> MessageReply
+        {
+            ADD_FAILURE() << "late owner action executed";
+            return wire::Envelope{};
+        }
+    ));
+    EXPECT_TRUE(transport->output.empty());
+}
+
+TEST_F(
+    MessageDispatchTest,
+    NormalCompletionDiscardsLateCancelHandleAndCopies
+)
+{
+    unsigned cancelled = 0;
+    std::shared_ptr<RequestExecution> execution;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_LOGIN_REQUEST,
+        [&](auto request, auto complete)
+        {
+            execution = request->execution;
+            wire::Envelope reply;
+            reply.mutable_login_response()->set_accepted(true);
+            complete(reply);
+            execution->setCancellation([&] { ++cancelled; });
+            complete(std::move(reply));
+        },
+        MessageRouteOptions{false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_LOGIN_REQUEST);
+    request.set_request_id(503);
+    request.mutable_login_request();
+    receive(request);
+    EXPECT_TRUE(response().login_response().accepted());
+    EXPECT_EQ(cancelled, 0);
+    runtime->transportClosed();
+    deadlines[0]();
+    EXPECT_EQ(cancelled, 0);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    CancellationRegistrationRacingDeadlineSettlesOnce
+)
+{
+    std::shared_ptr<RequestExecution> execution;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_LOGIN_REQUEST,
+        [&](auto request, auto) { execution = request->execution; },
+        MessageRouteOptions{false}
+    );
+    start(registry);
+    std::atomic<unsigned> cancelled{0};
+    for (unsigned round = 0; round != 16; ++round)
+    {
+        wire::Envelope request;
+        request.set_msg_id(wire::MSG_LOGIN_REQUEST);
+        request.set_request_id(600 + round);
+        request.mutable_login_request();
+        receive(request);
+        std::barrier gate(2);
+        std::thread worker(
+            [&, accepted = execution]
+            {
+                gate.arrive_and_wait();
+                accepted->setCancellation([&] { ++cancelled; });
+            }
+        );
+        gate.arrive_and_wait();
+        deadlines.back()();
+        worker.join();
+        EXPECT_EQ(response().error().code(), wire::ERR_TIMEOUT);
+        EXPECT_EQ(cancelled.load(), round + 1);
+        transport->output.clear();
+    }
+}
+
+TEST_F(
+    MessageDispatchTest,
+    LateOwnerPostSuppressesActionWithoutTimerDelivery
+)
+{
+    std::shared_ptr<RequestExecution> execution;
+    unsigned mutations = 0, cancelled = 0;
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_LOGIN_REQUEST,
+        [&](auto request, auto)
+        {
+            execution = request->execution;
+            execution->setCancellation([&] { ++cancelled; });
+        },
+        MessageRouteOptions{false, std::chrono::milliseconds(5)}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_LOGIN_REQUEST);
+    request.set_request_id(700);
+    request.mutable_login_request();
+    receive(request);
+    std::thread worker(
+        [&]
+        {
+            execution->completeOnOwner(
+                [&]() -> MessageReply
+                {
+                    ++mutations;
+                    return wire::Envelope{};
+                }
+            );
+        }
+    );
+    worker.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(posts.size(), 1);
+    posts[0]();
+    EXPECT_EQ(response().error().code(), wire::ERR_TIMEOUT);
+    EXPECT_EQ(mutations, 0);
+    EXPECT_EQ(cancelled, 1);
+}
+
+TEST_F(
+    MessageDispatchTest,
+    OwnerActionDrainWaitsUntilAcceptedReplyEnqueues
+)
+{
+    auto registry = std::make_shared<MessageRegistry>();
+    registry->registerHandler(
+        wire::MSG_LOGIN_REQUEST,
+        [&](auto request, auto)
+        {
+            request->execution->completeOnOwner(
+                [&]() -> MessageReply
+                {
+                    runtime->shutdown();
+                    EXPECT_EQ(transport->shutdownCalls, 0);
+                    wire::Envelope reply;
+                    reply.mutable_login_response()->set_accepted(
+                        true
+                    );
+                    return reply;
+                }
+            );
+        },
+        MessageRouteOptions{false}
+    );
+    start(registry);
+    wire::Envelope request;
+    request.set_msg_id(wire::MSG_LOGIN_REQUEST);
+    request.set_request_id(701);
+    request.mutable_login_request();
+    receive(request);
+    EXPECT_TRUE(response().login_response().accepted());
+    EXPECT_EQ(transport->shutdownCalls, 1);
+    EXPECT_EQ(transport->outputAtShutdown, transport->output);
+}
 } // namespace

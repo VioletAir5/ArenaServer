@@ -64,6 +64,11 @@ struct QueueConfig
     /// Candidate comparisons allowed per tick; a rotating cursor
     /// prevents starvation.
     std::size_t comparisonsPerTick{8192};
+    /// Optional nonblocking owner-only durable ID source. Values must
+    /// be positive, strictly increasing and below 2^63; empty means
+    /// unavailable. A rejected/throwing source must not reenter this
+    /// queue or retain work.
+    std::function<std::optional<std::uint64_t>()> ticketIdSource;
 };
 
 /** @brief Copies ticket state without exposing mutable domain
@@ -74,7 +79,7 @@ struct TicketSnapshot
     PlayerId playerId;
     /// Logical session authorized to query or cancel the ticket.
     SessionId sessionId;
-    /// Process-unique identity, independent of the client join key.
+    /// Server-allocated identity, independent of the client join key.
     TicketId ticketId;
     /// Client-generated nonzero operation key, scoped to the
     /// authenticated player.

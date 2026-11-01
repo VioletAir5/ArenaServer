@@ -95,6 +95,18 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
             "${CMAKE_CURRENT_SOURCE_DIR}/StorageRpcTest.py" ${storage_rpc_arguments})
         set_tests_properties(StorageRpcAcceptance PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
             LABELS "integration;storage;postgresql;rpc")
+        set(persistent_gateway_arguments --repository-root "${PROJECT_SOURCE_DIR}"
+            --pg-bin "${ARENA_POSTGRES_BIN}"
+            --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
+            --gateway "$<TARGET_FILE:ArenaServer>"
+            --report "${CMAKE_CURRENT_BINARY_DIR}/persistent-gateway-report.json")
+        if(ARENA_POSTGRES_SHARE)
+            list(APPEND persistent_gateway_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+        endif()
+        add_test(NAME PersistentGatewayJourney COMMAND "${asset_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/PersistentGatewayTest.py" ${persistent_gateway_arguments})
+        set_tests_properties(PersistentGatewayJourney PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
+            LABELS "integration;storage;postgresql;gateway;journey;recovery")
     endif()
 endif()
 option(ARENA_ENABLE_REDIS_TESTS "Run isolated Redis cache acceptance" OFF)

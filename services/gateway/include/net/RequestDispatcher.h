@@ -39,9 +39,10 @@ using ReplySink = std::function<ErrorCode(
  *
  * Business completions retain a weak state and bounded owner posting
  * handle. Duplicate or late completions cannot finish a reused
- * request ID. Mailbox saturation leaves the request pending until its
- * existing deadline expires; the count bound does not constrain
- * memory allocated by a business handler.
+ * request ID. Owner-lazy actions and downstream cancellation share
+ * this generation fence. Mailbox saturation leaves the request
+ * pending until its existing deadline expires; the count bound does
+ * not constrain memory allocated by a business handler.
  */
 class RequestDispatcher final
 {

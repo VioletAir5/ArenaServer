@@ -37,6 +37,7 @@
 #include "net/PacketEcho.h"
 #include "net/PacketRatePolicy.h"
 #include "net/PacketTypePolicy.h"
+#include "net/PersistentStorage.h"
 #include "net/PreLoginHandshake.h"
 #include "net/RoomService.h"
 #include "net/TcpServer.h"
@@ -273,18 +274,24 @@ void printOnline(const OnlineRegistry& registry)
 void printRooms(const RoomService& rooms)
 {
     const auto metrics = rooms.metrics();
-    std::cerr << "ROOM_COUNTS actors=" << metrics.actors
-              << " ticks=" << metrics.ticks
-              << " applied=" << metrics.applied
-              << " rejected=" << metrics.rejected
-              << " duplicates=" << metrics.duplicates
-              << " managed_matches=" << metrics.managedMatches
-              << " retained_results=" << metrics.retainedResults
-              << " battles_started=" << metrics.battlesStarted
-              << " battles_completed=" << metrics.battlesCompleted
-              << " battles_aborted=" << metrics.battlesAborted
-              << " skipped_wall_slots=" << metrics.skippedWallSlots
-              << '\n';
+    std::cerr
+        << "ROOM_COUNTS actors=" << metrics.actors
+        << " ticks=" << metrics.ticks
+        << " applied=" << metrics.applied
+        << " rejected=" << metrics.rejected
+        << " duplicates=" << metrics.duplicates
+        << " managed_matches=" << metrics.managedMatches
+        << " retained_results=" << metrics.retainedResults
+        << " battles_started=" << metrics.battlesStarted
+        << " battles_completed=" << metrics.battlesCompleted
+        << " battles_aborted=" << metrics.battlesAborted
+        << " persistence_submitted=" << metrics.persistenceSubmitted
+        << " persistence_rejected=" << metrics.persistenceRejected
+        << " persistence_failed=" << metrics.persistenceFailed
+        << " persistence_committed=" << metrics.persistenceCommitted
+        << " pending_settlements=" << metrics.pendingSettlements
+        << " blocked_settlements=" << metrics.blockedSettlements
+        << " skipped_wall_slots=" << metrics.skippedWallSlots << '\n';
 }
 /** @brief Reports archive completion, admission and storage failures.
  */
@@ -352,6 +359,7 @@ int main(int argc, char** argv)
     std::shared_ptr<OnlineRegistry> online;
     std::shared_ptr<MatchmakingService> matcher;
     std::shared_ptr<RoomService> rooms;
+    std::shared_ptr<PersistentStorage> persistence;
     std::shared_ptr<service::room::ReplayRecorder> replays;
     OnlineRegistryConfig onlineConfig;
     std::uint16_t tcpPort = 8888;
@@ -366,6 +374,12 @@ int main(int argc, char** argv)
             throw std::invalid_argument(
                 "ARENA_DISCONNECT_GRACE_MS must be between 1 and "
                 "3600000"
+            );
+        if (std::getenv("ARENA_STORAGE_PORT") &&
+            (protocol != "handshake" ||
+             !std::getenv("ARENA_JWT_KEY")))
+            throw std::invalid_argument(
+                "Storage requires authenticated handshake mode"
             );
         onlineConfig.grace = std::chrono::milliseconds(grace);
         tcpPort = listenerPort("ARENA_TCP_PORT", tcpPort);
@@ -409,20 +423,130 @@ int main(int argc, char** argv)
         {
             try
             {
-                std::shared_ptr<const service::auth::PasswordAccounts>
-                    accounts = std::make_shared<
-                        service::auth::UnavailablePasswordAccounts>();
-                if (const auto* path = std::getenv(
-                        "ARENA_ACCOUNTS_FILE"
-                    ))
-                    accounts = std::make_shared<
-                        service::auth::FilePasswordAccounts>(path);
-                auto passwords = std::make_shared<
-                    service::auth::LoginAuthenticator>(
-                    std::move(accounts),
-                    std::make_shared<
-                        service::auth::Pbkdf2PasswordDigest>()
-                );
+                std::shared_ptr<
+                    const service::auth::LoginAuthenticator>
+                    passwords;
+                AsyncPasswordLogin asyncPasswords;
+                DurableSettlementLookup durableLookup;
+                if (std::getenv("ARENA_STORAGE_PORT"))
+                {
+                    const auto* token = std::getenv(
+                        "ARENA_INTERNAL_TOKEN"
+                    );
+                    const auto* spool = std::getenv(
+                        "ARENA_SETTLEMENT_SPOOL_DIR"
+                    );
+                    if (!token || !spool || !*spool)
+                        throw std::invalid_argument(
+                            "Storage requires a credential and "
+                            "private spool"
+                        );
+                    PersistentStorageConfig config;
+                    config.endpoint = {
+                        boost::asio::ip::address_v4::loopback(),
+                        listenerPort("ARENA_STORAGE_PORT", 7105)
+                    };
+                    config.serviceToken = token;
+                    config.spoolDirectory = spool;
+                    config.idBlockSize = static_cast<std::uint32_t>(
+                        boundedLimit(
+                            "ARENA_STORAGE_ID_BLOCK",
+                            128,
+                            1024
+                        )
+                    );
+                    config.rpcTimeout = std::chrono::milliseconds(
+                        boundedLimit(
+                            "ARENA_STORAGE_TIMEOUT_MS",
+                            1000,
+                            5000
+                        )
+                    );
+                    config.maxResultAttempts = static_cast<
+                        std::uint32_t>(boundedLimit(
+                        "ARENA_SETTLEMENT_MAX_ATTEMPTS",
+                        8,
+                        64
+                    ));
+                    persistence = std::make_shared<PersistentStorage>(
+                        std::move(config)
+                    );
+                    if (!persistence->prime(std::chrono::seconds(5)))
+                        throw std::runtime_error(
+                            "Storage startup is unavailable"
+                        );
+                    asyncPasswords =
+                        [weak = std::weak_ptr<PersistentStorage>(
+                             persistence
+                         )](std::string account,
+                            std::string password,
+                            std::chrono::steady_clock::time_point
+                                deadline,
+                            std::string correlation,
+                            PasswordLoginCompletion complete)
+                        -> std::expected<
+                            std::function<void()>,
+                            service::auth::AuthError>
+                    {
+                        if (const auto storage = weak.lock())
+                            return storage->authenticate(
+                                std::move(account),
+                                std::move(password),
+                                deadline,
+                                std::move(correlation),
+                                std::move(complete)
+                            );
+                        return std::unexpected(
+                            service::auth::AuthError::Unavailable
+                        );
+                    };
+                    durableLookup =
+                        [weak = std::weak_ptr<PersistentStorage>(
+                             persistence
+                         )](
+                            arena::domain::PlayerId player,
+                            std::uint64_t match,
+                            ConnectionClock::time_point deadline,
+                            std::string correlation,
+                            RoomService::SettlementCompletion complete
+                        )
+                        -> std::
+                            expected<std::function<void()>, ErrorCode>
+                    {
+                        if (const auto storage = weak.lock())
+                            return storage->settlement(
+                                player,
+                                match,
+                                deadline,
+                                std::move(correlation),
+                                std::move(complete)
+                            );
+                        return std::unexpected(
+                            arena::protocol::ERR_UNAVAILABLE
+                        );
+                    };
+                }
+                else
+                {
+                    std::shared_ptr<
+                        const service::auth::PasswordAccounts>
+                        accounts = std::make_shared<
+                            service::auth::
+                                UnavailablePasswordAccounts>();
+                    if (const auto* path = std::getenv(
+                            "ARENA_ACCOUNTS_FILE"
+                        ))
+                        accounts = std::make_shared<
+                            service::auth::FilePasswordAccounts>(
+                            path
+                        );
+                    passwords = std::make_shared<
+                        service::auth::LoginAuthenticator>(
+                        std::move(accounts),
+                        std::make_shared<
+                            service::auth::Pbkdf2PasswordDigest>()
+                    );
+                }
                 service::auth::JwtConfig jwt;
                 jwt.key = key;
                 auto tokens = std::make_shared<
@@ -431,6 +555,16 @@ int main(int argc, char** argv)
                     onlineConfig
                 );
                 service::match::QueueConfig matchConfig;
+                if (persistence)
+                    matchConfig.ticketIdSource =
+                        [weak = std::weak_ptr<PersistentStorage>(
+                             persistence
+                         )]
+                    {
+                        const auto storage = weak.lock();
+                        return storage ? storage->takeTicketId()
+                                       : std::nullopt;
+                    };
                 matchConfig.maxQueued = positiveLimit(
                     "ARENA_MATCH_MAX_QUEUED",
                     1024
@@ -452,6 +586,21 @@ int main(int argc, char** argv)
                     matchTimeout
                 );
                 RoomServiceConfig roomConfig;
+                if (persistence)
+                    roomConfig.persistSettlement =
+                        [weak = std::weak_ptr<PersistentStorage>(
+                             persistence
+                         )](const ManagedRoom& allocation,
+                            const RoomSettlement& result,
+                            std::function<void(bool)> complete)
+                    {
+                        const auto storage = weak.lock();
+                        return storage && storage->save(
+                                              allocation,
+                                              result,
+                                              std::move(complete)
+                                          );
+                    };
                 roomConfig.battleDurationTicks = boundedLimit(
                     "ARENA_BATTLE_TICKS",
                     100,
@@ -488,13 +637,14 @@ int main(int argc, char** argv)
                 );
                 matcher = std::make_shared<MatchmakingService>(
                     online,
-                    [](arena::domain::PlayerId)
-                        -> std::optional<std::uint32_t>
+                    [storage = persistence](
+                        arena::domain::PlayerId player
+                    ) -> std::optional<std::uint32_t>
                     {
-                        // Every player starts with a provisional
-                        // server rating until a persistent rating
-                        // adapter is configured.
-                        return 1500;
+                        return storage ? storage->rating(player)
+                                       : std::optional<std::uint32_t>{
+                                             1500
+                                         };
                     },
                     matchConfig,
                     std::chrono::milliseconds(100),
@@ -512,13 +662,16 @@ int main(int argc, char** argv)
                     std::move(tokens),
                     online,
                     matcher,
-                    rooms
+                    rooms,
+                    std::move(asyncPasswords),
+                    std::move(durableLookup)
                 );
             }
             catch (const std::exception&)
             {
-                std::cerr << "Invalid authentication or replay "
-                             "configuration\n";
+                std::cerr
+                    << "Invalid authentication, storage or replay "
+                       "configuration\n";
                 return 2;
             }
         }
@@ -598,6 +751,8 @@ int main(int argc, char** argv)
             upkeep->shutdown();
         if (online)
             printOnline(*online);
+        if (persistence)
+            persistence->stop();
         printAdmission(*admission);
         return 0;
     }
@@ -707,6 +862,18 @@ int main(int argc, char** argv)
         upkeep->shutdown();
     if (online)
         printOnline(*online);
+    if (persistence)
+    {
+        persistence->stop();
+        const auto metrics = persistence->metrics();
+        std::cerr << "STORAGE_COUNTS auth_active="
+                  << metrics.authActive
+                  << " work_pending=" << metrics.workPending
+                  << " committed=" << metrics.resultsCommitted
+                  << " failed=" << metrics.failedResults
+                  << " spool_files=" << metrics.spoolFiles
+                  << " spool_bytes=" << metrics.spoolBytes << '\n';
+    }
     printAdmission(*admission);
     if (protocol == "handshake")
     {

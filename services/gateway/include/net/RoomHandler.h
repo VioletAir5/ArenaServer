@@ -5,11 +5,24 @@
 
 #include <memory>
 
+#include "net/RoomService.h"
+
 namespace service::gateway
 {
 class MessageRegistry;
 class OnlineRegistry;
 class RoomService;
+
+/** @brief Queries a committed result for one authenticated canonical
+ * player. */
+using DurableSettlementLookup = std::function<
+    std::expected<std::function<void()>, ErrorCode>(
+        arena::domain::PlayerId,
+        std::uint64_t,
+        ConnectionClock::time_point,
+        std::string,
+        RoomService::SettlementCompletion
+    )>;
 
 /** @brief Adds room commands before publishing the immutable route
  * table.
@@ -22,6 +35,7 @@ class RoomService;
 void registerRoomRoutes(
     MessageRegistry& routes,
     std::shared_ptr<OnlineRegistry> sessions,
-    std::shared_ptr<RoomService> rooms
+    std::shared_ptr<RoomService> rooms,
+    DurableSettlementLookup lookup = {}
 );
 } // namespace service::gateway

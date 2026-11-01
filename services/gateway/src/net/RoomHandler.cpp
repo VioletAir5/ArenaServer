@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "net/RequestExecution.h"
 #include "net/RoomService.h"
 
 namespace service::gateway
@@ -278,12 +279,16 @@ void registerLifecycleRoute(
     MsgId id,
     LifecycleOperation operation,
     const std::shared_ptr<OnlineRegistry>& sessions,
-    const std::shared_ptr<RoomService>& rooms
+    const std::shared_ptr<RoomService>& rooms,
+    const DurableSettlementLookup& lookup
 )
 {
     routes.registerHandler(
         id,
-        [sessions, rooms, operation](auto request, auto complete)
+        [sessions,
+         rooms,
+         operation,
+         lookup](auto request, auto complete)
         {
             const auto binding = request->context->session->binding();
             if (!binding)
@@ -318,19 +323,65 @@ void registerLifecycleRoute(
                     *binding,
                     session,
                     match,
-                    [complete](RoomService::SettlementResult result)
+                    [complete,
+                     lookup,
+                     request,
+                     player = binding->playerId,
+                     match](RoomService::SettlementResult result)
                     {
-                        if (!result)
-                            return complete(
-                                std::unexpected(result.error())
+                        const auto respond =
+                            [complete](
+                                RoomService::SettlementResult value
+                            )
+                        {
+                            if (!value)
+                                return complete(
+                                    std::unexpected(value.error())
+                                );
+                            arena::protocol::Envelope reply;
+                            encodeSettlement(
+                                *value,
+                                *reply.mutable_settlement_response()
+                                     ->mutable_state()
                             );
-                        arena::protocol::Envelope reply;
-                        encodeSettlement(
-                            *result,
-                            *reply.mutable_settlement_response()
-                                 ->mutable_state()
+                            complete(std::move(reply));
+                        };
+                        if (result ||
+                            result.error() !=
+                                arena::protocol::
+                                    ERR_BUSINESS_FAILURE ||
+                            !lookup)
+                            return respond(std::move(result));
+                        const auto execution = request->execution;
+                        if (!execution)
+                            return complete(
+                                std::unexpected(
+                                    arena::protocol::ERR_UNAVAILABLE
+                                )
+                            );
+                        if (ConnectionClock::now() >=
+                            execution->deadline())
+                            return complete(
+                                std::unexpected(
+                                    arena::protocol::ERR_TIMEOUT
+                                )
+                            );
+                        // Only values captured on the connection
+                        // owner cross this boundary.
+                        auto admitted = lookup(
+                            player,
+                            match,
+                            execution->deadline(),
+                            execution->correlationId(),
+                            respond
                         );
-                        complete(std::move(reply));
+                        if (!admitted)
+                            return complete(
+                                std::unexpected(admitted.error())
+                            );
+                        execution->setCancellation(
+                            std::move(*admitted)
+                        );
                     }
                 );
             }
@@ -402,7 +453,8 @@ void registerLifecycleRoute(
 void registerRoomRoutes(
     MessageRegistry& routes,
     std::shared_ptr<OnlineRegistry> sessions,
-    std::shared_ptr<RoomService> rooms
+    std::shared_ptr<RoomService> rooms,
+    DurableSettlementLookup lookup
 )
 {
     if (!sessions || !rooms)
@@ -416,21 +468,24 @@ void registerRoomRoutes(
         arena::protocol::MSG_ROOM_READY_REQUEST,
         LifecycleOperation::Ready,
         sessions,
-        rooms
+        rooms,
+        lookup
     );
     registerLifecycleRoute(
         routes,
         arena::protocol::MSG_ROOM_STATUS_REQUEST,
         LifecycleOperation::Status,
         sessions,
-        rooms
+        rooms,
+        lookup
     );
     registerLifecycleRoute(
         routes,
         arena::protocol::MSG_SETTLEMENT_REQUEST,
         LifecycleOperation::Settlement,
         sessions,
-        rooms
+        rooms,
+        lookup
     );
 }
 } // namespace service::gateway

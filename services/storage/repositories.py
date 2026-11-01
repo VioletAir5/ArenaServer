@@ -68,6 +68,8 @@ class MatchParticipant:
     last_input_seq: int = 0
     final_x: int = 0
     final_y: int = 0
+    last_dx: int = 0
+    last_dy: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +159,8 @@ def _participants(values: tuple[MatchParticipant, ...]) -> tuple[MatchParticipan
         _integer(value.last_input_seq, 0, _UINT64_MAX)
         _integer(value.final_x, _INT32_MIN, _INT32_MAX)
         _integer(value.final_y, _INT32_MIN, _INT32_MAX)
+        _integer(value.last_dx, -1, 1)
+        _integer(value.last_dy, -1, 1)
     if (values[0].player_id == values[1].player_id
             or values[0].slot == values[1].slot
             or values[0].session_id == values[1].session_id):
@@ -298,7 +302,7 @@ class MatchRepository:
         if row is None:
             return None
         cursor.execute("SELECT player_id, slot, session_id, membership_epoch, initial_mmr, "
-                       "last_input_seq, final_x, final_y FROM arena.match_player "
+                       "last_input_seq, final_x, final_y, last_dx, last_dy FROM arena.match_player "
                        "WHERE match_id = %s ORDER BY slot", (match_id,))
         participants = tuple(MatchParticipant(*(int(value) for value in member))
                              for member in cursor.fetchall())
@@ -335,15 +339,33 @@ class MatchRepository:
             for member in participants:
                 cursor.execute("INSERT INTO arena.match_player "
                                "(match_id, player_id, slot, session_id, membership_epoch, "
-                               "initial_mmr, last_input_seq, final_x, final_y) "
-                               "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                               "initial_mmr, last_input_seq, final_x, final_y, last_dx, last_dy) "
+                               "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                                (match_id, member.player_id, member.slot, member.session_id,
                                 member.membership_epoch, member.initial_mmr,
-                                member.last_input_seq, member.final_x, member.final_y))
+                                member.last_input_seq, member.final_x, member.final_y,
+                                member.last_dx, member.last_dy))
             created = self._get_locked(cursor, match_id)
             if created is None:
                 raise StorageError("not_found")
             return created
+
+    def get_for_result(self, match_id: int) -> Match | None:
+        """Reserve a result identity before reading its possibly absent parent.
+
+        The uint64-to-signed-bigint bijection uses PostgreSQL's single-key
+        advisory namespace, separate from migration's two-integer keys. The
+        reservation lasts until this UoW commits or rolls back. Waiting does
+        not refresh a SERIALIZABLE snapshot; whole-UoW retries still apply.
+        Result-write UoWs call this before any match/settlement access; multiple
+        identities require a consistent lock order. Direct create() is unchanged.
+        """
+        connection = self._session.connection()
+        _integer(match_id, 1, _UINT64_MAX)
+        key = match_id if match_id < (1 << 63) else match_id - (1 << 64)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_catalog.pg_advisory_xact_lock(%s::bigint)", (key,))
+            return self._get_locked(cursor, match_id)
 
     def get(self, match_id: int) -> Match | None:
         """Return a coherent locked snapshot; a Forming roster may be partial."""

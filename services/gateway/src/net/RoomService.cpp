@@ -143,10 +143,20 @@ struct RoomService::State : std::enable_shared_from_this<State>
         bool authorized{false};
     };
 
+    struct PersistenceAttempt
+    {
+        /// Callback threads publish one outcome; only owner reads
+        /// room state.
+        std::atomic<int> outcome{0};
+    };
+
     struct ManagedMatch
     {
-        explicit ManagedMatch(ManagedRoom allocation)
+        explicit ManagedMatch(
+            ManagedRoom allocation, std::uint64_t created
+        )
             : allocation(std::move(allocation))
+            , createdUnixMs(created)
             , room(this->allocation.roomId)
             , battle(
                   arena::domain::BattleId{this->allocation.matchId},
@@ -155,6 +165,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
         {
         }
         ManagedRoom allocation;
+        std::uint64_t createdUnixMs, startedUnixMs{0};
         arena::domain::Room room;
         arena::domain::Battle battle;
         RoomPhase phase{RoomPhase::Forming};
@@ -166,6 +177,10 @@ struct RoomService::State : std::enable_shared_from_this<State>
             playedTicks{0};
         std::optional<RoomSettlement> result;
         std::optional<ConnectionClock::time_point> expires;
+        std::shared_ptr<PersistenceAttempt> persistence;
+        std::optional<ConnectionClock::time_point> retryAt;
+        std::size_t admissionAttempts{0};
+        bool persistenceAccepted{false}, persistenceBlocked{false};
     };
 
     /** @brief Applies trusted owner events through the existing
@@ -190,7 +205,15 @@ struct RoomService::State : std::enable_shared_from_this<State>
         : online(std::move(authority))
         , config(std::move(limits))
     {
-        if (!online || !config.now || !config.maxRooms ||
+        if (!online || !config.now || !config.wallNow ||
+            !config.maxRooms ||
+            !config.persistenceAdmissionAttempts ||
+            config.persistenceAdmissionAttempts > 32 ||
+            config.persistenceRetryBase <=
+                std::chrono::milliseconds::zero() ||
+            config.persistenceRetryMax <
+                config.persistenceRetryBase ||
+            config.persistenceRetryMax > std::chrono::minutes(1) ||
             !config.maxPending || !config.maxPendingPerRoom ||
             !config.maxCatchUp || !config.actor.maxMembers ||
             !config.actor.maxInputsPerTick ||
@@ -391,7 +414,10 @@ struct RoomService::State : std::enable_shared_from_this<State>
             match.finishedTick,
             match.playedTicks,
             config.battleDurationTicks,
-            match.result
+            config.persistSettlement &&
+                    match.phase != RoomPhase::Finished
+                ? std::nullopt
+                : match.result
         };
         for (std::size_t i = 0; i != match.allocation.members.size();
              ++i)
@@ -425,7 +451,14 @@ struct RoomService::State : std::enable_shared_from_this<State>
                 if (match->allocation.matchId == command.matchId &&
                     participant(*match, command) && match->result)
                 {
-                    command.settlementResult.emplace(*match->result);
+                    if (config.persistSettlement &&
+                        match->phase != RoomPhase::Finished)
+                        command
+                            .error = arena::protocol::ERR_UNAVAILABLE;
+                    else
+                        command.settlementResult.emplace(
+                            *match->result
+                        );
                     return;
                 }
             }
@@ -483,6 +516,200 @@ struct RoomService::State : std::enable_shared_from_this<State>
         }
     }
 
+    /** @brief Reads owner wall time without allowing zero to mean
+     * Started. */
+    std::uint64_t wallMillis() const
+    {
+        const auto value = std::chrono::duration_cast<
+                               std::chrono::milliseconds>(
+                               config.wallNow().time_since_epoch()
+        )
+                               .count();
+        return value > 0 ? static_cast<std::uint64_t>(value) : 1;
+    }
+
+    /** @brief Coalesces foreign acknowledgements onto the management
+     * owner. */
+    void wakePersistence() noexcept
+    {
+        std::lock_guard lock(mutex);
+        if (!accepting || !persistenceWake || persistenceWakePending)
+            return;
+        persistenceWakePending = true;
+        try
+        {
+            // defer never invokes inline. Holding the admission mutex
+            // prevents a post from racing owner-executor teardown in
+            // stop().
+            persistenceWake(
+                [weak = weak_from_this()]
+                {
+                    if (auto self = weak.lock())
+                    {
+                        try
+                        {
+                            self->requireOwner();
+                            {
+                                std::lock_guard lock(self->mutex);
+                                self->persistenceWakePending = false;
+                            }
+                            if (self->running)
+                                self->drainPersistence();
+                        }
+                        catch (...)
+                        {
+                            // The regular owner tick can still
+                            // consume the slot.
+                        }
+                    }
+                }
+            );
+        }
+        catch (...)
+        {
+            persistenceWakePending = false;
+        }
+    }
+
+    /** @brief Reports a durable boundary without retaining room
+     * references. */
+    void logPersistence(
+        const ManagedMatch& match, const char* event
+    ) noexcept
+    {
+        try
+        {
+            spdlog::info(
+                "event={} match_id={} room_id={} admissions={}",
+                event,
+                match.allocation.matchId,
+                match.allocation.roomId.value(),
+                match.admissionAttempts
+            );
+        }
+        catch (...)
+        {
+        }
+    }
+
+    /** @brief Retries only rejected handoff; an accepted adapter owns
+     * its budget. */
+    void progressPersistence(arena::domain::RoomId id)
+    {
+        requireOwner();
+        auto found = matches.find(id);
+        if (!running || found == matches.end())
+            return;
+        auto& match = *found->second;
+        if (match.phase != RoomPhase::Settling ||
+            match.persistenceBlocked)
+            return;
+        if (match.persistenceAccepted)
+        {
+            const auto outcome = match.persistence->outcome.load(
+                std::memory_order_acquire
+            );
+            if (outcome == 1)
+                finish(id, match);
+            else if (outcome == 2)
+            {
+                match.persistenceBlocked = true;
+                ++counts.persistenceFailed;
+                logPersistence(match, "room_persistence_failed");
+            }
+            return;
+        }
+        const auto now = config.now();
+        if (match.retryAt && now < *match.retryAt)
+            return;
+        auto attempt = std::make_shared<PersistenceAttempt>();
+        const auto allocation = match.allocation;
+        const auto result = *match.result;
+        match.persistence = attempt;
+        ++match.admissionAttempts;
+        bool accepted = false;
+        try
+        {
+            accepted = config.persistSettlement(
+                allocation,
+                result,
+                [weak = weak_from_this(), attempt](bool committed)
+                {
+                    int expected = 0;
+                    if (!attempt->outcome.compare_exchange_strong(
+                            expected,
+                            committed ? 1 : 2,
+                            std::memory_order_release
+                        ))
+                        return;
+                    if (auto self = weak.lock())
+                        self->wakePersistence();
+                }
+            );
+        }
+        catch (...)
+        {
+        }
+        // External admission may synchronously stop the service.
+        // Never touch the previous ManagedMatch reference after that
+        // callback.
+        found = matches.find(id);
+        if (!running || found == matches.end() ||
+            found->second->persistence != attempt)
+            return;
+        auto& current = *found->second;
+        if (accepted)
+        {
+            current.persistenceAccepted = true;
+            ++counts.persistenceSubmitted;
+            logPersistence(current, "room_persistence_submitted");
+            return;
+        }
+        current.persistence.reset();
+        ++counts.persistenceRejected;
+        if (current.admissionAttempts >=
+            config.persistenceAdmissionAttempts)
+        {
+            current.persistenceBlocked = true;
+            ++counts.persistenceFailed;
+            logPersistence(
+                current,
+                "room_persistence_admission_exhausted"
+            );
+            return;
+        }
+        auto delay = config.persistenceRetryBase;
+        for (std::size_t i = 1; i < current.admissionAttempts &&
+                                delay < config.persistenceRetryMax;
+             ++i)
+            delay = std::min(config.persistenceRetryMax, delay * 2);
+        current.retryAt = after(now, delay);
+        logPersistence(current, "room_persistence_rejected");
+    }
+
+    /** @brief Consumes immutable acknowledgement slots only on the
+     * owner. */
+    void drainPersistence()
+    {
+        requireOwner();
+        std::vector<arena::domain::RoomId> ids;
+        for (const auto& [id, match] : matches)
+            if (match->phase == RoomPhase::Settling)
+                ids.push_back(id);
+        for (const auto id : ids)
+        {
+            if (!running)
+                break;
+            try
+            {
+                progressPersistence(id);
+            }
+            catch (...)
+            {
+            }
+        }
+    }
+
     /** @brief Prepares a result once before retiring registry
      * membership. */
     void settle(
@@ -504,7 +731,15 @@ struct RoomService::State : std::enable_shared_from_this<State>
             0,
             snapshot.players
         };
-        if (match.phase == RoomPhase::Playing)
+        result.createdUnixMs = match.createdUnixMs;
+        result.startedUnixMs = match.startedUnixMs;
+        result.finishedUnixMs = std::max(
+            {match.createdUnixMs, match.startedUnixMs, wallMillis()}
+        );
+        result.startedTick = match.startedTick;
+        result.playedTicks = match.playedTicks;
+        if (!config.persistSettlement &&
+            match.phase == RoomPhase::Playing)
         {
             transition(
                 match.battle,
@@ -518,7 +753,7 @@ struct RoomService::State : std::enable_shared_from_this<State>
                     arena::domain::Room::Event::BattleEnded
                 );
         }
-        else
+        else if (!config.persistSettlement)
             transition(
                 match.battle,
                 arena::domain::Battle::Event::Abort
@@ -530,11 +765,18 @@ struct RoomService::State : std::enable_shared_from_this<State>
         match.result.emplace(std::move(result));
         match.finishedTick = snapshot.tick;
         match.phase = RoomPhase::Settling;
-        if (reason == SettlementReason::Completed)
-            ++counts.battlesCompleted;
-        else
-            ++counts.battlesAborted;
+        if (!config.persistSettlement)
+        {
+            if (reason == SettlementReason::Completed)
+                ++counts.battlesCompleted;
+            else
+                ++counts.battlesAborted;
+        }
         logPhase(id, match);
+        if (!running)
+            return;
+        if (config.persistSettlement)
+            progressPersistence(id);
         if (!running)
             return;
         try
@@ -565,6 +807,13 @@ struct RoomService::State : std::enable_shared_from_this<State>
             config.now(),
             config.resultRetention
         );
+        if (config.persistSettlement)
+            transition(
+                match.battle,
+                match.result->reason == SettlementReason::Completed
+                    ? arena::domain::Battle::Event::Finish
+                    : arena::domain::Battle::Event::Abort
+            );
         online->finishMatch(id, match.allocation.matchId);
         if (!running)
             return;
@@ -575,6 +824,14 @@ struct RoomService::State : std::enable_shared_from_this<State>
         finishRecording(id);
         match.phase = RoomPhase::Finished;
         match.expires = expiry;
+        if (config.persistSettlement)
+        {
+            ++counts.persistenceCommitted;
+            if (match.result->reason == SettlementReason::Completed)
+                ++counts.battlesCompleted;
+            else
+                ++counts.battlesAborted;
+        }
         logPhase(id, match);
     }
 
@@ -624,7 +881,38 @@ struct RoomService::State : std::enable_shared_from_this<State>
     )
     {
         if (match.phase == RoomPhase::Settling)
-            finish(id, match);
+        {
+            if (config.persistSettlement)
+                progressPersistence(id);
+            else
+                finish(id, match);
+            if (!running)
+                return;
+            if (match.phase == RoomPhase::Settling)
+            {
+                for (const auto index : commands)
+                {
+                    auto& command = batch[index];
+                    const auto auth = current(command);
+                    if (!running)
+                        return;
+                    if (auth && participant(match, command) &&
+                        command.statusComplete && !command.isReady)
+                        command.statusResult.emplace(view(id, match));
+                    else if (
+                        auth && participant(match, command) &&
+                        command.snapshotComplete
+                    )
+                        command.snapshotResult.emplace(
+                            actors.at(id)->snapshot()
+                        );
+                    else if (auth)
+                        command
+                            .error = arena::protocol::ERR_UNAVAILABLE;
+                }
+                return;
+            }
+        }
         if (!running)
             return;
         if (match.phase == RoomPhase::Finished)
@@ -747,6 +1035,10 @@ struct RoomService::State : std::enable_shared_from_this<State>
                     arena::domain::Battle::Event::Start
                 );
                 match.phase = RoomPhase::Playing;
+                match.startedUnixMs = std::max(
+                    match.createdUnixMs,
+                    wallMillis()
+                );
                 ++counts.battlesStarted;
                 logPhase(id, match);
                 if (!running)
@@ -867,7 +1159,10 @@ struct RoomService::State : std::enable_shared_from_this<State>
             nextIncarnation(),
             config.actor
         );
-        auto match = std::make_unique<ManagedMatch>(allocation);
+        auto match = std::make_unique<ManagedMatch>(
+            allocation,
+            wallMillis()
+        );
         actors.emplace(allocation.roomId, std::move(actor));
         try
         {
@@ -1208,6 +1503,8 @@ struct RoomService::State : std::enable_shared_from_this<State>
         {
             std::lock_guard lock(mutex);
             accepting = false;
+            persistenceWake = {};
+            persistenceWakePending = false;
             running = false;
             started = true;
             abandoned.swap(pending);
@@ -1225,7 +1522,15 @@ struct RoomService::State : std::enable_shared_from_this<State>
         for (const auto& [id, match] : matches)
             try
             {
-                online->finishMatch(id, match->allocation.matchId);
+                // Unacknowledged durable results retain registry
+                // fences until registry shutdown; stop must not
+                // impersonate a commit.
+                if (!config.persistSettlement ||
+                    match->phase == RoomPhase::Finished)
+                    online->finishMatch(
+                        id,
+                        match->allocation.matchId
+                    );
             }
             catch (...)
             {
@@ -1256,6 +1561,10 @@ struct RoomService::State : std::enable_shared_from_this<State>
     std::map<arena::domain::RoomId, std::size_t, RoomLess>
         pendingRooms;
     bool accepting{false};
+    /// Protected by mutex. At most one owner wake is queued for all
+    /// acknowledgements.
+    std::function<void(ConnectionScheduler::Action)> persistenceWake;
+    bool persistenceWakePending{false};
     /// The following state is owner-only; callbacks are invoked after
     /// leaving its references.
     std::map<
@@ -1320,6 +1629,7 @@ void RoomService::start(ConnectionScheduler scheduler)
         throw;
     }
     std::lock_guard lock(state.mutex);
+    state.persistenceWake = state.scheduler.defer;
     state.accepting = true;
 }
 void RoomService::stop() noexcept
@@ -1424,6 +1734,13 @@ RoomMetrics RoomService::metrics() const
             ++result.retainedResults;
         else
             ++result.managedMatches;
+        if (m_state->config.persistSettlement &&
+            match->phase == RoomPhase::Settling)
+        {
+            ++result.pendingSettlements;
+            if (match->persistenceBlocked)
+                ++result.blockedSettlements;
+        }
     }
     return result;
 }

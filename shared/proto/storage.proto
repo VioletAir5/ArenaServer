@@ -18,6 +18,8 @@ message Participant {
   uint64 last_input_seq = 6;
   sint32 final_x = 7;
   sint32 final_y = 8;
+  sint32 last_dx = 9;
+  sint32 last_dy = 10;
 }
 message MatchRecord {
   uint64 match_id = 1;

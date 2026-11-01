@@ -848,14 +848,16 @@ TEST_F(
     ASSERT_TRUE(bob);
     ASSERT_TRUE(outsider);
     const std::array<MatchParticipant, 2> participants{
-        {{bob->snapshot.playerId, bob->snapshot.sessionId},
-         {alice->snapshot.playerId, alice->snapshot.sessionId}}
+        {{bob->snapshot.playerId, bob->snapshot.sessionId, 1480},
+         {alice->snapshot.playerId, alice->snapshot.sessionId, 1440}}
     };
     auto allocated = registry->allocateMatch(17, participants);
     ASSERT_TRUE(allocated);
     EXPECT_EQ(allocated->members[0].playerId, PlayerId{1});
     EXPECT_EQ(allocated->members[1].playerId, PlayerId{2});
     EXPECT_EQ(allocated->members[0].roomEpoch, 1U);
+    EXPECT_EQ(allocated->members[0].initialMmr, 1440U);
+    EXPECT_EQ(allocated->members[1].initialMmr, 1480U);
     EXPECT_NE(allocated->roomId.value() & (UINT64_C(1) << 63), 0U);
     for (const auto& grant : {alice.value(), bob.value()})
     {
@@ -870,6 +872,12 @@ TEST_F(
     ASSERT_TRUE(retry);
     EXPECT_EQ(retry->roomId, allocated->roomId);
     EXPECT_EQ(retry->members, allocated->members);
+    auto changedRating = reversed;
+    changedRating[0].initialMmr += 1;
+    EXPECT_FALSE(registry->allocateMatch(17, changedRating));
+    auto invalidRating = reversed;
+    invalidRating[0].initialMmr = 10001;
+    EXPECT_FALSE(registry->allocateMatch(17, invalidRating));
     EXPECT_EQ(registry->roomCount(), 1U);
     EXPECT_FALSE(registry->allocateMatch(
         17,

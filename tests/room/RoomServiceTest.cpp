@@ -1678,4 +1678,394 @@ TEST(
     EXPECT_GE(rooms.metrics().ticks, 3U);
     EXPECT_EQ(rooms.metrics().actors, 0U);
 }
+
+struct DurableRoomServiceTest : ManagedRoomServiceTest
+{
+    struct Write
+    {
+        ManagedRoom allocation;
+        RoomSettlement result;
+        std::function<void(bool)> complete;
+    };
+    std::vector<Write> writes;
+    std::int64_t wallMilliseconds{1000};
+    RoomServiceConfig durableConfig()
+    {
+        RoomServiceConfig c;
+        c.battleDurationTicks = 1;
+        c.wallNow = [this]
+        {
+            return std::chrono::system_clock::time_point{} +
+                   std::chrono::milliseconds(wallMilliseconds);
+        };
+        c.persistSettlement = [this](
+                                  const auto& allocation,
+                                  const auto& result,
+                                  auto complete
+                              )
+        {
+            writes.push_back(
+                {allocation, result, std::move(complete)}
+            );
+            return true;
+        };
+        return c;
+    }
+    ManagedRoom playToSettlement(
+        const SessionGrant& alice, const SessionGrant& bob
+    )
+    {
+        const auto allocation = allocate(alice, bob);
+        EXPECT_TRUE(rooms->openMatch(allocation));
+        const auto forming = query(alice, 50ms);
+        bothReady(
+            alice,
+            bob,
+            allocation,
+            forming.snapshot.incarnation
+        );
+        EXPECT_EQ(query(alice, 100ms).phase, RoomPhase::Ready);
+        const auto settling = query(alice, 150ms);
+        EXPECT_EQ(settling.phase, RoomPhase::Settling);
+        EXPECT_FALSE(settling.settlement);
+        return allocation;
+    }
+};
+
+TEST_F(
+    DurableRoomServiceTest, ForeignAcknowledgementFinishesOnlyOnOwner
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    std::mutex wakeMutex;
+    std::vector<ConnectionScheduler::Action> wakes;
+    auto c = durableConfig();
+    c.now = [this] { return now; };
+    rooms = std::make_shared<RoomService>(online, std::move(c));
+    auto scheduler = timers.scheduler();
+    scheduler.defer = [&](auto action)
+    {
+        std::lock_guard lock(wakeMutex);
+        wakes.push_back(std::move(action));
+    };
+    rooms->start(std::move(scheduler));
+    const auto allocation = playToSettlement(alice, bob);
+    ASSERT_EQ(writes.size(), 1U);
+    EXPECT_EQ(writes.front().allocation.members, allocation.members);
+    EXPECT_EQ(writes.front().result.players.size(), 2U);
+    EXPECT_EQ(writes.front().result.startedTick, 3U);
+    EXPECT_EQ(writes.front().result.playedTicks, 1U);
+    EXPECT_EQ(rooms->metrics().battlesCompleted, 0U);
+    EXPECT_EQ(rooms->metrics().pendingSettlements, 1U);
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    const auto frozen = query(alice, 200ms).snapshot;
+    std::optional<RoomService::InputResult> rejectedInput;
+    ASSERT_TRUE(rooms->input(
+        alice.lease->binding,
+        alice.snapshot.sessionId,
+        allocation.roomId,
+        frozen.incarnation,
+        allocation.members[0].roomEpoch,
+        1,
+        1,
+        0,
+        [&](auto value) { rejectedInput.emplace(std::move(value)); }
+    ));
+    markReady(
+        alice,
+        allocation,
+        frozen.incarnation,
+        false,
+        [](auto value)
+        {
+            ASSERT_FALSE(value);
+            EXPECT_EQ(value.error(), wire::ERR_UNAVAILABLE);
+        }
+    );
+    std::optional<RoomService::SettlementResult> hidden;
+    ASSERT_TRUE(rooms->settlement(
+        alice.lease->binding,
+        alice.snapshot.sessionId,
+        allocation.matchId,
+        [&](auto value) { hidden.emplace(std::move(value)); }
+    ));
+    EXPECT_EQ(query(alice, 250ms).snapshot, frozen);
+    ASSERT_TRUE(hidden);
+    ASSERT_FALSE(*hidden);
+    EXPECT_EQ(hidden->error(), wire::ERR_UNAVAILABLE);
+    ASSERT_TRUE(rejectedInput);
+    ASSERT_FALSE(*rejectedInput);
+    EXPECT_EQ(rejectedInput->error(), wire::ERR_UNAVAILABLE);
+    EXPECT_EQ(rooms->metrics().persistenceCommitted, 0U);
+
+    auto complete = writes.front().complete;
+    std::thread foreign(
+        [complete]
+        {
+            complete(true);
+            complete(true);
+            complete(false);
+        }
+    );
+    foreign.join();
+    EXPECT_EQ(rooms->metrics().persistenceCommitted, 0U);
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    std::vector<ConnectionScheduler::Action> ownerActions;
+    {
+        std::lock_guard lock(wakeMutex);
+        ASSERT_EQ(wakes.size(), 1U);
+        ownerActions.swap(wakes);
+    }
+    for (auto& action : ownerActions)
+        action();
+    EXPECT_EQ(rooms->metrics().persistenceCommitted, 1U);
+    EXPECT_EQ(rooms->metrics().battlesCompleted, 1U);
+    EXPECT_EQ(rooms->metrics().pendingSettlements, 0U);
+    EXPECT_FALSE(online->managedRoom(allocation.roomId));
+    const auto finished = query(alice, 300ms);
+    EXPECT_EQ(finished.phase, RoomPhase::Finished);
+    EXPECT_EQ(finished.snapshot, frozen);
+    ASSERT_TRUE(finished.settlement);
+    EXPECT_EQ(
+        finished.settlement->finalChecksum,
+        writes.front().result.finalChecksum
+    );
+    EXPECT_EQ(writes.size(), 1U);
+}
+
+TEST_F(
+    DurableRoomServiceTest,
+    AcceptedTerminalFailureNeverRestartsTheAdapterBudget
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    auto c = durableConfig();
+    c.maxRooms = 1;
+    start(c);
+    const auto allocation = playToSettlement(alice, bob);
+    ASSERT_EQ(writes.size(), 1U);
+    writes.front().complete(false);
+    for (const auto cutoff : {200ms, 500ms, 1000ms, 2000ms})
+    {
+        const auto status = query(alice, cutoff);
+        EXPECT_EQ(status.phase, RoomPhase::Settling);
+        EXPECT_FALSE(status.settlement);
+    }
+    EXPECT_EQ(writes.size(), 1U);
+    EXPECT_EQ(rooms->metrics().persistenceSubmitted, 1U);
+    EXPECT_EQ(rooms->metrics().persistenceFailed, 1U);
+    EXPECT_EQ(rooms->metrics().blockedSettlements, 1U);
+    EXPECT_EQ(rooms->metrics().retainedResults, 0U);
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    auto charlie = login(44, 9);
+    auto dana = login(45, 10);
+    const auto second = allocate(charlie, dana, 2);
+    EXPECT_FALSE(rooms->openMatch(second));
+    EXPECT_EQ(rooms->metrics().actors, 1U);
+}
+
+TEST_F(
+    DurableRoomServiceTest,
+    RejectedAdmissionBackoffIsFiniteAndIntentIsFrozen
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    auto c = durableConfig();
+    c.persistenceAdmissionAttempts = 3;
+    c.persistenceRetryBase = 100ms;
+    c.persistenceRetryMax = 200ms;
+    c.persistSettlement = [this](
+                              const auto& allocation,
+                              const auto& result,
+                              auto complete
+                          )
+    {
+        writes.push_back({allocation, result, std::move(complete)});
+        return false;
+    };
+    start(c);
+    const auto allocation = playToSettlement(alice, bob);
+    ASSERT_EQ(writes.size(), 1U);
+    const auto frozen = writes.front().result;
+    at(200ms);
+    EXPECT_EQ(writes.size(), 1U);
+    at(250ms);
+    EXPECT_EQ(writes.size(), 2U);
+    at(400ms);
+    EXPECT_EQ(writes.size(), 2U);
+    at(450ms);
+    ASSERT_EQ(writes.size(), 3U);
+    at(900ms);
+    EXPECT_EQ(writes.size(), 3U);
+    for (const auto& write : writes)
+    {
+        EXPECT_EQ(write.result.finalTick, frozen.finalTick);
+        EXPECT_EQ(write.result.finalChecksum, frozen.finalChecksum);
+        EXPECT_EQ(write.result.players, frozen.players);
+        EXPECT_EQ(write.result.createdUnixMs, frozen.createdUnixMs);
+        EXPECT_EQ(write.result.startedUnixMs, frozen.startedUnixMs);
+        EXPECT_EQ(write.result.finishedUnixMs, frozen.finishedUnixMs);
+        write.complete(true);
+    }
+    const auto status = query(alice, 950ms);
+    EXPECT_EQ(status.phase, RoomPhase::Settling);
+    EXPECT_FALSE(status.settlement);
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    EXPECT_EQ(rooms->metrics().persistenceRejected, 3U);
+    EXPECT_EQ(rooms->metrics().persistenceFailed, 1U);
+    EXPECT_EQ(rooms->metrics().blockedSettlements, 1U);
+    EXPECT_EQ(rooms->metrics().persistenceCommitted, 0U);
+}
+
+TEST_F(
+    DurableRoomServiceTest,
+    RetiredAdmissionAcknowledgementCannotFinishNewAttempt
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    auto c = durableConfig();
+    c.persistSettlement = [this](
+                              const auto& allocation,
+                              const auto& result,
+                              auto complete
+                          )
+    {
+        writes.push_back({allocation, result, std::move(complete)});
+        return writes.size() > 1;
+    };
+    start(c);
+    const auto allocation = playToSettlement(alice, bob);
+    at(250ms);
+    ASSERT_EQ(writes.size(), 2U);
+    writes.front().complete(true);
+    EXPECT_EQ(query(alice, 300ms).phase, RoomPhase::Settling);
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    writes.back().complete(true);
+    EXPECT_EQ(query(alice, 350ms).phase, RoomPhase::Finished);
+    EXPECT_EQ(rooms->metrics().persistenceCommitted, 1U);
+    EXPECT_EQ(rooms->metrics().persistenceRejected, 1U);
+    EXPECT_EQ(rooms->metrics().persistenceSubmitted, 1U);
+    EXPECT_EQ(writes.size(), 2U);
+}
+
+TEST_F(
+    DurableRoomServiceTest,
+    StopRetainsUncommittedAuthorityAndLateCallbackIsSafe
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    start(durableConfig());
+    const auto allocation = playToSettlement(alice, bob);
+    ASSERT_EQ(writes.size(), 1U);
+    auto complete = writes.front().complete;
+    rooms->stop();
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    EXPECT_TRUE(online->snapshot(alice.snapshot.playerId)->roomId);
+    const auto posts = timers.deferred.load();
+    rooms.reset();
+    std::thread foreign([complete] { complete(true); });
+    foreign.join();
+    EXPECT_EQ(timers.deferred.load(), posts);
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    timers.readyAfterCancel(timers.timers.size() - 1);
+}
+
+TEST_F(
+    DurableRoomServiceTest,
+    ReadyTimeoutPersistsFullRosterWithoutInventedStart
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    auto c = durableConfig();
+    c.readyTimeoutTicks = 1;
+    start(c);
+    const auto allocation = allocate(alice, bob);
+    ASSERT_TRUE(rooms->openMatch(allocation));
+    const auto settling = query(alice, 50ms);
+    EXPECT_EQ(settling.phase, RoomPhase::Settling);
+    EXPECT_FALSE(settling.settlement);
+    ASSERT_EQ(writes.size(), 1U);
+    const auto& result = writes.front().result;
+    EXPECT_EQ(result.reason, SettlementReason::ReadyTimeout);
+    EXPECT_EQ(result.players.size(), 2U);
+    EXPECT_EQ(result.createdUnixMs, 1000U);
+    EXPECT_EQ(result.startedUnixMs, 0U);
+    EXPECT_EQ(result.finishedUnixMs, 1000U);
+    EXPECT_EQ(result.startedTick, 0U);
+    EXPECT_EQ(result.playedTicks, 0U);
+    EXPECT_EQ(rooms->metrics().battlesAborted, 0U);
+    writes.front().complete(true);
+    EXPECT_EQ(query(alice, 100ms).phase, RoomPhase::Finished);
+    EXPECT_EQ(rooms->metrics().battlesAborted, 1U);
+}
+
+TEST_F(
+    DurableRoomServiceTest,
+    AbortAfterPlayingKeepsStartFactWhenWallClockMovesBack
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    auto c = durableConfig();
+    c.battleDurationTicks = 100;
+    start(c);
+    const auto allocation = allocate(alice, bob);
+    ASSERT_TRUE(rooms->openMatch(allocation));
+    const auto forming = query(alice, 50ms);
+    bothReady(alice, bob, allocation, forming.snapshot.incarnation);
+    query(alice, 100ms);
+    wallMilliseconds = 2000;
+    EXPECT_EQ(query(alice, 150ms).phase, RoomPhase::Playing);
+    bob.lease->release();
+    wallMilliseconds = 500;
+    EXPECT_EQ(query(alice, 250ms).phase, RoomPhase::Settling);
+    ASSERT_EQ(writes.size(), 1U);
+    const auto& result = writes.front().result;
+    EXPECT_EQ(result.reason, SettlementReason::MemberUnavailable);
+    EXPECT_EQ(result.players.size(), 2U);
+    EXPECT_EQ(result.createdUnixMs, 1000U);
+    EXPECT_EQ(result.startedUnixMs, 2000U);
+    EXPECT_EQ(result.finishedUnixMs, 2000U);
+    EXPECT_GT(result.startedTick, 0U);
+    EXPECT_GT(result.playedTicks, 0U);
+    writes.front().complete(true);
+    EXPECT_EQ(query(alice, 300ms).phase, RoomPhase::Finished);
+}
+
+TEST_F(
+    DurableRoomServiceTest,
+    AdmissionMayStopTheOwnerWithoutDanglingRoomReferences
+)
+{
+    auto alice = login();
+    auto bob = login(43, 8);
+    auto c = durableConfig();
+    c.readyTimeoutTicks = 1;
+    c.persistSettlement = [this](
+                              const auto& allocation,
+                              const auto& result,
+                              auto complete
+                          )
+    {
+        writes.push_back({allocation, result, std::move(complete)});
+        rooms->stop();
+        return true;
+    };
+    start(c);
+    const auto allocation = allocate(alice, bob);
+    ASSERT_TRUE(rooms->openMatch(allocation));
+    at(50ms);
+    ASSERT_EQ(writes.size(), 1U);
+    EXPECT_EQ(writes.front().result.players.size(), 2U);
+    EXPECT_EQ(rooms->metrics().actors, 0U);
+    EXPECT_TRUE(online->managedRoom(allocation.roomId));
+    writes.front().complete(true);
+    EXPECT_EQ(rooms->metrics().persistenceCommitted, 0U);
+}
 } // namespace

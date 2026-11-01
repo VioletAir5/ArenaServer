@@ -1,7 +1,9 @@
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -110,6 +112,7 @@ struct Client
     std::shared_ptr<Transport> transport;
     ConnectionContext::Ptr context;
     std::vector<std::function<void()>> posts;
+    std::vector<std::function<void()>> deadlines;
     std::shared_ptr<ConnectionHost> host;
 
     Client(
@@ -129,7 +132,11 @@ struct Client
             transport,
             context,
             {[this](auto task) { posts.push_back(std::move(task)); },
-             [](auto, auto) { return ConnectionTimer{}; }},
+             [this](auto, auto task)
+             {
+                 deadlines.push_back(std::move(task));
+                 return ConnectionTimer{};
+             }},
             [routes](auto metadata)
             {
                 return makePreLoginHandshakeHandler(
@@ -744,5 +751,251 @@ TEST_F(
             wire::ERR_UNAUTHENTICATED
         );
     }
+}
+
+struct AsyncLoginProtocolTest : OnlineProtocolTest
+{
+    std::vector<PasswordLoginCompletion> completions;
+    std::vector<ConnectionClock::time_point> budgets;
+    std::vector<std::string> correlations;
+    std::atomic<unsigned> cancelled{0};
+    bool inlineCompletion{false};
+
+    void SetUp() override
+    {
+        OnlineProtocolTest::SetUp();
+        rebuild(
+            [this](
+                std::string account,
+                std::string credential,
+                ConnectionClock::time_point deadline,
+                std::string correlation,
+                PasswordLoginCompletion done
+            ) -> std::
+                  expected<PasswordLoginCancellation, auth::AuthError>
+            {
+                EXPECT_FALSE(account.empty());
+                EXPECT_EQ(credential, "test-password");
+                budgets.push_back(deadline);
+                correlations.push_back(std::move(correlation));
+                completions.push_back(std::move(done));
+                if (inlineCompletion)
+                    completions.back()(arena::domain::PlayerId{42});
+                return PasswordLoginCancellation([this]
+                                                 { ++cancelled; });
+            }
+        );
+    }
+
+    void rebuild(AsyncPasswordLogin provider)
+    {
+        auth::JwtConfig jwt;
+        jwt.key = "0123456789abcdef0123456789abcdef";
+        jwt.now = [] { return 1700000000LL; };
+        routes = makeLoginMessageRegistry(
+            {},
+            std::make_shared<auth::JwtTokens>(std::move(jwt)),
+            registry,
+            {},
+            {},
+            std::move(provider)
+        );
+    }
+
+    void flush(Client& client)
+    {
+        while (!client.posts.empty())
+        {
+            auto batch = std::move(client.posts);
+            client.posts.clear();
+            for (auto& action : batch)
+                action();
+        }
+    }
+};
+
+TEST_F(
+    AsyncLoginProtocolTest,
+    ForeignPasswordCompletionBindsOnlyOnLiveOwner
+)
+{
+    Client alice(801, routes);
+    alice.send(password("alice"));
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_GT(budgets[0], ConnectionClock::now());
+    EXPECT_EQ(correlations[0], "connection-801-request-99");
+    EXPECT_EQ(
+        alice.context->session->loginState(),
+        ConnectionSession::LoginState::Pending
+    );
+    EXPECT_EQ(registry->activeCount(), 0);
+    std::thread worker(
+        [done = completions[0]]
+        {
+            done(arena::domain::PlayerId{42});
+            done(arena::domain::PlayerId{43});
+        }
+    );
+    worker.join();
+    EXPECT_EQ(registry->activeCount(), 0);
+    EXPECT_EQ(
+        alice.context->session->loginState(),
+        ConnectionSession::LoginState::Pending
+    );
+    EXPECT_TRUE(alice.transport->output.empty());
+    flush(alice);
+    const auto reply = alice.reply();
+    ASSERT_TRUE(reply.has_login_response());
+    EXPECT_EQ(reply.login_response().player_id(), 42);
+    EXPECT_TRUE(reply.login_response().accepted());
+    EXPECT_EQ(registry->activeCount(), 1);
+    EXPECT_EQ(cancelled.load(), 0);
+}
+
+TEST_F(
+    AsyncLoginProtocolTest,
+    TimeoutCancelsAndLateResultCannotBindReusedRequest
+)
+{
+    Client alice(802, routes);
+    alice.send(password("alice"));
+    ASSERT_EQ(completions.size(), 1);
+    ASSERT_FALSE(alice.deadlines.empty());
+    alice.deadlines.back()();
+    EXPECT_EQ(alice.reply().error().code(), wire::ERR_TIMEOUT);
+    EXPECT_EQ(cancelled.load(), 1);
+    EXPECT_EQ(registry->retainedCount(), 0);
+    alice.send(password("bob"));
+    ASSERT_EQ(completions.size(), 2);
+    std::thread late([done = completions[0]]
+                     { done(arena::domain::PlayerId{42}); });
+    late.join();
+    flush(alice);
+    EXPECT_TRUE(alice.transport->output.empty());
+    EXPECT_EQ(registry->activeCount(), 0);
+    completions[1](arena::domain::PlayerId{43});
+    EXPECT_EQ(alice.reply().login_response().player_id(), 43);
+    EXPECT_FALSE(registry->snapshot(arena::domain::PlayerId{42}));
+    EXPECT_EQ(registry->activeCount(), 1);
+    EXPECT_EQ(cancelled.load(), 1);
+}
+
+TEST_F(
+    AsyncLoginProtocolTest,
+    DuplicateRequestRevokesOriginalPasswordOperation
+)
+{
+    Client alice(803, routes);
+    alice.send(password("alice"));
+    alice.send(password("alice"));
+    EXPECT_EQ(
+        alice.reply().error().code(),
+        wire::ERR_DUPLICATE_REQUEST
+    );
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_EQ(cancelled.load(), 1);
+    completions[0](arena::domain::PlayerId{42});
+    EXPECT_TRUE(alice.transport->output.empty());
+    EXPECT_EQ(registry->retainedCount(), 0);
+}
+
+TEST_F(
+    AsyncLoginProtocolTest,
+    DisconnectPreventsLateForeignSessionInstallation
+)
+{
+    Client alice(804, routes);
+    alice.send(password("alice"));
+    ASSERT_EQ(completions.size(), 1);
+    alice.disconnect();
+    EXPECT_EQ(cancelled.load(), 1);
+    std::thread worker([done = completions[0]]
+                       { done(arena::domain::PlayerId{42}); });
+    worker.join();
+    flush(alice);
+    EXPECT_EQ(registry->retainedCount(), 0);
+    EXPECT_EQ(
+        alice.context->session->loginState(),
+        ConnectionSession::LoginState::Expired
+    );
+    EXPECT_TRUE(alice.transport->output.empty());
+}
+
+TEST_F(
+    AsyncLoginProtocolTest,
+    InlineCompletionRetiresBeforeCancelHandleReturns
+)
+{
+    inlineCompletion = true;
+    Client alice(805, routes);
+    alice.send(password("alice"));
+    EXPECT_EQ(alice.reply().login_response().player_id(), 42);
+    EXPECT_EQ(cancelled.load(), 0);
+    alice.disconnect();
+    EXPECT_EQ(cancelled.load(), 0);
+}
+
+TEST_F(AsyncLoginProtocolTest, AdmissionFailureStaysTypedAndUnbound)
+{
+    rebuild(
+        [](
+            auto,
+            auto,
+            auto,
+            auto,
+            auto
+        ) -> std::expected<PasswordLoginCancellation, auth::AuthError>
+        { return std::unexpected(auth::AuthError::Unavailable); }
+    );
+    Client rejected(806, routes);
+    rejected.send(password("alice"));
+    EXPECT_EQ(rejected.reply().error().code(), wire::ERR_UNAVAILABLE);
+    EXPECT_EQ(registry->retainedCount(), 0);
+}
+
+TEST_F(AsyncLoginProtocolTest, CredentialFailureStaysTypedAndUnbound)
+{
+    Client wrong(807, routes);
+    wrong.send(password("alice"));
+    ASSERT_EQ(completions.size(), 1);
+    std::thread worker(
+        [done = completions[0]]
+        {
+            done(
+                std::unexpected(auth::AuthError::InvalidCredentials)
+            );
+        }
+    );
+    worker.join();
+    flush(wrong);
+    EXPECT_EQ(
+        wrong.reply().error().code(),
+        wire::ERR_UNAUTHENTICATED
+    );
+    EXPECT_EQ(registry->retainedCount(), 0);
+    EXPECT_EQ(cancelled.load(), 0);
+}
+
+TEST_F(
+    AsyncLoginProtocolTest,
+    ConcurrentPasswordRequestsCannotRebindOneTransport
+)
+{
+    Client alice(808, routes);
+    auto first = password("alice");
+    auto second = password("bob");
+    second.set_request_id(100);
+    alice.send(first);
+    alice.send(second);
+    ASSERT_EQ(completions.size(), 2);
+    completions[0](arena::domain::PlayerId{42});
+    EXPECT_EQ(alice.reply().login_response().player_id(), 42);
+    completions[1](arena::domain::PlayerId{43});
+    EXPECT_EQ(
+        alice.reply().error().code(),
+        wire::ERR_UNAUTHENTICATED
+    );
+    EXPECT_EQ(registry->activeCount(), 1);
+    EXPECT_FALSE(registry->snapshot(arena::domain::PlayerId{43}));
 }
 } // namespace

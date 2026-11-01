@@ -662,7 +662,9 @@ std::expected<ManagedRoom, OnlineError> OnlineRegistry::allocateMatch(
 )
 {
     if (!matchId || (matchId & managedRoomBit) ||
-        participants[0].playerId == participants[1].playerId)
+        participants[0].playerId == participants[1].playerId ||
+        participants[0].initialMmr > 10000 ||
+        participants[1].initialMmr > 10000)
         return std::unexpected(OnlineError::InvalidRoom);
     if (participants[1].playerId.value() <
         participants[0].playerId.value())
@@ -710,6 +712,7 @@ std::expected<ManagedRoom, OnlineError> OnlineRegistry::allocateMatch(
             const auto& current = entries[index]->snapshot;
             if (member.playerId != participants[index].playerId ||
                 member.sessionId != participants[index].sessionId ||
+                member.initialMmr != participants[index].initialMmr ||
                 current.roomId != room ||
                 current.roomEpoch != member.roomEpoch)
                 return std::unexpected(OnlineError::InvalidRoom);
@@ -734,10 +737,12 @@ std::expected<ManagedRoom, OnlineError> OnlineRegistry::allocateMatch(
         room,
         {{{participants[0].playerId,
            participants[0].sessionId,
-           entries[0]->snapshot.roomEpoch + 1},
+           entries[0]->snapshot.roomEpoch + 1,
+           participants[0].initialMmr},
           {participants[1].playerId,
            participants[1].sessionId,
-           entries[1]->snapshot.roomEpoch + 1}}}
+           entries[1]->snapshot.roomEpoch + 1,
+           participants[1].initialMmr}}}
     };
     State::Room prepared;
     prepared.players.reserve(2);
