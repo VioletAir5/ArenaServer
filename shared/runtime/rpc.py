@@ -1,6 +1,6 @@
 """Bounded internal RPC with propagated deadlines and cooperative cancellation."""
 import asyncio
-from async_timeout import timeout as timeout_scope
+from async_timeout import timeout as timeout_scope, timeout_at as deadline_scope
 from dataclasses import dataclass
 import math
 import hmac
@@ -20,7 +20,7 @@ class RpcError(Exception):
         if type(status) is not int or not 1 <= status <= 10:
             raise ValueError("invalid RPC status")
         super().__init__("RPC request failed")
-        self.status, self.retryable = status, bool(retryable)
+        self.status, self.retryable = status, bool(retryable) and status != OUTCOME_UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,10 +36,6 @@ class Context:
     def check(self):
         if self.remaining() <= 0:
             raise RpcError(DEADLINE_EXCEEDED)
-
-    def child_timeout(self, maximum):
-        self.check()
-        return min(maximum, self.remaining())
 
 
 def _timeout(value):
@@ -70,6 +66,26 @@ async def _write(writer, message):
     await writer.drain()
 
 
+async def _close(writer, deadline, *, abort=False):
+    """Retire the stream on its loop; a stalled flush cannot retain admission."""
+    if abort or time.monotonic() >= deadline:
+        writer.transport.abort()
+        await asyncio.sleep(0)
+        return
+    writer.close()
+    try:
+        async with deadline_scope(deadline):
+            await writer.wait_closed()
+    except asyncio.CancelledError:
+        writer.transport.abort()
+        raise
+    except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
+        writer.transport.abort()
+    finally:
+        # abort() schedules descriptor release on this same event loop.
+        await asyncio.sleep(0)
+
+
 class Server:
     """One loop owns streams and handler tasks; excess peers close immediately.
 
@@ -90,6 +106,7 @@ class Server:
         self._server = None
         self._tasks, self._writers, self._cancelling = set(), set(), set()
         self._closed = False
+        self._close_task = None
         self.accepted = self.rejected = self.completed = self.cancelled = 0
 
     @property
@@ -130,14 +147,20 @@ class Server:
                 continue
         return joined.result()
 
-    async def _respond(self, writer, request, status, *, retryable=False, payload=b""):
-        async with timeout_scope(self.read_timeout):
+    async def _respond(self, writer, request, status, *, retryable=False, payload=b"", deadline=None):
+        limit = time.monotonic() + self.read_timeout
+        if deadline is not None:
+            limit = min(limit, deadline)
+        # An expired request may enqueue a small error immediately, but cannot
+        # wait for a slow peer to make output space beyond its original budget.
+        async with deadline_scope(limit):
             await _write(writer, self.protocol.Response(request_id=request.request_id,
                 correlation_id=request.correlation_id[:64], status=status,
                 retryable=retryable, payload=payload))
 
     async def _serve(self, reader, writer):
-        operation = peer = request = None
+        operation = peer = request = context = None
+        replied = False
         try:
             async with timeout_scope(self.read_timeout):
                 request = self.protocol.Request.FromString(await _read(reader))
@@ -170,12 +193,15 @@ class Server:
             context.check()
             if not isinstance(payload, bytes) or len(payload) > MAX_FRAME - 256:
                 raise RpcError(INTERNAL)
-            await self._respond(writer, request, OK, payload=payload)
+            await self._respond(writer, request, OK, payload=payload, deadline=context.deadline)
+            replied = True
             self.completed += 1
         except RpcError as error:
             if request is not None:
                 try:
-                    await self._respond(writer, request, error.status, retryable=error.retryable)
+                    await self._respond(writer, request, error.status, retryable=error.retryable,
+                        deadline=context.deadline if context is not None else None)
+                    replied = True
                 except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
                     pass
         except (DecodeError, asyncio.IncompleteReadError, ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
@@ -186,32 +212,57 @@ class Server:
         except Exception:
             if request is not None:
                 try:
-                    await self._respond(writer, request, INTERNAL)
+                    await self._respond(writer, request, INTERNAL,
+                        deadline=context.deadline if context is not None else None)
+                    replied = True
                 except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
                     pass
         finally:
             for task in (operation, peer):
                 self._cancel_once(task)
             await self._join([t for t in (operation, peer) if t is not None])
-            self._writers.discard(writer)
-            writer.close()
             try:
-                await writer.wait_closed()
-            except (ConnectionError, OSError):
-                pass
+                await _close(writer, context.deadline if context is not None else
+                             time.monotonic() + self.read_timeout, abort=not replied)
+            finally:
+                self._writers.discard(writer)
 
-    async def close(self, grace=1):
-        grace = _timeout(grace)
-        self._closed = True
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
+    async def _stop_accepting(self):
+        if self._server is None:
+            return
+        # Linux SelectorEventLoop queues raw accepts before their transports
+        # attach. Stop that source, then let existing plain-TCP accepts attach
+        # before Server.close() clears the CPython 3.10 server socket list.
+        loop = self._server.get_loop()
+        for listener in self._server.sockets:
+            loop.remove_reader(listener.fileno())
+        await asyncio.sleep(0)
+        self._server.close()
+        await self._server.wait_closed()
+        # connection_made observes _closed and rejects late admission; its
+        # connection_lost callback releases the descriptor on the next turn.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    async def _shutdown(self, grace):
+        await self._stop_accepting()
         tasks = tuple(self._tasks)
         if tasks:
             _, pending = await asyncio.wait(tasks, timeout=grace)
             for task in pending:
                 self._cancel_once(task)
             await self._join(tasks)
+
+    async def close(self, grace=1):
+        """Finish one shutdown; the first caller establishes the grace period."""
+        grace = _timeout(grace)
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._shutdown(grace))
+        # Cancellation of any waiter cannot abandon the listener fence,
+        # grace wait or dependency cleanup. Repeated callers share this job.
+        await self._join([self._close_task])
+        self._close_task.result()
 
 
 class Client:
@@ -230,23 +281,29 @@ class Client:
     async def call(self, method, payload=b"", *, timeout=1, context=None,
                    correlation_id=None, idempotency_key=""):
         timeout = _timeout(timeout)
+        deadline = time.monotonic() + timeout
         if context is not None:
-            timeout = context.child_timeout(timeout)
+            context.check()
+            deadline = min(deadline, context.deadline)
             correlation_id = context.correlation_id
         self._sequence += 1
         request = self.protocol.Request(request_id=self._sequence,
             correlation_id=correlation_id or f"rpc-{self._sequence}", method=method,
-            deadline_unix_ms=int(time.time() * 1000 + timeout * 1000),
+            deadline_unix_ms=int(time.time() * 1000 +
+                                 max(0, deadline - time.monotonic()) * 1000),
             idempotency_key=idempotency_key, payload=payload, service_token=self._token)
         if not _metadata(request) or request.ByteSize() > MAX_FRAME:
             raise RpcError(INVALID_ARGUMENT)
+        if time.monotonic() >= deadline:
+            raise RpcError(DEADLINE_EXCEEDED)
         if self.inflight >= self.max_inflight:
             raise RpcError(OVERLOADED, retryable=True)
         self.inflight += 1
         writer = None
         sent = False
+        finished = False
         try:
-            async with timeout_scope(timeout):
+            async with deadline_scope(deadline):
                 reader, writer = await asyncio.open_connection(self.host, self.port, limit=MAX_FRAME + 4)
                 sent = True
                 await _write(writer, request)
@@ -255,6 +312,7 @@ class Client:
                         or response.correlation_id != request.correlation_id
                         or not 0 <= response.status <= 10):
                     raise RpcError(INTERNAL)
+                finished = True
                 if response.status != OK:
                     raise RpcError(response.status, retryable=response.retryable)
                 return response.payload
@@ -264,10 +322,8 @@ class Client:
             raise RpcError(OUTCOME_UNKNOWN if sent else UNAVAILABLE,
                            retryable=not sent) from None
         finally:
-            self.inflight -= 1
-            if writer is not None:
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except (ConnectionError, OSError):
-                    pass
+            try:
+                if writer is not None:
+                    await _close(writer, deadline, abort=not finished)
+            finally:
+                self.inflight -= 1

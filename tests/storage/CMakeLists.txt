@@ -9,6 +9,12 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         message(FATAL_ERROR "PostgreSQL storage tests require Linux/WSL")
     endif()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(postgres_clock_command)
+    if(TARGET arena_test_clock)
+        list(APPEND postgres_clock_command "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/shared/clock/RunWithClock.py"
+            --clock-shim "$<TARGET_FILE:arena_test_clock>" --)
+    endif()
     if(NOT ARENA_POSTGRES_BIN)
         find_program(ARENA_PG_CONFIG pg_config REQUIRED)
         execute_process(COMMAND "${ARENA_PG_CONFIG}" --bindir
@@ -27,7 +33,7 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         list(APPEND pg_test_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
     endif()
     add_test(NAME PostgresStorageMigrations
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/StorageMigrationTest.py"
+        COMMAND ${postgres_clock_command} "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/StorageMigrationTest.py"
             ${pg_test_arguments})
     set_tests_properties(PostgresStorageMigrations PROPERTIES
         TIMEOUT 180 RUN_SERIAL TRUE LABELS "integration;storage;postgresql;migration")
@@ -39,12 +45,12 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
     endif()
     execute_process(
         COMMAND "${asset_test_python}" -c
-            "import psycopg; import psycopg.pq; import psycopg_pool; assert psycopg.__version__ == '3.2.13'; assert psycopg_pool.__version__ == '3.2.8'; print(psycopg.__version__, psycopg_pool.__version__, psycopg.pq.version(), psycopg.pq.__impl__)"
+            "import psycopg; import psycopg.pq; import psycopg_pool; assert psycopg.__version__ == '3.2.13'; assert psycopg_pool.__version__ == '3.2.8'; assert psycopg.pq.version() >= 170000; print(psycopg.__version__, psycopg_pool.__version__, psycopg.pq.version(), psycopg.pq.__impl__)"
         RESULT_VARIABLE asset_driver_status OUTPUT_VARIABLE asset_driver_version
         ERROR_VARIABLE asset_driver_error OUTPUT_STRIP_TRAILING_WHITESPACE)
     if(NOT asset_driver_status STREQUAL "0")
         message(FATAL_ERROR
-            "Storage transaction tests require psycopg==3.2.13 and psycopg_pool==3.2.8. Install services/storage/requirements.txt "
+            "Storage transaction tests require psycopg==3.2.13, psycopg_pool==3.2.8 and libpq 17+. Install services/storage/requirements.txt "
             "and set ARENA_POSTGRES_TEST_PYTHON to that interpreter. ${asset_driver_error}")
     endif()
     message(STATUS "Asset transfer PostgreSQL driver: ${asset_driver_version}")
@@ -55,7 +61,7 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         list(APPEND asset_test_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
     endif()
     add_test(NAME AssetTransferConcurrency
-        COMMAND "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/AssetTransferTest.py"
+        COMMAND ${postgres_clock_command} "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/AssetTransferTest.py"
             ${asset_test_arguments})
     set_tests_properties(AssetTransferConcurrency PROPERTIES
         TIMEOUT 300 RUN_SERIAL TRUE LABELS "integration;storage;postgresql;assets;concurrency")
@@ -67,7 +73,7 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         list(APPEND repository_test_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
     endif()
     add_test(NAME RepositoryTransactionBoundary
-        COMMAND "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/RepositoryBoundaryTest.py"
+        COMMAND ${postgres_clock_command} "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/RepositoryBoundaryTest.py"
             ${repository_test_arguments})
     set_tests_properties(RepositoryTransactionBoundary PROPERTIES
         TIMEOUT 300 RUN_SERIAL TRUE LABELS "integration;storage;postgresql;repository;pool")
@@ -78,7 +84,7 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         list(APPEND settlement_test_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
     endif()
     add_test(NAME SettlementOutboxAcceptance
-        COMMAND "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/SettlementOutboxTest.py"
+        COMMAND ${postgres_clock_command} "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/SettlementOutboxTest.py"
             ${settlement_test_arguments})
     set_tests_properties(SettlementOutboxAcceptance PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
         LABELS "integration;storage;postgresql;settlement;outbox")
@@ -91,10 +97,28 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         if(ARENA_POSTGRES_SHARE)
             list(APPEND storage_rpc_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
         endif()
-        add_test(NAME StorageRpcAcceptance COMMAND "${asset_test_python}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/StorageRpcTest.py" ${storage_rpc_arguments})
+        set(storage_rpc_clock_command)
+        if(TARGET arena_test_clock)
+            list(APPEND storage_rpc_clock_command
+                "${asset_test_python}" "${PROJECT_SOURCE_DIR}/tests/shared/clock/RunWithClock.py"
+                --clock-shim "$<TARGET_FILE:arena_test_clock>"
+                --sanitizer-binary "$<TARGET_FILE:arena_storage_probe>" --)
+        endif()
+        add_test(NAME StorageRpcAcceptance COMMAND ${storage_rpc_clock_command}
+            "${asset_test_python}" "${CMAKE_CURRENT_SOURCE_DIR}/StorageRpcTest.py" ${storage_rpc_arguments})
         set_tests_properties(StorageRpcAcceptance PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
             LABELS "integration;storage;postgresql;rpc")
+        set(deadline_test_arguments --repository-root "${PROJECT_SOURCE_DIR}"
+            --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
+            --pg-bin "${ARENA_POSTGRES_BIN}"
+            --report "${CMAKE_CURRENT_BINARY_DIR}/deadline-cancellation-report.json")
+        if(ARENA_POSTGRES_SHARE)
+            list(APPEND deadline_test_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+        endif()
+        add_test(NAME PostgresDeadlineCancellation COMMAND ${postgres_clock_command} "${asset_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/DeadlineCancellationTest.py" ${deadline_test_arguments})
+        set_tests_properties(PostgresDeadlineCancellation PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+            LABELS "integration;storage;postgresql;rpc;deadline;cancellation")
         set(persistent_gateway_arguments --repository-root "${PROJECT_SOURCE_DIR}"
             --pg-bin "${ARENA_POSTGRES_BIN}"
             --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
@@ -103,7 +127,14 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         if(ARENA_POSTGRES_SHARE)
             list(APPEND persistent_gateway_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
         endif()
-        add_test(NAME PersistentGatewayJourney COMMAND "${asset_test_python}"
+        set(persistent_gateway_clock_command)
+        if(TARGET arena_test_clock)
+            list(APPEND persistent_gateway_clock_command "${asset_test_python}"
+                "${PROJECT_SOURCE_DIR}/tests/shared/clock/RunWithClock.py"
+                --clock-shim "$<TARGET_FILE:arena_test_clock>"
+                --sanitizer-binary "$<TARGET_FILE:ArenaServer>" --)
+        endif()
+        add_test(NAME PersistentGatewayJourney COMMAND ${persistent_gateway_clock_command} "${asset_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/PersistentGatewayTest.py" ${persistent_gateway_arguments})
         set_tests_properties(PersistentGatewayJourney PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
             LABELS "integration;storage;postgresql;gateway;journey;recovery")

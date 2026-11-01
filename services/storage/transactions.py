@@ -33,9 +33,10 @@ class RetryBudget:
 
     max_attempts includes the first execution. max_elapsed includes connection,
     SQL, cleanup and sleep time, and prevents admission of another attempt after
-    expiry. It is not a hard cancellation deadline for synchronous libpq calls.
-    Server timeouts bound individual SQL/lock waits, not an entire multi-query
-    transaction. The caller must separately bound connection/network waits.
+    expiry. This value alone does not cancel synchronous libpq calls;
+    Database.run additionally installs its owner-thread I/O guard. Server
+    timeouts independently bound individual SQL/lock waits, including when
+    cancellation cannot reach a remote server.
     """
 
     max_attempts: int = 8
@@ -103,7 +104,7 @@ def classify_sqlstate(state):
 def _run_transaction(acquire,
                     operation: Callable[[psycopg.Connection], T],
                     budget: RetryBudget = RetryBudget(), *, clock=time.monotonic,
-                    sleep=time.sleep, random_value=random.SystemRandom().random
+                    sleep=time.sleep, random_value=random.SystemRandom().random, _guard=None
                     ) -> TransactionResult[T]:
     """Retry the entire operation in a fresh SERIALIZABLE transaction.
 
@@ -111,6 +112,8 @@ def _run_transaction(acquire,
     never retried automatically. Re-submit the same TransferRequest identity to
     resolve it safely. Retries occur only after rollback/close releases locks.
     """
+    guard = _guard
+
     started = clock()
     attempts, failures, delays = 0, [], []
     last_state, last_category = None, None
@@ -127,6 +130,8 @@ def _run_transaction(acquire,
         attempts += 1
         connection, loan, committing, acknowledged, caught = None, None, False, False, None
         try:
+            if guard is not None:
+                guard.check()
             loan = acquire(remaining)
             connection = loan.connection
             if connection.closed or connection.autocommit or connection.info.transaction_status != TransactionStatus.IDLE:
@@ -152,6 +157,8 @@ def _run_transaction(acquire,
                 raise StorageError("database_error", sqlstate="25P02")
             if status != TransactionStatus.INTRANS:
                 raise StorageError("invalid_connection")
+            if guard is not None:
+                guard.check()
             committing = True
             connection.commit()
             acknowledged = True
@@ -161,6 +168,9 @@ def _run_transaction(acquire,
         except StorageError as error:
             caught = error
             last_state, last_category = error.sqlstate, error.category
+            if committing and error.category in ("request_cancelled", "budget_exhausted", "pool_timeout"):
+                last_category = "outcome_unknown"
+                caught = StorageError(last_category, sqlstate=last_state)
         except (psycopg.Error, OSError) as error:
             last_state = getattr(error, "sqlstate", None)
             last_category = classify_sqlstate(last_state)
@@ -187,7 +197,16 @@ def _run_transaction(acquire,
             raise ValueError("random_value must return a finite value in [0, 1]")
         delay = ceiling * sample
         delays.append(delay)
-        sleep(delay)
+        try:
+            if guard is not None and sleep is time.sleep:
+                guard.sleep(delay)
+            else:
+                sleep(delay)
+                if guard is not None:
+                    guard.check()
+        except StorageError as error:
+            last_category = error.category
+            raise failure(error.category) from None
 
 
 def run_transaction(connect: Callable[[], psycopg.Connection], operation,

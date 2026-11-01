@@ -83,7 +83,7 @@ class OutboxPump:
         self._executor = self._future = None
         self._counts = dict(enabled=True, active=False, closed=False, max_workers=1,
             passes=0, claimed=0, published=0, failed=0, errors=0, consumed=0,
-            deduplicated=0)
+            deduplicated=0, last_error_category=None, last_error_sqlstate=None)
 
     @property
     def stats(self):
@@ -111,9 +111,13 @@ class OutboxPump:
                     # One pass owns SQL resources; shutdown joins it before
                     # pool closure. No executor submission queue accumulates.
                     result = self._publisher.run_once(self._deliver, limit=1)
-                except Exception:
+                except Exception as error:
                     with self._lock:
                         self._counts["errors"] += 1
+                        self._counts["last_error_category"] = (
+                            error.category if isinstance(error, StorageError) else "internal")
+                        self._counts["last_error_sqlstate"] = (
+                            error.sqlstate if isinstance(error, StorageError) else None)
                 else:
                     with self._lock:
                         self._counts["passes"] += 1
@@ -126,14 +130,23 @@ class OutboxPump:
 
     async def close(self):
         self._stop.set()
-        if self._future is not None:
-            # Cancelling this waiter never abandons a SQL-using worker and then
-            # closes its pool. The caller must finish close before pool.close.
-            await asyncio.shield(asyncio.wrap_future(self._future))
-        if self._executor is not None:
-            self._executor.shutdown(wait=True)
-        with self._lock:
-            self._counts["closed"] = True
+        try:
+            if self._future is not None:
+                # Shield alone lets caller cancellation escape before the worker
+                # joins. Keep joining through repeated cancellation so the enclosing
+                # service cannot abandon SQL ownership or close its pool too early.
+                pending = asyncio.wrap_future(self._future)
+                while not pending.done():
+                    try:
+                        await asyncio.shield(pending)
+                    except asyncio.CancelledError:
+                        continue
+                pending.result()
+        finally:
+            if self._executor is not None:
+                self._executor.shutdown(wait=True)
+            with self._lock:
+                self._counts["closed"] = True
 
 
 class StorageService:
@@ -145,6 +158,7 @@ class StorageService:
         self.redis = redis_store
         self.publisher = OutboxPump(database) if publish else None
         self._projections = set()
+        self._close_task = None
         self.projection_rejected = self.projection_failed = 0
         self.handlers = {}
         for method, request, handler in (
@@ -326,14 +340,31 @@ class StorageService:
         return self.message("SettlementGetReply", settlement=self._settlement_record(receipt))
 
     async def close(self):
+        # One owner-loop task owns the whole dependency shutdown. Shielding
+        # only the publisher would still let cancellation abandon a later
+        # projection/Redis await before pool closure.
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        while not self._close_task.done():
+            try:
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                continue
+        self._close_task.result()
+
+    async def _close(self):
         await self.worker.close()
-        if self.publisher is not None:
-            await self.publisher.close()
-        if self._projections:
-            await asyncio.gather(*tuple(self._projections), return_exceptions=True)
-        if self.redis is not None:
-            await self.redis.close()
-        self.database.close()
+        try:
+            if self.publisher is not None:
+                await self.publisher.close()
+            if self._projections:
+                await asyncio.gather(*tuple(self._projections), return_exceptions=True)
+            if self.redis is not None:
+                await self.redis.close()
+        finally:
+            # Pool maintenance may be connecting; keep the owner loop pumping
+            # while its finite worker shutdown joins those operations.
+            await asyncio.to_thread(self.database.close)
 
 
 async def run_server(args):

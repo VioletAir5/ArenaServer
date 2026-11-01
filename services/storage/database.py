@@ -4,6 +4,7 @@ import inspect
 import math
 import re
 import threading
+import time
 
 import psycopg
 from psycopg.pq import TransactionStatus
@@ -15,6 +16,7 @@ from .repositories import AccountRepository, MatchRepository
 from .settlement import SettlementRepository
 from .outbox import OutboxRepository
 from .ids import IdRepository
+from .deadlines import RequestGuard, GuardedPool, connection_type, current_guard, guard_scope
 
 
 class _Session:
@@ -62,9 +64,9 @@ def _positive_timeout(value, upper=120):
 class Database:
     """Own a bounded pool; run one business callback in one atomic transaction.
 
-    Checkout timeout bounds pool queue waits, not cancellation of synchronous
-    libpq I/O or its health check. Call on a storage worker. close() rejects new
-    work and wakes waiters; outstanding callbacks finish and return their loans.
+    Checkout includes a guarded queue and health check. Request-aware I/O,
+    commit and cleanup run on the borrower thread. close() rejects new work
+    and wakes waiters; outstanding borrowers retain ownership until release.
     """
     def __init__(self, *, kwargs, min_size=0, max_size=4, acquire_timeout=.25,
                  max_waiting=16, connection_class=psycopg.Connection):
@@ -95,10 +97,10 @@ class Database:
         self._checked_out = 0
         self._return_failures = 0
         self._poisoned = False
-        self._pool = ConnectionPool(kwargs=parameters, connection_class=connection_class,
+        self._pool = GuardedPool(kwargs=parameters, connection_class=connection_type(connection_class),
             min_size=min_size, max_size=max_size, max_waiting=max_waiting,
             timeout=self.acquire_timeout, reconnect_timeout=2, num_workers=2,
-            check=ConnectionPool.check_connection, open=True)
+            check=None, open=True)
 
     @property
     def stats(self):
@@ -109,8 +111,8 @@ class Database:
         return result
 
     def _nudge_reconnect(self):
-        # Expired SDK waiters can fill max_waiting after reconnect gives up.
-        # Public check() restarts empty-pool growth without admitting a new loan.
+        # Public check() restarts empty-pool growth after reconnect gives up,
+        # without admitting a new loan or resetting the request deadline.
         if not self._pool.closed and self._pool.get_stats().get("pool_size") == 0:
             try:
                 self._pool.check()
@@ -121,16 +123,51 @@ class Database:
         timeout = min(self.acquire_timeout, _positive_timeout(timeout))
         if self._poisoned:
             raise StorageError("pool_closed")
-        try:
-            connection = self._pool.getconn(timeout=timeout)
-        except PoolTimeout:
-            self._nudge_reconnect()
-            raise StorageError("pool_timeout") from None
-        except TooManyRequests:
-            self._nudge_reconnect()
-            raise StorageError("pool_overloaded") from None
-        except PoolClosed:
-            raise StorageError("pool_closed") from None
+        parent = current_guard()
+        guard = RequestGuard(time.monotonic()+timeout, parent=parent,
+                             expiry_category="pool_timeout")
+        with guard_scope(guard):
+            while True:
+                guard.check()
+                try:
+                    connection = self._pool.getconn(timeout=max(.000001, guard.deadline-time.monotonic()))
+                except PoolTimeout:
+                    self._nudge_reconnect()
+                    if parent is not None:
+                        parent.check_cancelled()
+                    raise StorageError("pool_timeout") from None
+                except TooManyRequests:
+                    self._nudge_reconnect()
+                    if parent is not None:
+                        parent.check_cancelled()
+                    raise StorageError("pool_overloaded") from None
+                except PoolClosed:
+                    raise StorageError("pool_closed") from None
+                except StorageError:
+                    self._nudge_reconnect()
+                    raise
+                loan = self._account_loan(connection)
+                try:
+                    guard.check()
+                    # The SDK swallows health-check exceptions and backs off.
+                    # Own this check after accounting so cancellation can return
+                    # exactly one loan and cannot enter that unbounded path.
+                    ConnectionPool.check_connection(connection)
+                    guard.check()
+                    return loan
+                except StorageError:
+                    loan.release(discard=True)
+                    raise
+                except (psycopg.Error, OSError):
+                    loan.release(discard=True)
+                    # Replacing a stale idle backend is a read-only checkout
+                    # action, bounded by the original checkout deadline.
+                    guard.check()
+                except BaseException:
+                    loan.release(discard=True)
+                    raise
+
+    def _account_loan(self, connection):
         with self._lock:
             self._checked_out += 1
 
@@ -186,7 +223,7 @@ class Database:
         finally:
             loan.release()
 
-    def run(self, operation, budget=RetryBudget(), *, _connection_observer=None, **retry_options):
+    def run(self, operation, budget=RetryBudget(), *, _request_guard=None, **retry_options):
         if getattr(self._local, "running", False):
             raise StorageError("nested_transaction")
         if (not callable(operation) or inspect.iscoroutinefunction(operation)
@@ -204,27 +241,12 @@ class Database:
             finally:
                 session.revoke()
         self._local.running = True
+        parent = current_guard()
+        guard = _request_guard or RequestGuard(time.monotonic()+budget.max_elapsed,
+                                              parent=parent)
         try:
-            def acquire(timeout):
-                loan = self._borrow(timeout)
-                if _connection_observer is None:
-                    return loan
-                def release(discard):
-                    try:
-                        # Detach synchronizes with an in-progress cancellation;
-                        # the next borrower must never receive its target.
-                        _connection_observer.detach(loan.connection)
-                    except Exception:
-                        discard = True
-                    finally:
-                        loan.release(discard=discard)
-                try:
-                    _connection_observer.attach(loan.connection)
-                except BaseException:
-                    release(True)
-                    raise
-                return _Lease(loan.connection, release)
-            return _run_transaction(acquire, invoke, budget, **retry_options)
+            with guard_scope(guard):
+                return _run_transaction(self._borrow, invoke, budget, _guard=guard, **retry_options)
         finally:
             self._local.running = False
 

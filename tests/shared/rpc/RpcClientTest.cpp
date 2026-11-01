@@ -786,5 +786,85 @@ TEST_F(
     }
 }
 
+TEST_F(
+    RpcClientTest, ParentDeadlineErrorStaysWithinTwentyMilliseconds
+)
+{
+    open(Mode::ShortHeader);
+    for (int sample = 0; sample != 20; ++sample)
+    {
+        const auto deadline = Clock::now() + 30ms;
+        Options options;
+        options.timeout = 2s;
+        options.context = Context{deadline, "measured-parent"};
+        int callbacks = 0;
+        Clock::time_point completed;
+        const auto accepted = client->call(
+            request(),
+            options,
+            [&](auto response)
+            {
+                completed = Clock::now();
+                ++callbacks;
+                EXPECT_EQ(
+                    response.status(),
+                    arena::rpc::DEADLINE_EXCEEDED
+                );
+                EXPECT_FALSE(response.retryable());
+            }
+        );
+        ASSERT_TRUE(accepted);
+        ASSERT_TRUE(until([&] { return callbacks == 1; }));
+        EXPECT_GE(completed, deadline);
+        EXPECT_LE(completed - deadline, 20ms);
+        EXPECT_EQ(client->inflight(), 0);
+        EXPECT_EQ(
+            peer->requests.size(),
+            static_cast<std::size_t>(sample + 1)
+        );
+        accepted->cancel();
+        context.restart();
+        context.poll();
+        EXPECT_EQ(callbacks, 1);
+    }
+}
+
+TEST_F(RpcClientTest, RetryableStormNeverReplaysNonIdempotentRequests)
+{
+    open(Mode::RemoteError);
+    for (int index = 0; index != 100; ++index)
+    {
+        auto command = request();
+        command.set_method("match.allocate_ids");
+        command.set_idempotency_key(
+            "allocation-" + std::to_string(index)
+        );
+        int callbacks = 0;
+        const auto admitted = client->call(
+            std::move(command),
+            Options{},
+            [&](auto response)
+            {
+                ++callbacks;
+                EXPECT_EQ(response.status(), arena::rpc::OVERLOADED);
+                EXPECT_TRUE(response.retryable());
+            }
+        );
+        ASSERT_TRUE(admitted);
+        ASSERT_TRUE(until([&] { return callbacks == 1; }));
+        EXPECT_EQ(client->inflight(), 0);
+        ASSERT_EQ(
+            peer->requests.size(),
+            static_cast<std::size_t>(index + 1)
+        );
+        EXPECT_EQ(
+            peer->requests.back().idempotency_key(),
+            "allocation-" + std::to_string(index)
+        );
+    }
+    pump();
+    EXPECT_EQ(peer->requests.size(), 100);
+}
+
 } // namespace
 } // namespace arena::internal_rpc

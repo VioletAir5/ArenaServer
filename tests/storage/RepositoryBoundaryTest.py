@@ -581,10 +581,18 @@ class Acceptance:
         setup.run(lambda u:(u.accounts.create(left,"serialization_left",DIGEST),
                             u.accounts.create(right,"serialization_right",DIGEST)),self.budget)
         setup.close()
+        # This case tests SSI, not host wall-clock behavior. WSL can resync
+        # CLOCK_REALTIME backwards during another launcher invocation. Give
+        # only these private fixture rows explicit historical audit timestamps.
+        historical = datetime(2000,1,1,tzinfo=timezone.utc)
+        self.query("UPDATE arena.account SET created_at=%s,updated_at=%s "
+                   "WHERE account_id IN (%s,%s)",(historical,historical,left,right))
         parent = self
         barrier = threading.Barrier(2)
         lock = threading.Lock()
         seen, failures, saved = set(),[],[]
+        winner_ack = threading.Event()
+        failed_connections, retry_fences, timeline = {}, [], []
         class CommitBarrier(self.pg.Connection):
             armed = True
             def commit(connection):
@@ -594,12 +602,25 @@ class Acceptance:
                     seen.add(identity)
                 if first:
                     barrier.wait(timeout=5)
+                with lock:
+                    timeline.append(dict(phase="commit_enter",at=time.monotonic(),
+                                         thread=identity,first=first))
                 try:
-                    return super().commit()
+                    result = super().commit()
                 except parent.pg.Error as error:
                     with lock:
                         failures.append(error.sqlstate)
+                        failed_connections[identity] = connection
+                        timeline.append(dict(phase="commit_error",at=time.monotonic(),
+                            thread=identity,first=first,sqlstate=error.sqlstate))
                     raise
+                else:
+                    with lock:
+                        timeline.append(dict(phase="commit_ack",at=time.monotonic(),
+                                             thread=identity,first=first))
+                    if first:
+                        winner_ack.set()
+                    return result
         database = self.pool(max_size=2,max_waiting=4,acquire_timeout=1,connection_class=CommitBarrier)
         entered = threading.Barrier(2)
         calls = {left:0,right:0}
@@ -610,18 +631,50 @@ class Acceptance:
                     first = calls[target]==1
                     old = [repo for player,repo in saved if player==target]
                     saved.append((target,uow.accounts))
+                    timeline.append(dict(phase="callback_enter",at=time.monotonic(),
+                        thread=threading.get_ident(),target=target,attempt=calls[target]))
+                # Keep the winner in its real WAL flush long enough to expose
+                # a retry snapshot taken before its COMMIT becomes visible.
+                # These settings belong only to this private test transaction.
+                connection = uow._session.connection()
+                connection.execute("SET LOCAL commit_delay=100000")
+                connection.execute("SET LOCAL commit_siblings=0")
                 if old:
                     parent.error(lambda:old[0].get(left),"scope_closed")
                 values = (uow.accounts.get(left),uow.accounts.get(right))
+                with lock:
+                    timeline.append(dict(phase="snapshot_read",at=time.monotonic(),
+                        thread=threading.get_ident(),target=target,attempt=calls[target],
+                        states=[value.state for value in values]))
                 require(all(value.state=="active" for value in values) if first else True,
                         "first attempts did not share an initial snapshot")
                 if first:
                     entered.wait(timeout=5)
                 return uow.accounts.set_state(target,"disabled")
             return apply
+        def retry_after_winner_ack(delay):
+            # This test arranges exactly one abort at COMMIT. The winner may
+            # still be flushing WAL when the loser receives 40001, so fence the
+            # next snapshot after its real acknowledgment. This sleep hook runs
+            # only after the failed loan has been quarantined and returned.
+            identity = threading.get_ident()
+            with lock:
+                failed = failed_connections.get(identity)
+            require(failed is not None and failed.closed,
+                    "retry fixture waited while retaining its failed COMMIT loan")
+            with lock:
+                timeline.append(dict(phase="failed_loan_released",at=time.monotonic(),thread=identity))
+            require(winner_ack.wait(timeout=5), "winner did not acknowledge its actual COMMIT")
+            time.sleep(delay)
+            with lock:
+                retry_fences.append(identity)
+                timeline.append(dict(phase="retry_admitted",at=time.monotonic(),thread=identity))
         with ThreadPoolExecutor(max_workers=2) as workers:
-            results = list(workers.map(lambda target:database.run(operation(target),self.budget),(left,right)))
+            results = list(workers.map(lambda target:database.run(operation(target),self.budget,
+                sleep=retry_after_winner_ack),(left,right)))
         CommitBarrier.armed=False
+        require(len(retry_fences)==1 and winner_ack.is_set(),
+                "COMMIT fixture did not fence exactly one retry after actual winner acknowledgment")
         require(failures==["40001"],"serialization failure did not originate at actual COMMIT")
         require(sorted(result.attempts for result in results)==[1,2]
                 and sum(len(result.failures) for result in results)==1,
@@ -633,7 +686,11 @@ class Acceptance:
             self.error(lambda:repo.get(left),"scope_closed")
         self.released(database,replenish=True)
         return dict(real_commit_sqlstates=failures,attempts=sorted(r.attempts for r in results),
-                    callback_calls=sorted(calls.values()),first_attempt_scope_revoked=True)
+                    callback_calls=sorted(calls.values()),first_attempt_scope_revoked=True,
+                    retry_fenced_after_winner_ack=True, failed_loan_closed_before_fence=True,
+                    fixture_account_timestamps=historical.isoformat(),
+                    test_local_commit_delay_us=100000,test_local_commit_siblings=0,
+                    timeline=timeline)
 
     def unknown_commit_outcome(self):
         parent = self

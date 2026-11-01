@@ -299,6 +299,14 @@ After rebuilding both executables, run:
 python3 tests/room/FullJourneyIntegrationTest.py build/services/gateway/app/ArenaServer build/services/room/arena_replay --report-dir /tmp/arena-journey
 ```
 
+On Linux, CTest adds `--clock-shim` with the built
+`build/tests/shared/clock/libarena_test_clock.so` for the Gateway child only.
+This test fixture advances civil time from a startup anchor using the real
+monotonic clock, isolating the journey from host wall-clock steps. Session grace,
+room ticks and replay assertions still use real elapsed time; production JWT
+validation is unchanged. Reports record the fixture mode. The direct command
+above uses the host clock unless the same optional flag is supplied. Existing
+preloads are retained, with dynamic sanitizer runtimes loaded before the fixture.
 This is an acceptance procedure, not a claim that a particular run passed.
 It uses the production application/account adapter; reports and logs go to the
 supplied directory.

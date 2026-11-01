@@ -21,6 +21,7 @@ terminal results does not provide active-room recovery.
 - `assets.py`: atomic transfer SQL; the fresh and pooled paths share one transaction executor.
 - `transactions.py`: retry budget, stable storage errors, single COMMIT owner and exact loan release.
 - `database.py`: bounded Psycopg pool and transaction-scoped UnitOfWork.
+- `deadlines.py`: owner-thread I/O deadlines, bounded cancellation and a pinned SDK waiter adapter.
 - `repositories.py`: parameterized Account/Player and Match persistence, immutable records.
 - `application.py`: SQL-free atomic account/player registration workflow.
 - `migrate.py`: Python standard-library orchestration of one `psql` process.
@@ -31,7 +32,8 @@ terminal results does not provide active-room recovery.
 SQL files contain no `BEGIN` or `COMMIT`: the runner owns the transaction. They
 are trusted, reviewed artifacts, not user-supplied SQL. Migrations use the Python
 standard library and psql. Asset transfers use Python 3.10+, Psycopg and libpq
-(install `services/storage/requirements.txt` in a virtual environment).
+(install `services/storage/requirements.txt` in a virtual environment; the pinned
+`psycopg[binary]` wheel supplies a libpq 17+ client).
 
 ## Durable model
 
@@ -427,11 +429,11 @@ Missing lookups return None; missing mutation targets raise `not_found`.
 
 The default pool has min_size=0, max_size=4, max_waiting=16 and a 250 ms checkout
 queue timeout. Both capacity and queue length are finite. Checkout timeout is
-clipped to the transaction's remaining retry-admission budget, which is checked
-again after checkout. It bounds waiting for pool capacity, not hard cancellation
-of libpq/health-check I/O; connection establishment and server SQL have separate
-timeouts. Connections have a checkout health check; a broken idle connection is
-discarded. Timeouts/overload do not trigger automatic business transaction retry.
+clipped to the transaction's remaining deadline and covers queue waiting plus
+its health check. A single cancellable waiter retires without leaving an SDK
+queue entry. The loan is counted before its health check so every outcome can
+return it exactly once. Broken idle connections are replaced within the same
+checkout deadline. Timeouts/overload do not automatically retry business work.
 
 - `pool_timeout`: no healthy loan obtained within the checkout waiting limit.
   It may indicate saturation or an unavailable database; it does not assert the
@@ -442,11 +444,13 @@ discarded. Timeouts/overload do not trigger automatic business transaction retry
   transaction contract above; `StorageError` is the common error type, also
   exported as the existing `assets.TransferError` name.
 
-After a longer outage Psycopg 3.2.8 can retain expired waiters after its reconnect
-attempt gives up. A failed checkout on an empty pool calls public `check()` to
-restart background growth, retaining the original failure classification. This
-allows later calls to recover with the same Database without manipulating SDK
-queue internals or retrying a failed business command invisibly.
+`GuardedPool` adapts the pinned Psycopg pool 3.2.8 queue protocol: it removes its
+retired waiter under the SDK lock and preserves exactly one connection handoff.
+The version pin and fault tests are required when upgrading this implementation.
+After reconnect gives up, a failed checkout on an empty pool calls public
+`check()` to restart background growth, retaining its failure classification.
+Later calls can recover with the same Database without retrying a failed
+business command invisibly or resetting its budget.
 
 Successful loans return IDLE with connection properties reset. Failed attempts
 roll back before return; broken connections and commit failures are quarantined.
@@ -511,11 +515,40 @@ item 1 to each completed-match participant; aborts award nothing. Redis projecti
 runs only after acknowledged PG commit. `--publish` enables a single bounded
 outbox worker; it is off by default and joins before pool shutdown.
 
-Worker cancellation retains admission until SQL and cancellation actually finish.
-A loan observer detaches before pool return so stale cancellation cannot target
-the next borrower. SQL timeouts use the request budget. Before libpq 17, remote
-cancel network I/O is not hard bounded; local Unix-socket functional acceptance
-does not establish remote outage deadlines or production performance SLOs.
+Storage RPC workers require a libpq 17+ client with nonblocking cancellation;
+install the pinned `psycopg[binary]==3.2.13` dependency. PostgreSQL server 14 remains
+supported. Startup and enabled RPC integration tests reject an incapable client.
+
+A caller only sets a cancellation event. The SQL owner checks its immutable
+deadline/event while polling query I/O every 5ms, including the accounted health
+check, COMMIT and rollback. On interruption it drives an independent cancellation
+connection for at most 50ms, frees that object and quarantines its own main
+connection. No foreign thread closes PGconn and no cancellation executor survives
+the request. The worker retains admission until actual cleanup completes.
+
+An already parsed COMMIT acknowledgment remains success. A lost/interrupted
+COMMIT response is `outcome_unknown`, never an automatic retry; resolve the same
+immutable business identity. RPC response draining and stream closure also keep
+the original deadline, so an unread response cannot retain server admission.
+
+The normal `PostgresDeadlineCancellation` test uses a private PostgreSQL cluster
+and a loopback TCP fault proxy for query/health-check reply loss, cancellation
+channel loss, queued cancellation and COMMIT acknowledgment loss. It separately
+checks request timing, actual worker/loan/waiter/cancel-socket cleanup, reachable
+backend cancellation and physical descriptor recovery. Under a network partition,
+a successful local cancel send does not prove the remote backend has stopped;
+server-side statement timeouts remain independent protection. These guarantees
+cover the implemented cooperative SQL paths, not arbitrary blocking Python
+callbacks, background pool connection establishment or production performance SLOs.
+
+The private PostgreSQL CTest fixtures use `tests/shared/clock/RunWithClock.py`
+to give the test process, private PostgreSQL and Storage children one inherited
+civil/monotonic origin. This isolates normal lifecycle acceptance from host clock
+jumps. Request and transaction budgets still use real monotonic time; Outbox
+leases retain their duration and fencing checks on the shared test civil clock.
+Direct CLI runs use the host clock unless this wrapper is explicitly selected.
+Production lease fencing, database time constraints and JWT validation are unchanged.
+
 ## Executable architecture contracts
 
 `contract.json` declares every deployed Storage method's physical and logical

@@ -61,7 +61,41 @@ class Bot(RoomPeer):
         return settlement(scalar(parse(self.rpc(58, unsigned_field(1, match), 59)), 1))
 
 
-def scenario(binary, replay_binary, mode, report_dir):
+def gateway_clock_fixture(binary, shim, environment):
+    """Change only the selected Gateway child's civil clock, preserving sanitizers."""
+    if shim is None:
+        return dict(enabled=False, mode="unmodified host civil clock")
+    if not sys.platform.startswith("linux"):
+        raise ValueError("the deterministic civil-clock fixture requires Linux")
+    shim = Path(shim).resolve(strict=True)
+    target = Path(binary).resolve(strict=True)
+    if not shim.is_file() or not target.is_file():
+        raise ValueError("clock fixture and trusted gateway target must be files")
+    # Inspect the built target without injecting inherited preloads into ldd.
+    # Dynamic ASan/TSan must stay first; neither link-order checks nor sanitizer
+    # options are disabled to make the fixture load.
+    inspect_environment = environment.copy()
+    inspect_environment.pop("LD_PRELOAD", None)
+    dependencies = subprocess.run(["ldd", str(target)], env=inspect_environment,
+        capture_output=True, text=True, timeout=5, check=True).stdout
+    runtimes = []
+    for line in dependencies.splitlines():
+        if not re.match(r"\s*(?:lib(?:asan|tsan)\.so|libclang_rt\.(?:asan|tsan)[^\s]*\.so)", line):
+            continue
+        match = re.search(r"=>\s+(/[^\s]+)", line)
+        if match is None:
+            raise ValueError("trusted target has an unresolved sanitizer runtime")
+        runtime = str(Path(match.group(1)).resolve(strict=True))
+        if runtime not in runtimes:
+            runtimes.append(runtime)
+    previous = environment.get("LD_PRELOAD", "")
+    environment["LD_PRELOAD"] = " ".join([*runtimes, str(shim), previous]).strip()
+    return dict(enabled=True, mode="startup civil time plus real monotonic elapsed time",
+        gateway_child_only=True, shim=str(shim), sanitizer_runtimes_first=runtimes,
+        inherited_preloads_preserved=bool(previous), host_clock_modified=False)
+
+
+def scenario(binary, replay_binary, mode, report_dir, clock_shim=None):
     with tempfile.TemporaryDirectory(prefix="arena-journey-") as temporary:
         root = Path(temporary)
         accounts = root / "accounts.tsv"
@@ -84,6 +118,7 @@ def scenario(binary, replay_binary, mode, report_dir):
                            ARENA_REPLAY_DIR=str(root / "replays"))
         environment.setdefault("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1:abort_on_error=1")
         environment.setdefault("UBSAN_OPTIONS", "halt_on_error=1:print_stacktrace=1")
+        clock_fixture = gateway_clock_fixture(binary, clock_shim, environment)
         log_path = root / "gateway.log"
         peers, outcome = [], {}
         with log_path.open("w") as log:
@@ -210,6 +245,7 @@ def scenario(binary, replay_binary, mode, report_dir):
                 saved_ticks = [(int(row["tick"]), int(row["checksum"])) for row in archived["checksums"]]
                 assert live_ticks == saved_ticks and live_ticks[-1] == (result["tick"], result["checksum"])
                 outcome = dict(mode=mode, transports=["tcp", "websocket"], match=match, room=str(room),
+                               clock_fixture=clock_fixture,
                                session_preserved=bool(recovery), reason=result["reason"],
                                sessions={"alice": str(first["session"]), "bob": str(second["session"])},
                                incarnation=str(before["incarnation"]), observed_phases=phases,
@@ -243,10 +279,13 @@ def main():
     parser.add_argument("binary")
     parser.add_argument("replay_binary")
     parser.add_argument("--report-dir")
+    parser.add_argument("--clock-shim", type=Path,
+                        help="test-only Linux DSO anchoring Gateway civil time to monotonic elapsed time")
     args = parser.parse_args()
-    results = [scenario(args.binary, args.replay_binary, mode, args.report_dir)
+    results = [scenario(args.binary, args.replay_binary, mode, args.report_dir, args.clock_shim)
                for mode in ("recover", "expired")]
-    text = json.dumps(dict(passed=True, scenarios=results), indent=2)
+    text = json.dumps(dict(passed=True, scenarios=results,
+                           clock_fixture=results[0]["clock_fixture"]), indent=2)
     print(text)
     if args.report_dir:
         (Path(args.report_dir) / "journey.json").write_text(text + "\n")

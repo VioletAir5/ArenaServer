@@ -27,7 +27,9 @@ class Acceptance:
         from shared.runtime.rpc import Client
         self.Client = Client
         self.protocol = Protocol(args.descriptor)
-        self.report = dict(passed=False, cases=[])
+        self.report = dict(passed=False,cases=[],clock_fixture=dict(
+            common_civil_origin=bool(os.environ.get("ARENA_TEST_CLOCK_REALTIME_NS")),
+            inherited_monotonic_origin=bool(os.environ.get("ARENA_TEST_CLOCK_MONOTONIC_NS"))))
 
     def message(self, name, **values):
         return self.protocol.message("arena.storage."+name)(**values)
@@ -404,18 +406,19 @@ class Acceptance:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             # The caller has gone; capacity is still held until SQL and cleanup finish.
-            deadline = time.monotonic()+3
+            deadline = cancellation_started+.1
             while worker.stats["active"] and time.monotonic() < deadline:
-                await asyncio.sleep(.005)
+                await asyncio.sleep(.001)
             require(worker.stats["active"] == 0 and database.stats["checked_out"] == 0,
                     "cancellation released caller but leaked SQL worker/loan")
-            require(time.monotonic()-cancellation_started < .75, "PG cancellation waited for statement timeout")
+            cancellation_elapsed = time.monotonic()-cancellation_started
+            require(cancellation_elapsed <= .1, "actual PG worker/loan cancellation exceeded100ms")
             result = await worker.run(lambda work: work.accounts.get_player(42),
                 Context(2, "reuse-test", time.monotonic()+1, ""))
             require(result.player_id == 42, "cancelled old request poisoned next borrower")
             return dict(real_pg_sleep_cancelled=True, worker_peak=worker.stats["peak"],
                         final_checked_out=database.stats["checked_out"],
-                        cancellation_elapsed=time.monotonic()-cancellation_started)
+                        cancellation_elapsed=cancellation_elapsed)
         finally:
             await worker.close()
             database.close()
@@ -428,6 +431,71 @@ class Acceptance:
                 return value
             require(time.monotonic() < deadline, message)
             await asyncio.sleep(.005)
+
+    async def pump_close_cancellation(self, *, service_close=True):
+        from shared.runtime.rpc import Context
+        from services.storage.database import Database
+        from services.storage.server import StorageService
+        database = Database(kwargs=dict(host=str(self.cluster.socket),dbname=self.database,
+            user="arena_test",port=5432,connect_timeout=1,
+            application_name="arena-pump-cancel-close"),max_size=1,max_waiting=1)
+        service = StorageService(self.protocol,database,max_workers=1,publish=True)
+        closing = None
+        trigger_installed = False
+        try:
+            service.start()
+            # This publisher claims the oldest eligible event. Drain fixture
+            # backlog before creating the one identity whose shutdown we test.
+            await self.wait_for(lambda:self.query("SELECT count(*) FROM arena.outbox "
+                "WHERE state='pending'")[0][0]==0,"local publisher did not drain fixture backlog")
+            first,last = await service.worker.run(lambda work:work.ids.reserve(1),
+                Context(71,"pump-close-reserve",time.monotonic()+2,""))
+            self.query("CREATE FUNCTION arena.rpc_cancel_close_consumer() RETURNS trigger LANGUAGE plpgsql AS "
+                "$body$ BEGIN PERFORM pg_sleep(0.15); RETURN NEW; END $body$")
+            self.query("CREATE TRIGGER rpc_cancel_close_consumer BEFORE INSERT ON arena.consumer_receipt "
+                "FOR EACH ROW EXECUTE FUNCTION arena.rpc_cancel_close_consumer()")
+            trigger_installed = True
+            response = await service._save(self.message("SaveResultRequest",match=self.result(first)),
+                Context(72,"pump-close-save",time.monotonic()+2,""))
+            event = response.settlement.event_id
+            await self.wait_for(lambda:self.query("SELECT count(*) FROM pg_stat_activity "
+                "WHERE datname=current_database() AND application_name='arena-pump-cancel-close' "
+                "AND state='active' AND query LIKE 'INSERT INTO arena.consumer_receipt(consumer,event_id,payload_hash)%'")[0][0],
+                "local publisher did not enter its actual PostgreSQL consume barrier")
+            closing = asyncio.create_task(service.close() if service_close else service.publisher.close())
+            await asyncio.sleep(.005)
+            closing.cancel()
+            await asyncio.sleep(.005)
+            require(not closing.done(),"cancelled close returned before its actual SQL publisher joined")
+            require(not database.stats["closed"],"cancelled close closed the pool while SQL was running")
+            closing.cancel()
+            await asyncio.wait_for(asyncio.shield(closing),1.5)
+            require(service.publisher.stats["closed"] and not service.publisher.stats["active"]
+                    and database.stats["checked_out"]==0,
+                    "cancelled publisher close leaked its actual SQL worker or loan")
+            require(database.stats["closed"] == service_close,
+                    "publisher and service pool ownership boundaries were confused")
+            require(self.query("SELECT state FROM arena.outbox WHERE event_id=%s",(event,))[0][0]=="published",
+                    "cancelled close abandoned the actual in-flight acknowledgement")
+            require(self.query("SELECT count(*) FROM arena.consumer_receipt "
+                "WHERE consumer='reward_audit' AND event_id=%s",(event,))[0][0]==1,
+                "cancelled close lost or duplicated its consumer receipt")
+            await service.close()
+            return dict(actual_inflight_sql=True,close_cancel_requests=2,published=True,
+                scope="service" if service_close else "standalone_publisher",
+                worker_joined=True,pool_closed=database.stats["closed"],checked_out=database.stats["checked_out"])
+        finally:
+            if not database.stats["closed"]:
+                await service.close()
+            if closing is not None:
+                await asyncio.gather(closing,return_exceptions=True)
+            if trigger_installed:
+                self.query("DROP TRIGGER rpc_cancel_close_consumer ON arena.consumer_receipt")
+                self.query("DROP FUNCTION arena.rpc_cancel_close_consumer()")
+
+    async def cancelled_close_lifetimes(self):
+        return dict(service=await self.pump_close_cancellation(),
+                    publisher=await self.pump_close_cancellation(service_close=False))
 
     async def runtime_outbox(self):
         pending = self.query("SELECT count(*) FROM arena.outbox WHERE state='pending'")[0][0]
@@ -497,8 +565,15 @@ class Acceptance:
         require(stopped["publisher"]["enabled"] and stopped["publisher"]["max_workers"] == 1
                 and stopped["publisher"]["deduplicated"] >= 1 and stopped["publisher"]["errors"] >= 1,
                 "runtime publisher did not report its bounded retry/dedup lifecycle")
-        require(self.query("SELECT state FROM arena.outbox WHERE event_id=%s",
-                           (live_event,))[0][0] == "published", "shutdown abandoned an in-flight acknowledgement")
+        facts = self.query("SELECT state,attempt_count,created_at,updated_at,available_at,"
+            "last_attempt_at,published_at,clock_timestamp() FROM arena.outbox WHERE event_id=%s",
+            (live_event,))[0]
+        self.report["outbox_shutdown"] = dict(event_id=live_event,
+            publisher=stopped["publisher"],row=dict(zip(
+                ("state","attempt_count","created_at","updated_at","available_at",
+                 "last_attempt_at","published_at","database_now"),
+                (value.isoformat() if hasattr(value,"isoformat") else value for value in facts))))
+        require(facts[0] == "published", "shutdown abandoned an in-flight acknowledgement")
         require(self.query("SELECT count(*) FROM arena.consumer_receipt "
                            "WHERE consumer='reward_audit' AND event_id=%s", (live_event,))[0][0] == 1,
                 "shutdown lost or duplicated the in-flight consumer receipt")
@@ -519,7 +594,8 @@ class Acceptance:
             ("concurrent_durable_ids_and_idempotent_result", self.concurrent_id_and_result),
             ("private_pg_outage_same_process_recovery", self.database_outage_recovery),
             ("bounded_worker_actual_pg_cancellation_and_reuse", self.worker_cancellation),
-            ("opt_in_runtime_outbox_drain_dedup_and_inflight_shutdown", self.runtime_outbox)):
+            ("opt_in_runtime_outbox_drain_dedup_and_inflight_shutdown", self.runtime_outbox),
+            ("cancelled_publisher_close_joins_actual_sql_and_pool", self.cancelled_close_lifetimes)):
             await self.case(name, action)
         self.stop()
         self.report["service_shutdowns"] = self.log
@@ -552,6 +628,9 @@ def main():
         try:
             test.stop()
         finally:
+            test.report["service_shutdowns"] = test.log
+            if not test.report["passed"] and cluster.log.exists():
+                test.report["server_log_tail"] = cluster.log.read_text(errors="replace")[-8000:]
             cluster.close()
             test.report["cluster_cleaned"] = not cluster.root.exists()
             args.report.parent.mkdir(parents=True, exist_ok=True)

@@ -1,19 +1,80 @@
 {
-  "schema_version":1,
-  "source_roots":["services","shared","domain"],
-  "module_dependencies": {
-    "shared":[], "domain":["shared"],
-    "auth":["domain","shared"], "match":["domain","shared"], "room":["domain","shared"],
-    "gateway":["auth","match","room","domain","shared"],
-    "storage":["shared"], "lobby":["domain","shared"]
-  },
-  "sql_implementation_files":[
-    "services/storage/database.py", "services/storage/transactions.py", "services/storage/migrate.py",
-    "services/storage/repositories.py", "services/storage/ids.py", "services/storage/assets.py",
-    "services/storage/settlement.py", "services/storage/outbox.py"
+  "schema_version": 1,
+  "source_roots": [
+    "services",
+    "shared",
+    "domain"
   ],
-  "sql_data_roots":["services/storage/migrations","services/storage/fixtures"],
-  "redis_implementation_files":["services/storage/redis_store.py"],
-  "database_driver_modules":["psycopg","psycopg_pool","psycopg2","asyncpg","pg8000","sqlalchemy","sqlite3","mysql","pymysql","pyodbc"],
-  "database_headers":["libpq-fe.h","libpq/libpq-fs.h","pqxx/","sqlite3.h","mysql/","soci/","sql.h","sqlext.h"]
+  "module_dependencies": {
+    "shared": [],
+    "domain": [
+      "shared"
+    ],
+    "auth": [
+      "domain",
+      "shared"
+    ],
+    "match": [
+      "domain",
+      "shared"
+    ],
+    "room": [
+      "domain",
+      "shared"
+    ],
+    "gateway": [
+      "auth",
+      "match",
+      "room",
+      "domain",
+      "shared"
+    ],
+    "storage": [
+      "shared"
+    ],
+    "lobby": [
+      "domain",
+      "shared"
+    ]
+  },
+  "sql_implementation_files": [
+    "services/storage/database.py",
+    "services/storage/transactions.py",
+    "services/storage/migrate.py",
+    "services/storage/repositories.py",
+    "services/storage/ids.py",
+    "services/storage/assets.py",
+    "services/storage/settlement.py",
+    "services/storage/outbox.py",
+    "services/storage/deadlines.py"
+  ],
+  "sql_data_roots": [
+    "services/storage/migrations",
+    "services/storage/fixtures"
+  ],
+  "redis_implementation_files": [
+    "services/storage/redis_store.py"
+  ],
+  "database_driver_modules": [
+    "psycopg",
+    "psycopg_pool",
+    "psycopg2",
+    "asyncpg",
+    "pg8000",
+    "sqlalchemy",
+    "sqlite3",
+    "mysql",
+    "pymysql",
+    "pyodbc"
+  ],
+  "database_headers": [
+    "libpq-fe.h",
+    "libpq/libpq-fs.h",
+    "pqxx/",
+    "sqlite3.h",
+    "mysql/",
+    "soci/",
+    "sql.h",
+    "sqlext.h"
+  ]
 }

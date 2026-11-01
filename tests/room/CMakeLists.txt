@@ -42,9 +42,14 @@ set_tests_properties(ReplayToolAcceptance PROPERTIES
     TIMEOUT 180 RUN_SERIAL TRUE LABELS "integration;replay;determinism")
 
 add_dependencies(arena_room_tests ArenaServer)
+set(journey_clock_arguments)
+if(TARGET arena_test_clock)
+    add_dependencies(arena_room_tests arena_test_clock)
+    list(APPEND journey_clock_arguments --clock-shim "$<TARGET_FILE:arena_test_clock>")
+endif()
 add_test(NAME FullJourneyProductionGateway
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/FullJourneyIntegrationTest.py"
-        "$<TARGET_FILE:ArenaServer>" "$<TARGET_FILE:arena_replay>")
+        "$<TARGET_FILE:ArenaServer>" "$<TARGET_FILE:arena_replay>" ${journey_clock_arguments})
 set_tests_properties(FullJourneyProductionGateway PROPERTIES
     TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;journey")
