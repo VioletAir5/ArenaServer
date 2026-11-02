@@ -57,6 +57,8 @@ public:
     using Result = std::
         expected<arena::auth::AuthenticateReply, arena::rpc::Status>;
     using Completion = std::function<void(Result)>;
+    using ProbeResult = std::expected<void, arena::rpc::Status>;
+    using ProbeCompletion = std::function<void(ProbeResult)>;
 
     /** @brief Validates configuration without connecting or resolving
      * DNS. */
@@ -76,6 +78,10 @@ public:
             arena::internal_rpc::Context,
             Completion
         );
+    /** @brief Probes the same authenticated ready route without
+     * credentials in a payload. */
+    std::expected<arena::internal_rpc::Call, arena::rpc::Status>
+        probe(arena::internal_rpc::Context, ProbeCompletion);
     /** @brief Fences admission and cancels accepted transports
      * without waiting. */
     void stop();
@@ -84,6 +90,14 @@ public:
     std::size_t inflight() const;
 
 private:
+    /** @brief Captures one route and installs common caller metadata.
+     */
+    std::expected<arena::internal_rpc::Call, arena::rpc::Status>
+        exchange(
+            arena::rpc::Request,
+            arena::internal_rpc::Context,
+            arena::internal_rpc::Client::Completion
+        );
     /// Read-only route/credential policy; its secret is erased on
     /// destruction.
     Config m_config;

@@ -11,9 +11,8 @@
 
 #include <gtest/gtest.h>
 
-#include "net/RoomService.h"
+#include "lobby/RoomService.h"
 
-using namespace service::gateway;
 using namespace std::chrono_literals;
 namespace sim = service::room;
 namespace
@@ -25,11 +24,13 @@ struct RecoveryWorld
     bool clocksForbidden{false};
     unsigned clockCalls{0};
     std::uint64_t epoch{0};
-    OnlineRegistryConfig registryConfig;
-    RoomServiceConfig config;
-    std::shared_ptr<OnlineRegistry> online;
-    std::unique_ptr<RoomService> rooms;
-    explicit RecoveryWorld(RoomServiceConfig supplied = {})
+    service::lobby::OnlineRegistryConfig registryConfig;
+    service::lobby::RoomServiceConfig config;
+    std::shared_ptr<service::lobby::OnlineRegistry> online;
+    std::unique_ptr<service::lobby::RoomService> rooms;
+    explicit RecoveryWorld(
+        service::lobby::RoomServiceConfig supplied = {}
+    )
         : config(std::move(supplied))
     {
         registryConfig.grace = 100ms;
@@ -46,8 +47,13 @@ struct RecoveryWorld
                    } +
                    now.time_since_epoch();
         };
-        online = std::make_shared<OnlineRegistry>(registryConfig);
-        rooms = std::make_unique<RoomService>(online, config);
+        online = std::make_shared<service::lobby::OnlineRegistry>(
+            registryConfig
+        );
+        rooms = std::make_unique<service::lobby::RoomService>(
+            online,
+            config
+        );
         rooms->start({});
     }
     Clock::time_point monotonic()
@@ -57,7 +63,7 @@ struct RecoveryWorld
         ++clockCalls;
         return now;
     }
-    SessionGrant login(std::uint64_t player)
+    service::lobby::SessionGrant login(std::uint64_t player)
     {
         auto result = online->installVerified(
             {"room-test-auth-candidate",
@@ -71,9 +77,9 @@ struct RecoveryWorld
             throw std::logic_error("login failed");
         return std::move(*result);
     }
-    ManagedRoom allocate(
-        const SessionGrant& a,
-        const SessionGrant& b,
+    service::lobby::ManagedRoom allocate(
+        const service::lobby::SessionGrant& a,
+        const service::lobby::SessionGrant& b,
         std::uint64_t match = 1
     )
     {
@@ -86,35 +92,37 @@ struct RecoveryWorld
             throw std::logic_error("allocation failed");
         return *result;
     }
-    RoomCheckpoint cut(RoomService& service)
+    service::lobby::RoomCheckpoint
+    cut(service::lobby::RoomService& service)
     {
         auto result = service.checkpoint();
         if (!result)
             throw std::logic_error("checkpoint failed");
         return std::move(*result);
     }
-    RoomCheckpoint cut()
+    service::lobby::RoomCheckpoint cut()
     {
         return cut(*rooms);
     }
-    std::shared_ptr<OnlineRegistry> cloneRegistry()
+    std::shared_ptr<service::lobby::OnlineRegistry> cloneRegistry()
     {
-        auto result = OnlineRegistry::restore(
+        auto result = service::lobby::OnlineRegistry::restore(
             online->checkpoint(),
             registryConfig,
             [] { return std::int64_t{1700000000}; },
-            [](SessionBinding) { return [] {}; }
+            [](service::lobby::SessionBinding) { return [] {}; }
         );
         if (!result)
             throw std::logic_error("registry restore failed");
         return std::move(*result);
     }
-    std::unique_ptr<RoomService> clone(
-        const std::shared_ptr<OnlineRegistry>& registry,
-        const RoomCheckpoint& checkpoint
+    std::unique_ptr<service::lobby::RoomService> clone(
+        const std::shared_ptr<service::lobby::OnlineRegistry>&
+            registry,
+        const service::lobby::RoomCheckpoint& checkpoint
     )
     {
-        auto result = RoomService::restore(
+        auto result = service::lobby::RoomService::restore(
             registry,
             checkpoint,
             config
@@ -124,9 +132,9 @@ struct RecoveryWorld
         return std::move(*result);
     }
     void ready(
-        RoomService& service,
-        const ManagedRoom& allocation,
-        const SessionGrant& grant,
+        service::lobby::RoomService& service,
+        const service::lobby::ManagedRoom& allocation,
+        const service::lobby::SessionGrant& grant,
         std::uint64_t incarnation,
         bool value
     )
@@ -146,9 +154,9 @@ struct RecoveryWorld
         ));
     }
     void bothReady(
-        const ManagedRoom& allocation,
-        const SessionGrant& a,
-        const SessionGrant& b
+        const service::lobby::ManagedRoom& allocation,
+        const service::lobby::SessionGrant& a,
+        const service::lobby::SessionGrant& b
     )
     {
         const auto incarnation = cut().actors[0].incarnation;
@@ -162,7 +170,10 @@ struct RecoveryWorld
     }
 };
 
-void sameCut(const RoomCheckpoint& a, const RoomCheckpoint& b)
+void sameCut(
+    const service::lobby::RoomCheckpoint& a,
+    const service::lobby::RoomCheckpoint& b
+)
 {
     EXPECT_TRUE(a.policy == b.policy);
     EXPECT_EQ(a.actors, b.actors);
@@ -171,7 +182,7 @@ void sameCut(const RoomCheckpoint& a, const RoomCheckpoint& b)
     EXPECT_EQ(a.started, b.started);
     EXPECT_EQ(a.accepting, b.accepting);
     EXPECT_EQ(a.incarnationHighWater, b.incarnationHighWater);
-    const auto metrics = [](const RoomMetrics& m)
+    const auto metrics = [](const service::lobby::RoomMetrics& m)
     {
         return std::tie(
             m.actors,
@@ -288,7 +299,7 @@ TEST(
     for (int trial = 0; trial != 100; ++trial)
     {
         SCOPED_TRACE(trial);
-        RoomServiceConfig config;
+        service::lobby::RoomServiceConfig config;
         config.externalSettlement = true;
         config.battleDurationTicks = 8 + random() % 18;
         config.readyTimeoutTicks = 30;
@@ -393,8 +404,8 @@ TEST(
             ASSERT_TRUE(clone->advance());
             EXPECT_EQ(results[0], results[1]);
             sameCut(world.cut(), world.cut(*clone));
-            if (tick == 35 &&
-                world.cut().matches[0].phase == RoomPhase::Settling)
+            if (tick == 35 && world.cut().matches[0].phase ==
+                                  service::lobby::RoomPhase::Settling)
             {
                 ASSERT_TRUE(world.rooms->acknowledgeSettlement(
                     allocation.matchId,
@@ -418,7 +429,7 @@ TEST(
 )
 {
     unsigned identifiers = 0;
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.externalSettlement = true;
     config.incarnationSource = [&] { return 1000 + ++identifiers; };
     RecoveryWorld world(config);
@@ -478,7 +489,7 @@ TEST(
     } originalTimers, restoredTimers;
     auto config = world.config;
     config.externalTicks = false;
-    RoomService original(world.online, config);
+    service::lobby::RoomService original(world.online, config);
     original.start(originalTimers.scheduler());
     ASSERT_TRUE(original.snapshot(
         grant.lease->binding,
@@ -490,7 +501,11 @@ TEST(
     originalTimers.fire();
     auto saved = world.cut(original);
     auto registry = world.cloneRegistry();
-    auto restored = RoomService::restore(registry, saved, config);
+    auto restored = service::lobby::RoomService::restore(
+        registry,
+        saved,
+        config
+    );
     ASSERT_TRUE(restored);
     const auto clockCalls = world.clockCalls;
     world.clocksForbidden = true;
@@ -512,7 +527,7 @@ TEST(
     PlainCutCanRebindActorsAndStateMachinesToANewOwner
 )
 {
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.externalSettlement = true;
     RecoveryWorld world(config);
     auto a = world.login(1), b = world.login(2);
@@ -522,7 +537,7 @@ TEST(
     const auto registrySaved = world.online->checkpoint();
     auto bindings = world.config;
     auto registryConfig = world.registryConfig;
-    std::optional<RoomCheckpoint> result;
+    std::optional<service::lobby::RoomCheckpoint> result;
     std::exception_ptr failure;
     std::thread owner(
         [&]
@@ -539,17 +554,19 @@ TEST(
                            } +
                            100ms;
                 };
-                auto registry = OnlineRegistry::restore(
-                    registrySaved,
-                    registryConfig,
-                    [] { return std::int64_t{1700000000}; },
-                    [](SessionBinding) { return [] {}; }
-                );
+                auto registry = service::lobby::OnlineRegistry::
+                    restore(
+                        registrySaved,
+                        registryConfig,
+                        [] { return std::int64_t{1700000000}; },
+                        [](service::lobby::SessionBinding)
+                        { return [] {}; }
+                    );
                 if (!registry)
                     throw std::logic_error(
                         "foreign registry restore failed"
                     );
-                auto restored = RoomService::restore(
+                auto restored = service::lobby::RoomService::restore(
                     *registry,
                     saved,
                     bindings
@@ -587,7 +604,7 @@ TEST(
     auto grant = world.login(1);
     const arena::domain::RoomId room{7};
     ASSERT_TRUE(world.online->joinRoom(grant.lease->binding, room));
-    std::optional<RoomRecoveryError> reentrant;
+    std::optional<service::lobby::RoomRecoveryError> reentrant;
     ASSERT_TRUE(world.rooms->snapshot(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -602,9 +619,12 @@ TEST(
     ));
     const auto pending = world.rooms->checkpoint();
     ASSERT_FALSE(pending);
-    EXPECT_EQ(pending.error(), RoomRecoveryError::Busy);
+    EXPECT_EQ(
+        pending.error(),
+        service::lobby::RoomRecoveryError::Busy
+    );
     world.advance();
-    EXPECT_EQ(reentrant, RoomRecoveryError::Busy);
+    EXPECT_EQ(reentrant, service::lobby::RoomRecoveryError::Busy);
     EXPECT_TRUE(world.rooms->checkpoint());
     world.clocksForbidden = true;
     EXPECT_FALSE(world.rooms->advance());
@@ -628,7 +648,7 @@ TEST(
     CorruptStateIsRejectedWithoutChangingAuthority
 )
 {
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.externalSettlement = true;
     RecoveryWorld world(config);
     auto a = world.login(1), b = world.login(2);
@@ -636,16 +656,20 @@ TEST(
     world.advance();
     const auto saved = world.cut();
     const auto reject =
-        [&](const RoomCheckpoint& corrupt, RoomServiceConfig bindings)
+        [&](const service::lobby::RoomCheckpoint& corrupt,
+            service::lobby::RoomServiceConfig bindings)
     {
-        auto result = RoomService::restore(
+        auto result = service::lobby::RoomService::restore(
             world.online,
             corrupt,
             std::move(bindings)
         );
         EXPECT_FALSE(result);
         if (!result)
-            EXPECT_EQ(result.error(), RoomRecoveryError::Invalid);
+            EXPECT_EQ(
+                result.error(),
+                service::lobby::RoomRecoveryError::Invalid
+            );
         const auto current = world.online->managedRoom(
             allocation.roomId
         );
@@ -776,7 +800,7 @@ TEST(
         b.snapshot.playerId
     );
 
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.externalSettlement = true;
     RecoveryWorld managed(config);
     auto c = managed.login(3), d = managed.login(4);
@@ -792,7 +816,7 @@ TEST(
     sameCut(managed.cut(), managed.cut(*expiredClone));
     EXPECT_EQ(
         managed.cut().matches[0].result->reason,
-        SettlementReason::MemberUnavailable
+        service::lobby::SettlementReason::MemberUnavailable
     );
     EXPECT_EQ(
         managed.cut().matches[0].allocation.members,
@@ -805,7 +829,7 @@ TEST(
     ExternalSettlementAcknowledgementHasIsolatedAtomicReleaseAndFiniteBudget
 )
 {
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.externalSettlement = true;
     config.battleDurationTicks = 1;
     RecoveryWorld world(config);
@@ -815,7 +839,10 @@ TEST(
     world.advance();
     world.advance();
     const auto intent = world.cut();
-    ASSERT_EQ(intent.matches[0].phase, RoomPhase::Settling);
+    ASSERT_EQ(
+        intent.matches[0].phase,
+        service::lobby::RoomPhase::Settling
+    );
     EXPECT_EQ(intent.matches[0].admissionAttempts, 1u);
     EXPECT_TRUE(intent.matches[0].persistenceAccepted);
     EXPECT_EQ(intent.metrics.persistenceSubmitted, 1u);
@@ -857,7 +884,7 @@ TEST(
     );
     EXPECT_EQ(
         world.cut(*committed).matches[0].phase,
-        RoomPhase::Finished
+        service::lobby::RoomPhase::Finished
     );
     EXPECT_EQ(committed->metrics().persistenceCommitted, 1u);
     EXPECT_EQ(committed->metrics().battlesCompleted, 1u);
@@ -886,7 +913,7 @@ TEST(
 )
 {
     std::function<void(bool)> completion;
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.battleDurationTicks = 1;
     config.persistSettlement =
         [&](const auto&, const auto&, auto callback)
@@ -903,20 +930,26 @@ TEST(
     ASSERT_TRUE(completion);
     auto pending = world.rooms->checkpoint();
     ASSERT_FALSE(pending);
-    EXPECT_EQ(pending.error(), RoomRecoveryError::Busy);
+    EXPECT_EQ(
+        pending.error(),
+        service::lobby::RoomRecoveryError::Busy
+    );
     completion(true);
     completion = {};
     auto registry = world.cloneRegistry();
     auto cutWithOutcome = world.cut();
     auto unfinished = cutWithOutcome;
     unfinished.matches[0].persistenceOutcome = 0;
-    auto rejectedLoan = RoomService::restore(
+    auto rejectedLoan = service::lobby::RoomService::restore(
         registry,
         unfinished,
         world.config
     );
     ASSERT_FALSE(rejectedLoan);
-    EXPECT_EQ(rejectedLoan.error(), RoomRecoveryError::Busy);
+    EXPECT_EQ(
+        rejectedLoan.error(),
+        service::lobby::RoomRecoveryError::Busy
+    );
     auto clone = world.clone(registry, cutWithOutcome);
     world.now += 50ms;
     ASSERT_TRUE(clone->advance());
@@ -925,7 +958,7 @@ TEST(
     EXPECT_TRUE(world.online->managedRoom(allocation.roomId));
 
     unsigned rejectedCalls = 0;
-    RoomServiceConfig rejectedConfig;
+    service::lobby::RoomServiceConfig rejectedConfig;
     rejectedConfig.battleDurationTicks = 1;
     rejectedConfig.persistenceAdmissionAttempts = 3;
     rejectedConfig
@@ -971,7 +1004,7 @@ TEST(
 {
     std::uint64_t next = 1000;
     unsigned calls = 0;
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.externalSettlement = true;
     config.incarnationSource = [&]
     {
@@ -1006,7 +1039,7 @@ TEST(
     auto defaultBindings = world.config;
     defaultBindings.incarnationSource = {};
     auto defaultRegistry = world.cloneRegistry();
-    auto restored = RoomService::restore(
+    auto restored = service::lobby::RoomService::restore(
         defaultRegistry,
         saved,
         defaultBindings
@@ -1043,7 +1076,7 @@ TEST(
             std::filesystem::remove_all(path, ignored);
         }
     } cleanup{base};
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.externalSettlement = true;
     config.replays = std::make_shared<sim::ReplayRecorder>(
         sim::ReplayRecorderConfig{.directory = base}
@@ -1054,7 +1087,10 @@ TEST(
         world.allocate(a, b);
         auto saved = world.rooms->checkpoint();
         ASSERT_FALSE(saved);
-        EXPECT_EQ(saved.error(), RoomRecoveryError::Busy);
+        EXPECT_EQ(
+            saved.error(),
+            service::lobby::RoomRecoveryError::Busy
+        );
     }
     config.replays->stop();
 }

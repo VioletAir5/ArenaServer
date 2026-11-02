@@ -1,0 +1,344 @@
+syntax = "proto3";
+
+package arena.lobby_state;
+
+// Local durable schema. Unknown fields and unsupported versions fail
+// closed. Clock values are signed Linux monotonic nanoseconds; boot
+// mapping is external.
+message UInt64Slot
+{
+    uint64 value = 1;
+}
+message ClockValue
+{
+    sint64 nanoseconds = 1;
+}
+enum Presence
+{
+    PRESENCE_ONLINE = 0;
+    PRESENCE_DETACHED = 1;
+}
+enum TicketState
+{
+    TICKET_QUEUED = 0;
+    TICKET_RESERVED = 1;
+    TICKET_ASSIGNED = 2;
+    TICKET_CANCELLED = 3;
+    TICKET_EXPIRED = 4;
+    TICKET_FAILED = 5;
+}
+enum RoomState
+{
+    ROOM_FORMING = 0;
+    ROOM_READY = 1;
+    ROOM_RUNNING = 2;
+    ROOM_CLOSING = 3;
+    ROOM_CLOSED = 4;
+}
+enum BattleState
+{
+    BATTLE_PREPARED = 0;
+    BATTLE_RUNNING = 1;
+    BATTLE_FINISHED = 2;
+    BATTLE_ABORTED = 3;
+}
+enum RoomPhase
+{
+    PHASE_FORMING = 0;
+    PHASE_READY = 1;
+    PHASE_PLAYING = 2;
+    PHASE_SETTLING = 3;
+    PHASE_FINISHED = 4;
+}
+enum SettlementReason
+{
+    REASON_COMPLETED = 0;
+    REASON_MEMBER_UNAVAILABLE = 1;
+    REASON_READY_TIMEOUT = 2;
+}
+message SessionBinding
+{
+    uint64 player_id = 1;
+    uint64 connection_id = 2;
+    uint64 epoch = 3;
+}
+message OnlineSnapshot
+{
+    uint64 player_id = 1;
+    uint64 session_id = 2;
+    uint64 connection_id = 3;
+    uint64 epoch = 4;
+    Presence presence = 5;
+    UInt64Slot room_id = 6;
+    ClockValue grace_deadline = 7;
+    uint64 room_epoch = 8;
+}
+message MatchRoomMember
+{
+    uint64 player_id = 1;
+    uint64 session_id = 2;
+    uint64 room_epoch = 3;
+    uint32 initial_mmr = 4;
+}
+message ManagedRoom
+{
+    uint64 match_id = 1;
+    uint64 room_id = 2;
+    repeated MatchRoomMember members = 3;
+}
+message RegistryEntry
+{
+    OnlineSnapshot snapshot = 1;
+    SessionBinding binding = 2;
+    sint64 expires_at = 3;
+    bool lease_valid = 4;
+}
+message RegistryRoom
+{
+    uint64 room_id = 1;
+    repeated uint64 players = 2;
+    ManagedRoom managed = 3;
+}
+message RegistryCheckpoint
+{
+    uint64 epoch_watermark = 1;
+    uint64 session_watermark = 2;
+    bool stopped = 3;
+    repeated RegistryEntry entries = 4;
+    repeated RegistryRoom rooms = 5;
+}
+message QueuePolicy
+{
+    uint32 initial_window = 1;
+    uint32 expansion_step = 2;
+    uint32 maximum_window = 3;
+    sint64 expansion_interval_ms = 4;
+    sint64 timeout_ms = 5;
+    sint64 retention_ms = 6;
+    uint64 max_tickets = 7;
+    uint64 max_queued = 8;
+    uint64 comparisons_per_tick = 9;
+}
+message TicketLifecycle
+{
+    TicketState state = 1;
+    uint64 revision = 2;
+}
+message QueueEntry
+{
+    uint64 ticket_id = 1;
+    uint64 player_id = 2;
+    uint64 session_id = 3;
+    uint64 join_key = 4;
+    uint32 mmr = 5;
+    TicketLifecycle lifecycle = 6;
+    ClockValue admitted = 7;
+    ClockValue finished = 8;
+    ClockValue reclaim_from = 9;
+    uint64 match_id = 10;
+    UInt64Slot opponent = 11;
+    UInt64Slot opponent_ticket = 12;
+    bool active = 13;
+    UInt64Slot room_id = 14;
+}
+message QueueSearch
+{
+    UInt64Slot anchor = 1;
+    UInt64Slot best_candidate = 2;
+    uint32 best_gap = 3;
+    uint64 anchor_after = 4;
+    uint64 candidate_after = 5;
+    uint64 ceiling = 6;
+    ClockValue time = 7;
+}
+message QueueMetrics
+{
+    uint64 joined = 1;
+    uint64 replayed = 2;
+    uint64 cancelled = 3;
+    uint64 expired = 4;
+    uint64 matched_pairs = 5;
+    uint64 rejected = 6;
+    uint64 released_pairs = 7;
+    uint64 queued = 8;
+    uint64 assigned_players = 9;
+    uint64 retained = 10;
+    repeated uint64 matched_wait = 11;
+    repeated uint64 mmr_gap = 12;
+    repeated uint64 abandoned_wait = 13;
+    uint64 total_matched_wait_ms = 14;
+    uint64 total_mmr_gap = 15;
+}
+message QueueCheckpoint
+{
+    uint32 version = 1;
+    QueuePolicy policy = 2;
+    repeated QueueEntry entries = 3;
+    ClockValue last_now = 4;
+    uint64 last_ticket_id = 5;
+    uint64 last_durable_id = 6;
+    bool external_ids = 7;
+    QueueSearch search = 8;
+    QueueMetrics metrics = 9;
+}
+message ActorConfig
+{
+    uint64 max_members = 1;
+    uint64 max_inputs_per_tick = 2;
+    uint64 history_ticks = 3;
+    sint32 position_limit = 4;
+}
+message Member
+{
+    uint64 player_id = 1;
+    uint64 session_id = 2;
+    uint64 epoch = 3;
+}
+message Input
+{
+    Member member = 1;
+    uint64 sequence = 2;
+    sint32 dx = 3;
+    sint32 dy = 4;
+}
+message PlayerState
+{
+    Member member = 1;
+    sint32 x = 2;
+    sint32 y = 3;
+    uint64 sequence = 4;
+    sint32 last_dx = 5;
+    sint32 last_dy = 6;
+}
+message ActorSnapshot
+{
+    uint64 room_id = 1;
+    uint64 incarnation = 2;
+    uint64 tick = 3;
+    fixed64 checksum = 4;
+    repeated PlayerState players = 5;
+}
+message TickRecord
+{
+    uint64 tick = 1;
+    repeated Member members = 2;
+    repeated Input inputs = 3;
+    fixed64 checksum = 4;
+}
+message ReplayLog
+{
+    uint32 version = 1;
+    ActorConfig config = 2;
+    ActorSnapshot checkpoint = 3;
+    repeated TickRecord ticks = 4;
+}
+message TickEnvelope
+{
+    uint32 version = 1;
+    TickRecord record = 2;
+}
+message RoomPolicy
+{
+    uint64 max_rooms = 1;
+    uint64 max_pending = 2;
+    uint64 max_pending_per_room = 3;
+    uint64 max_catch_up = 4;
+    ActorConfig actor = 5;
+    uint64 battle_duration_ticks = 6;
+    uint64 ready_timeout_ticks = 7;
+    sint64 result_retention_ms = 8;
+    uint64 persistence_admission_attempts = 9;
+    sint64 persistence_retry_base_ms = 10;
+    sint64 persistence_retry_max_ms = 11;
+    bool external_ticks = 12;
+    bool external_settlement = 13;
+    bool callback_settlement = 14;
+    bool archives = 15;
+}
+message RoomLifecycle
+{
+    RoomState state = 1;
+    uint64 revision = 2;
+}
+message BattleLifecycle
+{
+    BattleState state = 1;
+    uint64 revision = 2;
+}
+message RoomSettlement
+{
+    uint64 result_id = 1;
+    uint64 match_id = 2;
+    uint64 room_id = 3;
+    uint64 final_tick = 4;
+    fixed64 final_checksum = 5;
+    SettlementReason reason = 6;
+    uint64 winner_player_id = 7;
+    repeated PlayerState players = 8;
+    uint64 created_unix_ms = 9;
+    uint64 started_unix_ms = 10;
+    uint64 finished_unix_ms = 11;
+    uint64 started_tick = 12;
+    uint64 played_ticks = 13;
+}
+message ManagedMatch
+{
+    ManagedRoom allocation = 1;
+    RoomLifecycle room = 2;
+    BattleLifecycle battle = 3;
+    RoomPhase phase = 4;
+    repeated bool ready = 5;
+    repeated Presence presence = 6;
+    uint64 created_unix_ms = 7;
+    uint64 started_unix_ms = 8;
+    uint64 waited_ticks = 9;
+    uint64 started_tick = 10;
+    uint64 finished_tick = 11;
+    uint64 played_ticks = 12;
+    RoomSettlement result = 13;
+    ClockValue expires = 14;
+    ClockValue retry_at = 15;
+    uint64 admission_attempts = 16;
+    bool persistence_accepted = 17;
+    bool persistence_blocked = 18;
+    uint32 persistence_outcome = 19;
+}
+message RoomMetrics
+{
+    uint64 actors = 1;
+    uint64 ticks = 2;
+    uint64 applied = 3;
+    uint64 rejected = 4;
+    uint64 duplicates = 5;
+    uint64 skipped_wall_slots = 6;
+    uint64 managed_matches = 7;
+    uint64 retained_results = 8;
+    uint64 battles_started = 9;
+    uint64 battles_completed = 10;
+    uint64 battles_aborted = 11;
+    uint64 persistence_submitted = 12;
+    uint64 persistence_rejected = 13;
+    uint64 persistence_failed = 14;
+    uint64 persistence_committed = 15;
+    uint64 pending_settlements = 16;
+    uint64 blocked_settlements = 17;
+}
+message RoomCheckpoint
+{
+    RoomPolicy policy = 1;
+    repeated ActorSnapshot actors = 2;
+    repeated ManagedMatch matches = 3;
+    RoomMetrics metrics = 4;
+    ClockValue deadline = 5;
+    bool running = 6;
+    bool started = 7;
+    bool accepting = 8;
+    uint64 incarnation_high_water = 9;
+}
+message CoreCheckpoint
+{
+    uint32 version = 1;
+    RegistryCheckpoint registry = 2;
+    QueueCheckpoint queue = 3;
+    RoomCheckpoint rooms = 4;
+}

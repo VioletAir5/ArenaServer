@@ -17,12 +17,12 @@
 #include "net/EventLoop.h"
 #include "net/ITcpServer.h"
 #include "net/InetAddress.h"
-#include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
 #include "net/TcpServer.h"
 #include "os/FileDescriptor.h"
 
 #include "TransportTestProfile.h"
+#include "gateway_test/OnlineRegistryMaintenance.h"
 
 // A separate process lets the integration test inspect /proc/<pid>/fd
 // and stop the event loop cleanly, including under LeakSanitizer.
@@ -32,9 +32,9 @@ int main(int argc, char** argv)
     {
         return 2;
     }
-    std::shared_ptr<service::gateway::OnlineRegistry> online;
-    std::shared_ptr<service::gateway::MatchmakingService> matcher;
-    std::shared_ptr<service::gateway::RoomService> rooms;
+    std::shared_ptr<service::lobby::OnlineRegistry> online;
+    std::shared_ptr<service::lobby::MatchmakingService> matcher;
+    std::shared_ptr<service::lobby::RoomService> rooms;
     service::gateway::ConnectionHandlerFactory handlerFactory;
     if (argc == 5)
     {

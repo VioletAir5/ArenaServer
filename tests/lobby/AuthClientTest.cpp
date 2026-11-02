@@ -143,6 +143,26 @@ struct Peer
                 return Server::Cancellation{};
             }
         );
+        handlers.emplace(
+            "health.ready",
+            [this](auto request, auto context, auto complete)
+            {
+                ++calls;
+                contexts.push_back(context);
+                EXPECT_TRUE(request.payload().empty());
+                arena::rpc::Response response;
+                if (mode == Mode::VersionError)
+                    response.set_status(
+                        arena::rpc::INCOMPATIBLE_VERSION
+                    );
+                if (mode == Mode::CycleError)
+                    response.set_status(arena::rpc::CALL_CYCLE);
+                if (mode == Mode::Malformed)
+                    response.set_payload("unexpected");
+                complete(std::move(response));
+                return Server::Cancellation{};
+            }
+        );
         server = std::make_unique<Server>(
             io.get_executor(),
             std::move(config),
@@ -292,6 +312,60 @@ struct Harness
         return *result;
     }
 };
+
+TEST(
+    AuthClientTest,
+    ProbeUsesAuthenticatedCapturedRouteAndRequiresEmptySuccess
+)
+{
+    Harness fixture;
+    const auto probe = [&]
+    {
+        std::optional<AuthClient::ProbeResult> result;
+        auto admitted = fixture.client->probe(
+            Harness::context(),
+            [&](auto r) { result.emplace(std::move(r)); }
+        );
+        EXPECT_TRUE(admitted);
+        EXPECT_TRUE(fixture.until([&]
+                                  { return result.has_value(); }));
+        return std::move(*result);
+    };
+    ASSERT_TRUE(probe());
+    fixture.first.mode = Mode::Malformed;
+    auto malformed = probe();
+    ASSERT_FALSE(malformed);
+    EXPECT_EQ(malformed.error(), arena::rpc::INTERNAL);
+    fixture.first.mode = Mode::VersionError;
+    auto version = probe();
+    ASSERT_FALSE(version);
+    EXPECT_EQ(version.error(), arena::rpc::INCOMPATIBLE_VERSION);
+    fixture.first.mode = Mode::CycleError;
+    auto cycle = probe();
+    ASSERT_FALSE(cycle);
+    EXPECT_EQ(cycle.error(), arena::rpc::CALL_CYCLE);
+    auto runtime = std::make_shared<arena::runtime::ConfigStore>(
+        fixture.snapshot(1, false, true)
+    );
+    auto config = fixture.config();
+    config.runtime = runtime;
+    fixture.client = std::make_unique<AuthClient>(
+        fixture.io.get_executor(),
+        config
+    );
+    ASSERT_TRUE(probe());
+    EXPECT_EQ(fixture.second.calls, 1u);
+    ASSERT_TRUE(runtime->publish(fixture.snapshot(2, false, false)));
+    bool called = false;
+    auto unavailable = fixture.client->probe(
+        Harness::context(),
+        [&](auto) { called = true; }
+    );
+    ASSERT_FALSE(unavailable);
+    EXPECT_EQ(unavailable.error(), arena::rpc::UNAVAILABLE);
+    EXPECT_FALSE(called);
+    EXPECT_EQ(fixture.client->inflight(), 0u);
+}
 
 TEST(
     AuthClientTest,

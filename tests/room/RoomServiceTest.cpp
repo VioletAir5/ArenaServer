@@ -1,4 +1,4 @@
-#include "net/RoomService.h"
+#include "lobby/RoomService.h"
 
 #include <algorithm>
 #include <array>
@@ -93,12 +93,12 @@ struct RoomServiceTest : testing::Test
 {
     arena::runtime::OwnerClock::time_point now{};
     OwnerTimers timers;
-    std::shared_ptr<OnlineRegistry>
-        online = std::make_shared<OnlineRegistry>();
+    std::shared_ptr<service::lobby::OnlineRegistry>
+        online = std::make_shared<service::lobby::OnlineRegistry>();
     service::auth::JwtTokens jwt = tokens();
-    std::shared_ptr<RoomService> rooms;
+    std::shared_ptr<service::lobby::RoomService> rooms;
     const arena::domain::RoomId roomId{7};
-    SessionGrant
+    service::lobby::SessionGrant
     login(std::uint64_t player = 42, std::uint64_t connection = 7)
     {
         auto result = online->install(
@@ -113,16 +113,16 @@ struct RoomServiceTest : testing::Test
         return std::move(*result);
     }
     void join(
-        const SessionGrant& grant,
+        const service::lobby::SessionGrant& grant,
         arena::domain::RoomId id = arena::domain::RoomId{7}
     )
     {
         ASSERT_TRUE(online->joinRoom(grant.lease->binding, id));
     }
-    void start(RoomServiceConfig config = {})
+    void start(service::lobby::RoomServiceConfig config = {})
     {
         config.now = [&] { return now; };
-        rooms = std::make_shared<RoomService>(
+        rooms = std::make_shared<service::lobby::RoomService>(
             online,
             std::move(config)
         );
@@ -133,9 +133,11 @@ struct RoomServiceTest : testing::Test
         now = arena::runtime::OwnerClock::time_point{} + elapsed;
         timers.due(now);
     }
-    sim::Snapshot initialize(const SessionGrant& grant)
+    sim::Snapshot
+    initialize(const service::lobby::SessionGrant& grant)
     {
-        std::optional<RoomService::SnapshotResult> result;
+        std::optional<service::lobby::RoomService::SnapshotResult>
+            result;
         EXPECT_TRUE(rooms->snapshot(
             grant.lease->binding,
             grant.snapshot.sessionId,
@@ -155,14 +157,16 @@ struct ManagedRoomServiceTest : RoomServiceTest
 {
     ManagedRoomServiceTest()
     {
-        OnlineRegistryConfig config;
+        service::lobby::OnlineRegistryConfig config;
         config.grace = 100ms;
         config.now = [this] { return now; };
-        online = std::make_shared<OnlineRegistry>(std::move(config));
+        online = std::make_shared<service::lobby::OnlineRegistry>(
+            std::move(config)
+        );
     }
-    ManagedRoom allocate(
-        const SessionGrant& alice,
-        const SessionGrant& bob,
+    service::lobby::ManagedRoom allocate(
+        const service::lobby::SessionGrant& alice,
+        const service::lobby::SessionGrant& bob,
         std::uint64_t match = 1
     )
     {
@@ -175,10 +179,13 @@ struct ManagedRoomServiceTest : RoomServiceTest
             throw std::runtime_error("test allocation failed");
         return *result;
     }
-    RoomStatus
-    query(const SessionGrant& grant, std::chrono::milliseconds cutoff)
+    service::lobby::RoomStatus query(
+        const service::lobby::SessionGrant& grant,
+        std::chrono::milliseconds cutoff
+    )
     {
-        std::optional<RoomService::StatusResult> result;
+        std::optional<service::lobby::RoomService::StatusResult>
+            result;
         EXPECT_TRUE(rooms->status(
             grant.lease->binding,
             grant.snapshot.sessionId,
@@ -190,11 +197,11 @@ struct ManagedRoomServiceTest : RoomServiceTest
         return std::move(**result);
     }
     void markReady(
-        const SessionGrant& grant,
-        const ManagedRoom& allocation,
+        const service::lobby::SessionGrant& grant,
+        const service::lobby::ManagedRoom& allocation,
         std::uint64_t incarnation,
         bool value,
-        RoomService::StatusCompletion complete
+        service::lobby::RoomService::StatusCompletion complete
     )
     {
         const auto member = std::find_if(
@@ -215,9 +222,9 @@ struct ManagedRoomServiceTest : RoomServiceTest
         ));
     }
     void bothReady(
-        const SessionGrant& alice,
-        const SessionGrant& bob,
-        const ManagedRoom& allocation,
+        const service::lobby::SessionGrant& alice,
+        const service::lobby::SessionGrant& bob,
+        const service::lobby::ManagedRoom& allocation,
         std::uint64_t incarnation
     )
     {
@@ -292,7 +299,7 @@ TEST_P(
 {
     auto alice = login();
     auto bob = login(43, 8);
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.battleDurationTicks = 1;
     start(config);
     const auto allocation = allocate(alice, bob);
@@ -329,7 +336,8 @@ TEST_P(
     }
     for (const auto cutoff : {100ms, 150ms, 200ms})
     {
-        std::optional<RoomService::StatusResult> result;
+        std::optional<service::lobby::RoomService::StatusResult>
+            result;
         ASSERT_TRUE(rooms->status(
             alice.lease->binding,
             alice.snapshot.sessionId,
@@ -413,16 +421,16 @@ TEST_F(
 {
     auto alice = login();
     auto bob = login(43, 8);
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.battleDurationTicks = 3;
     config.resultRetention = 500ms;
     start(config);
     const auto allocation = allocate(alice, bob);
     ASSERT_TRUE(rooms->openMatch(allocation));
     auto forming = query(alice, 50ms);
-    EXPECT_EQ(forming.phase, RoomPhase::Forming);
+    EXPECT_EQ(forming.phase, service::lobby::RoomPhase::Forming);
     EXPECT_EQ(forming.snapshot.players.size(), 2U);
-    std::optional<RoomService::InputResult> early;
+    std::optional<service::lobby::RoomService::InputResult> early;
     ASSERT_TRUE(rooms->input(
         alice.lease->binding,
         alice.snapshot.sessionId,
@@ -436,15 +444,15 @@ TEST_F(
     ));
     bothReady(alice, bob, allocation, forming.snapshot.incarnation);
     auto ready = query(alice, 100ms);
-    EXPECT_EQ(ready.phase, RoomPhase::Ready);
+    EXPECT_EQ(ready.phase, service::lobby::RoomPhase::Ready);
     ASSERT_TRUE(early);
     ASSERT_FALSE(*early);
     EXPECT_EQ(early->error(), wire::ERR_BUSINESS_FAILURE);
     auto playing = query(alice, 150ms);
-    EXPECT_EQ(playing.phase, RoomPhase::Playing);
+    EXPECT_EQ(playing.phase, service::lobby::RoomPhase::Playing);
     EXPECT_EQ(playing.playedTicks, 1U);
     EXPECT_EQ(playing.startedTick, 3U);
-    std::optional<RoomService::InputResult> applied;
+    std::optional<service::lobby::RoomService::InputResult> applied;
     ASSERT_TRUE(rooms->input(
         alice.lease->binding,
         alice.snapshot.sessionId,
@@ -462,17 +470,17 @@ TEST_F(
     EXPECT_EQ((**applied).status, sim::InputStatus::Applied);
     auto settling = query(alice, 250ms);
     ASSERT_TRUE(settling.settlement);
-    EXPECT_EQ(settling.phase, RoomPhase::Settling);
+    EXPECT_EQ(settling.phase, service::lobby::RoomPhase::Settling);
     EXPECT_EQ(settling.playedTicks, 3U);
     EXPECT_EQ(settling.finishedTick, 5U);
     EXPECT_EQ(
         settling.settlement->reason,
-        SettlementReason::Completed
+        service::lobby::SettlementReason::Completed
     );
     EXPECT_EQ(settling.settlement->winnerPlayerId, 0U);
     EXPECT_EQ(settling.settlement->resultId, allocation.matchId);
     auto finished = query(bob, 300ms);
-    EXPECT_EQ(finished.phase, RoomPhase::Finished);
+    EXPECT_EQ(finished.phase, service::lobby::RoomPhase::Finished);
     EXPECT_FALSE(online->snapshot(alice.snapshot.playerId)->roomId);
     EXPECT_FALSE(online->snapshot(bob.snapshot.playerId)->roomId);
     EXPECT_FALSE(online->managedRoom(allocation.roomId));
@@ -485,7 +493,8 @@ TEST_F(
     EXPECT_EQ(finished.snapshot.players[0].sequence, 1U);
     for (const auto* grant : {&alice, &bob})
     {
-        std::optional<RoomService::SettlementResult> result;
+        std::optional<service::lobby::RoomService::SettlementResult>
+            result;
         ASSERT_TRUE(rooms->settlement(
             grant->lease->binding,
             grant->snapshot.sessionId,
@@ -510,7 +519,7 @@ TEST_F(
     ASSERT_TRUE(replay);
     EXPECT_EQ(replay->snapshot, finished.snapshot);
     EXPECT_EQ(replay->checksums.size(), 5U);
-    std::optional<RoomService::StatusResult> expired;
+    std::optional<service::lobby::RoomService::StatusResult> expired;
     ASSERT_TRUE(rooms->status(
         alice.lease->binding,
         alice.snapshot.sessionId,
@@ -531,7 +540,7 @@ TEST_F(
 {
     auto alice = login();
     auto bob = login(43, 8);
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.battleDurationTicks = 20;
     start(config);
     const auto allocation = allocate(alice, bob);
@@ -542,20 +551,23 @@ TEST_F(
     at(150ms);
     bob.lease->release();
     auto detached = query(alice, 200ms);
-    EXPECT_EQ(detached.phase, RoomPhase::Playing);
-    EXPECT_EQ(detached.members[1].presence, Presence::Detached);
+    EXPECT_EQ(detached.phase, service::lobby::RoomPhase::Playing);
+    EXPECT_EQ(
+        detached.members[1].presence,
+        service::lobby::Presence::Detached
+    );
     EXPECT_EQ(detached.playedTicks, 2U);
     auto aborted = query(alice, 250ms);
     ASSERT_TRUE(aborted.settlement);
-    EXPECT_EQ(aborted.phase, RoomPhase::Settling);
+    EXPECT_EQ(aborted.phase, service::lobby::RoomPhase::Settling);
     EXPECT_EQ(
         aborted.settlement->reason,
-        SettlementReason::MemberUnavailable
+        service::lobby::SettlementReason::MemberUnavailable
     );
     EXPECT_EQ(aborted.playedTicks, 2U);
     EXPECT_EQ(aborted.snapshot.players.size(), 2U);
     auto final = query(alice, 300ms);
-    EXPECT_EQ(final.phase, RoomPhase::Finished);
+    EXPECT_EQ(final.phase, service::lobby::RoomPhase::Finished);
     EXPECT_FALSE(online->snapshot(alice.snapshot.playerId)->roomId);
     EXPECT_EQ(online->roomCount(), 0U);
     EXPECT_EQ(rooms->metrics().battlesAborted, 1U);
@@ -570,7 +582,7 @@ TEST_F(
 {
     auto alice = login();
     auto bob = login(43, 8);
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.readyTimeoutTicks = 3;
     start(config);
     const auto allocation = allocate(alice, bob);
@@ -579,11 +591,11 @@ TEST_F(
     at(100ms);
     at(150ms);
     auto result = query(alice, 200ms);
-    EXPECT_EQ(result.phase, RoomPhase::Finished);
+    EXPECT_EQ(result.phase, service::lobby::RoomPhase::Finished);
     ASSERT_TRUE(result.settlement);
     EXPECT_EQ(
         result.settlement->reason,
-        SettlementReason::ReadyTimeout
+        service::lobby::SettlementReason::ReadyTimeout
     );
     EXPECT_EQ(result.playedTicks, 0U);
     EXPECT_EQ(result.finishedTick, 3U);
@@ -615,7 +627,7 @@ TEST_F(
 {
     auto alice = login();
     auto bob = login(43, 8);
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.battleDurationTicks = 4;
     start(config);
     const auto allocation = allocate(alice, bob);
@@ -624,7 +636,7 @@ TEST_F(
     bothReady(alice, bob, allocation, first.snapshot.incarnation);
     at(100ms);
     at(150ms);
-    std::optional<RoomService::InputResult> stale;
+    std::optional<service::lobby::RoomService::InputResult> stale;
     ASSERT_TRUE(rooms->input(
         alice.lease->binding,
         alice.snapshot.sessionId,
@@ -647,7 +659,7 @@ TEST_F(
         [] {}
     );
     ASSERT_TRUE(resumed);
-    std::optional<RoomService::InputResult> current;
+    std::optional<service::lobby::RoomService::InputResult> current;
     ASSERT_TRUE(rooms->input(
         resumed->lease->binding,
         resumed->snapshot.sessionId,
@@ -671,7 +683,7 @@ TEST_F(
     at(250ms);
     at(300ms);
     auto final = query(*resumed, 350ms);
-    EXPECT_EQ(final.phase, RoomPhase::Finished);
+    EXPECT_EQ(final.phase, service::lobby::RoomPhase::Finished);
     ASSERT_TRUE(final.settlement);
     resumed->lease->release();
     claims = jwt.verify(resumed->token);
@@ -688,7 +700,8 @@ TEST_F(
     EXPECT_EQ(recovered.snapshot, final.snapshot);
     EXPECT_EQ(recovered.settlement->resultId, allocation.matchId);
     auto replacement = login(42, 11);
-    std::optional<RoomService::SettlementResult> denied;
+    std::optional<service::lobby::RoomService::SettlementResult>
+        denied;
     ASSERT_TRUE(rooms->settlement(
         replacement.lease->binding,
         replacement.snapshot.sessionId,
@@ -733,7 +746,7 @@ TEST_F(
     bothReady(alice, bob, allocation, first.snapshot.incarnation);
     at(150ms);
     auto playing = query(alice, 200ms);
-    EXPECT_EQ(playing.phase, RoomPhase::Playing);
+    EXPECT_EQ(playing.phase, service::lobby::RoomPhase::Playing);
     markReady(
         alice,
         allocation,
@@ -760,7 +773,7 @@ TEST_F(
     auto bob = login(43, 8);
     auto carl = login(44, 9);
     auto dave = login(45, 10);
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.maxRooms = 1;
     start(config);
     const auto first = allocate(alice, bob);
@@ -788,7 +801,7 @@ TEST_F(
 {
     auto alice = login();
     auto bob = login(43, 8);
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.maxPending = 64;
     start(config);
     const auto allocation = allocate(alice, bob);
@@ -827,7 +840,7 @@ TEST_F(
     EXPECT_EQ(accepted, 32);
     EXPECT_EQ(callbacks, 0);
     auto ready = query(alice, 100ms);
-    EXPECT_EQ(ready.phase, RoomPhase::Ready);
+    EXPECT_EQ(ready.phase, service::lobby::RoomPhase::Ready);
     EXPECT_EQ(callbacks, 32);
     int stopped = 0;
     ASSERT_TRUE(rooms->status(
@@ -873,7 +886,10 @@ TEST_F(
     ASSERT_TRUE(rooms->openMatch(allocation));
     const auto first = query(alice, 50ms);
     bothReady(alice, bob, allocation, first.snapshot.incarnation);
-    EXPECT_EQ(query(alice, 100ms).phase, RoomPhase::Ready);
+    EXPECT_EQ(
+        query(alice, 100ms).phase,
+        service::lobby::RoomPhase::Ready
+    );
     markReady(
         alice,
         allocation,
@@ -882,7 +898,7 @@ TEST_F(
         [](auto result) { EXPECT_TRUE(result); }
     );
     const auto forming = query(bob, 150ms);
-    EXPECT_EQ(forming.phase, RoomPhase::Forming);
+    EXPECT_EQ(forming.phase, service::lobby::RoomPhase::Forming);
     EXPECT_EQ(forming.playedTicks, 0U);
     EXPECT_EQ(rooms->metrics().battlesStarted, 0U);
     markReady(
@@ -892,8 +908,14 @@ TEST_F(
         true,
         [](auto result) { EXPECT_TRUE(result); }
     );
-    EXPECT_EQ(query(bob, 200ms).phase, RoomPhase::Ready);
-    EXPECT_EQ(query(bob, 250ms).phase, RoomPhase::Playing);
+    EXPECT_EQ(
+        query(bob, 200ms).phase,
+        service::lobby::RoomPhase::Ready
+    );
+    EXPECT_EQ(
+        query(bob, 250ms).phase,
+        service::lobby::RoomPhase::Playing
+    );
     EXPECT_EQ(rooms->metrics().battlesStarted, 1U);
 }
 
@@ -963,10 +985,10 @@ TEST_F(
     at(100ms);
     const auto final = query(alice, 150ms);
     ASSERT_TRUE(final.settlement);
-    EXPECT_EQ(final.phase, RoomPhase::Finished);
+    EXPECT_EQ(final.phase, service::lobby::RoomPhase::Finished);
     EXPECT_EQ(
         final.settlement->reason,
-        SettlementReason::MemberUnavailable
+        service::lobby::SettlementReason::MemberUnavailable
     );
     EXPECT_EQ(final.settlement->players.size(), 2U);
     EXPECT_EQ(final.playedTicks, 0U);
@@ -982,44 +1004,47 @@ TEST_F(
     InvalidDependenciesLimitsAndForeignOwnerAccessReject
 )
 {
-    EXPECT_THROW((RoomService({})), std::invalid_argument);
-    RoomServiceConfig config;
+    EXPECT_THROW(
+        (service::lobby::RoomService({})),
+        std::invalid_argument
+    );
+    service::lobby::RoomServiceConfig config;
     config.maxPending = 0;
     EXPECT_THROW(
-        (RoomService(online, config)),
+        (service::lobby::RoomService(online, config)),
         std::invalid_argument
     );
     config = {};
     config.maxCatchUp = 0;
     EXPECT_THROW(
-        (RoomService(online, config)),
+        (service::lobby::RoomService(online, config)),
         std::invalid_argument
     );
     config = {};
     config.battleDurationTicks = 0;
     EXPECT_THROW(
-        (RoomService(online, config)),
+        (service::lobby::RoomService(online, config)),
         std::invalid_argument
     );
     config = {};
     config.readyTimeoutTicks = 0;
     EXPECT_THROW(
-        (RoomService(online, config)),
+        (service::lobby::RoomService(online, config)),
         std::invalid_argument
     );
     config = {};
     config.resultRetention = 0ms;
     EXPECT_THROW(
-        (RoomService(online, config)),
+        (service::lobby::RoomService(online, config)),
         std::invalid_argument
     );
     config.resultRetention = std::chrono::milliseconds::max();
     EXPECT_THROW(
-        (RoomService(online, config)),
+        (service::lobby::RoomService(online, config)),
         std::invalid_argument
     );
     config.resultRetention = std::chrono::hours(1);
-    EXPECT_NO_THROW((RoomService(online, config)));
+    EXPECT_NO_THROW((service::lobby::RoomService(online, config)));
     start();
     EXPECT_THROW(rooms->start(timers.scheduler()), std::logic_error);
     std::thread foreign(
@@ -1040,7 +1065,7 @@ TEST_F(
     auto grant = login();
     join(grant);
     start();
-    std::optional<RoomService::SnapshotResult> result;
+    std::optional<service::lobby::RoomService::SnapshotResult> result;
     ASSERT_TRUE(rooms->snapshot(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -1097,13 +1122,13 @@ TEST_F(
     join(alice);
     auto bob = login(43, 8);
     join(bob, arena::domain::RoomId{8});
-    RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.maxPending = 3;
     config.maxPendingPerRoom = 2;
     start(config);
     int accepted = 0, rejected = 0;
-    const auto queue =
-        [&](const SessionGrant& grant, arena::domain::RoomId id)
+    const auto queue = [&](const service::lobby::SessionGrant& grant,
+                           arena::domain::RoomId id)
     {
         return rooms->snapshot(
             grant.lease->binding,
@@ -1150,7 +1175,10 @@ TEST_F(
     const auto epoch = initial.players.at(0).member.epoch;
     std::barrier gate(33);
     std::array<bool, 32> accepted{};
-    std::array<std::optional<RoomService::InputResult>, 32> replies;
+    std::array<
+        std::optional<service::lobby::RoomService::InputResult>,
+        32>
+        replies;
     std::vector<std::thread> producers;
     for (std::size_t index = 0; index < 32; ++index)
         producers.emplace_back(
@@ -1357,7 +1385,7 @@ TEST_F(
     start();
     const auto initial = initialize(grant);
     const auto epoch = initial.players[0].member.epoch;
-    std::optional<RoomService::InputResult> first;
+    std::optional<service::lobby::RoomService::InputResult> first;
     ASSERT_TRUE(rooms->input(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -1372,7 +1400,7 @@ TEST_F(
     at(100ms);
     ASSERT_TRUE(first);
     ASSERT_TRUE(*first);
-    std::optional<RoomService::InputResult> stale;
+    std::optional<service::lobby::RoomService::InputResult> stale;
     ASSERT_TRUE(rooms->input(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -1399,7 +1427,7 @@ TEST_F(
         recovered->snapshot.sessionId,
         grant.snapshot.sessionId
     );
-    std::optional<RoomService::InputResult> current;
+    std::optional<service::lobby::RoomService::InputResult> current;
     ASSERT_TRUE(rooms->input(
         recovered->lease->binding,
         recovered->snapshot.sessionId,
@@ -1433,7 +1461,7 @@ TEST_F(
     const auto initial = initialize(grant);
     ASSERT_TRUE(online->leaveRoom(grant.lease->binding));
     join(grant);
-    std::optional<RoomService::InputResult> stale;
+    std::optional<service::lobby::RoomService::InputResult> stale;
     ASSERT_TRUE(rooms->input(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -1445,7 +1473,7 @@ TEST_F(
         0,
         [&](auto result) { stale.emplace(std::move(result)); }
     ));
-    std::optional<RoomService::SnapshotResult> state;
+    std::optional<service::lobby::RoomService::SnapshotResult> state;
     ASSERT_TRUE(rooms->snapshot(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -1478,7 +1506,8 @@ TEST_F(
     at(100ms);
     EXPECT_EQ(rooms->metrics().actors, 0U);
     join(grant);
-    std::optional<RoomService::SnapshotResult> replacement;
+    std::optional<service::lobby::RoomService::SnapshotResult>
+        replacement;
     ASSERT_TRUE(rooms->snapshot(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -1489,7 +1518,7 @@ TEST_F(
     ASSERT_TRUE(replacement);
     ASSERT_TRUE(*replacement);
     EXPECT_NE((**replacement).incarnation, initial.incarnation);
-    std::optional<RoomService::InputResult> old;
+    std::optional<service::lobby::RoomService::InputResult> old;
     ASSERT_TRUE(rooms->input(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -1593,7 +1622,7 @@ TEST(
 )
 {
     boost::asio::io_context context;
-    auto online = std::make_shared<OnlineRegistry>();
+    auto online = std::make_shared<service::lobby::OnlineRegistry>();
     auto jwt = tokens();
     auto grant = online->install(
         arena::domain::PlayerId{42},
@@ -1607,7 +1636,7 @@ TEST(
         grant->lease->binding,
         arena::domain::RoomId{7}
     ));
-    RoomService rooms(online);
+    service::lobby::RoomService rooms(online);
     rooms.start(
         arena::runtime::ownerScheduler(context.get_executor())
     );
@@ -1643,7 +1672,7 @@ TEST(
 )
 {
     EventLoop loop;
-    auto online = std::make_shared<OnlineRegistry>();
+    auto online = std::make_shared<service::lobby::OnlineRegistry>();
     auto jwt = tokens();
     auto grant = online->install(
         arena::domain::PlayerId{42},
@@ -1657,7 +1686,7 @@ TEST(
         grant->lease->binding,
         arena::domain::RoomId{7}
     ));
-    RoomService rooms(online);
+    service::lobby::RoomService rooms(online);
     rooms.start(connectionScheduler(loop));
     int replies = 0;
     ASSERT_TRUE(rooms.snapshot(
@@ -1688,15 +1717,15 @@ struct DurableRoomServiceTest : ManagedRoomServiceTest
 {
     struct Write
     {
-        ManagedRoom allocation;
-        RoomSettlement result;
+        service::lobby::ManagedRoom allocation;
+        service::lobby::RoomSettlement result;
         std::function<void(bool)> complete;
     };
     std::vector<Write> writes;
     std::int64_t wallMilliseconds{1000};
-    RoomServiceConfig durableConfig()
+    service::lobby::RoomServiceConfig durableConfig()
     {
-        RoomServiceConfig c;
+        service::lobby::RoomServiceConfig c;
         c.battleDurationTicks = 1;
         c.wallNow = [this]
         {
@@ -1716,8 +1745,9 @@ struct DurableRoomServiceTest : ManagedRoomServiceTest
         };
         return c;
     }
-    ManagedRoom playToSettlement(
-        const SessionGrant& alice, const SessionGrant& bob
+    service::lobby::ManagedRoom playToSettlement(
+        const service::lobby::SessionGrant& alice,
+        const service::lobby::SessionGrant& bob
     )
     {
         const auto allocation = allocate(alice, bob);
@@ -1729,9 +1759,15 @@ struct DurableRoomServiceTest : ManagedRoomServiceTest
             allocation,
             forming.snapshot.incarnation
         );
-        EXPECT_EQ(query(alice, 100ms).phase, RoomPhase::Ready);
+        EXPECT_EQ(
+            query(alice, 100ms).phase,
+            service::lobby::RoomPhase::Ready
+        );
         const auto settling = query(alice, 150ms);
-        EXPECT_EQ(settling.phase, RoomPhase::Settling);
+        EXPECT_EQ(
+            settling.phase,
+            service::lobby::RoomPhase::Settling
+        );
         EXPECT_FALSE(settling.settlement);
         return allocation;
     }
@@ -1747,7 +1783,10 @@ TEST_F(
     std::vector<arena::runtime::OwnerScheduler::Action> wakes;
     auto c = durableConfig();
     c.now = [this] { return now; };
-    rooms = std::make_shared<RoomService>(online, std::move(c));
+    rooms = std::make_shared<service::lobby::RoomService>(
+        online,
+        std::move(c)
+    );
     auto scheduler = timers.scheduler();
     scheduler.defer = [&](auto action)
     {
@@ -1765,7 +1804,8 @@ TEST_F(
     EXPECT_EQ(rooms->metrics().pendingSettlements, 1U);
     EXPECT_TRUE(online->managedRoom(allocation.roomId));
     const auto frozen = query(alice, 200ms).snapshot;
-    std::optional<RoomService::InputResult> rejectedInput;
+    std::optional<service::lobby::RoomService::InputResult>
+        rejectedInput;
     ASSERT_TRUE(rooms->input(
         alice.lease->binding,
         alice.snapshot.sessionId,
@@ -1788,7 +1828,8 @@ TEST_F(
             EXPECT_EQ(value.error(), wire::ERR_UNAVAILABLE);
         }
     );
-    std::optional<RoomService::SettlementResult> hidden;
+    std::optional<service::lobby::RoomService::SettlementResult>
+        hidden;
     ASSERT_TRUE(rooms->settlement(
         alice.lease->binding,
         alice.snapshot.sessionId,
@@ -1829,7 +1870,7 @@ TEST_F(
     EXPECT_EQ(rooms->metrics().pendingSettlements, 0U);
     EXPECT_FALSE(online->managedRoom(allocation.roomId));
     const auto finished = query(alice, 300ms);
-    EXPECT_EQ(finished.phase, RoomPhase::Finished);
+    EXPECT_EQ(finished.phase, service::lobby::RoomPhase::Finished);
     EXPECT_EQ(finished.snapshot, frozen);
     ASSERT_TRUE(finished.settlement);
     EXPECT_EQ(
@@ -1855,7 +1896,7 @@ TEST_F(
     for (const auto cutoff : {200ms, 500ms, 1000ms, 2000ms})
     {
         const auto status = query(alice, cutoff);
-        EXPECT_EQ(status.phase, RoomPhase::Settling);
+        EXPECT_EQ(status.phase, service::lobby::RoomPhase::Settling);
         EXPECT_FALSE(status.settlement);
     }
     EXPECT_EQ(writes.size(), 1U);
@@ -1916,7 +1957,7 @@ TEST_F(
         write.complete(true);
     }
     const auto status = query(alice, 950ms);
-    EXPECT_EQ(status.phase, RoomPhase::Settling);
+    EXPECT_EQ(status.phase, service::lobby::RoomPhase::Settling);
     EXPECT_FALSE(status.settlement);
     EXPECT_TRUE(online->managedRoom(allocation.roomId));
     EXPECT_EQ(rooms->metrics().persistenceRejected, 3U);
@@ -1947,10 +1988,16 @@ TEST_F(
     at(250ms);
     ASSERT_EQ(writes.size(), 2U);
     writes.front().complete(true);
-    EXPECT_EQ(query(alice, 300ms).phase, RoomPhase::Settling);
+    EXPECT_EQ(
+        query(alice, 300ms).phase,
+        service::lobby::RoomPhase::Settling
+    );
     EXPECT_TRUE(online->managedRoom(allocation.roomId));
     writes.back().complete(true);
-    EXPECT_EQ(query(alice, 350ms).phase, RoomPhase::Finished);
+    EXPECT_EQ(
+        query(alice, 350ms).phase,
+        service::lobby::RoomPhase::Finished
+    );
     EXPECT_EQ(rooms->metrics().persistenceCommitted, 1U);
     EXPECT_EQ(rooms->metrics().persistenceRejected, 1U);
     EXPECT_EQ(rooms->metrics().persistenceSubmitted, 1U);
@@ -1993,11 +2040,14 @@ TEST_F(
     const auto allocation = allocate(alice, bob);
     ASSERT_TRUE(rooms->openMatch(allocation));
     const auto settling = query(alice, 50ms);
-    EXPECT_EQ(settling.phase, RoomPhase::Settling);
+    EXPECT_EQ(settling.phase, service::lobby::RoomPhase::Settling);
     EXPECT_FALSE(settling.settlement);
     ASSERT_EQ(writes.size(), 1U);
     const auto& result = writes.front().result;
-    EXPECT_EQ(result.reason, SettlementReason::ReadyTimeout);
+    EXPECT_EQ(
+        result.reason,
+        service::lobby::SettlementReason::ReadyTimeout
+    );
     EXPECT_EQ(result.players.size(), 2U);
     EXPECT_EQ(result.createdUnixMs, 1000U);
     EXPECT_EQ(result.startedUnixMs, 0U);
@@ -2006,7 +2056,10 @@ TEST_F(
     EXPECT_EQ(result.playedTicks, 0U);
     EXPECT_EQ(rooms->metrics().battlesAborted, 0U);
     writes.front().complete(true);
-    EXPECT_EQ(query(alice, 100ms).phase, RoomPhase::Finished);
+    EXPECT_EQ(
+        query(alice, 100ms).phase,
+        service::lobby::RoomPhase::Finished
+    );
     EXPECT_EQ(rooms->metrics().battlesAborted, 1U);
 }
 
@@ -2026,13 +2079,22 @@ TEST_F(
     bothReady(alice, bob, allocation, forming.snapshot.incarnation);
     query(alice, 100ms);
     wallMilliseconds = 2000;
-    EXPECT_EQ(query(alice, 150ms).phase, RoomPhase::Playing);
+    EXPECT_EQ(
+        query(alice, 150ms).phase,
+        service::lobby::RoomPhase::Playing
+    );
     bob.lease->release();
     wallMilliseconds = 500;
-    EXPECT_EQ(query(alice, 250ms).phase, RoomPhase::Settling);
+    EXPECT_EQ(
+        query(alice, 250ms).phase,
+        service::lobby::RoomPhase::Settling
+    );
     ASSERT_EQ(writes.size(), 1U);
     const auto& result = writes.front().result;
-    EXPECT_EQ(result.reason, SettlementReason::MemberUnavailable);
+    EXPECT_EQ(
+        result.reason,
+        service::lobby::SettlementReason::MemberUnavailable
+    );
     EXPECT_EQ(result.players.size(), 2U);
     EXPECT_EQ(result.createdUnixMs, 1000U);
     EXPECT_EQ(result.startedUnixMs, 2000U);
@@ -2040,7 +2102,10 @@ TEST_F(
     EXPECT_GT(result.startedTick, 0U);
     EXPECT_GT(result.playedTicks, 0U);
     writes.front().complete(true);
-    EXPECT_EQ(query(alice, 300ms).phase, RoomPhase::Finished);
+    EXPECT_EQ(
+        query(alice, 300ms).phase,
+        service::lobby::RoomPhase::Finished
+    );
 }
 
 TEST_F(

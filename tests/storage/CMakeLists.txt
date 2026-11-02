@@ -123,6 +123,9 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
             --pg-bin "${ARENA_POSTGRES_BIN}"
             --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
             --gateway "$<TARGET_FILE:ArenaServer>"
+            --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+            --lobby-descriptor "${PROJECT_BINARY_DIR}/services/lobby/generated/lobby-private.desc"
+            --replay-export "$<TARGET_FILE:arena_replay_export>" --replay "$<TARGET_FILE:arena_replay>"
             --report "${CMAKE_CURRENT_BINARY_DIR}/persistent-gateway-report.json")
         if(ARENA_POSTGRES_SHARE)
             list(APPEND persistent_gateway_arguments --pg-share "${ARENA_POSTGRES_SHARE}")

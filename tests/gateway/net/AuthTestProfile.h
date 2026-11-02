@@ -3,11 +3,12 @@
 #include <chrono>
 #include <iostream>
 
-#include "net/LoginHandler.h"
-#include "net/MatchmakingService.h"
-#include "net/OnlineRegistry.h"
 #include "net/PreLoginHandshake.h"
-#include "net/RoomService.h"
+
+#include "gateway_test/LoginHandler.h"
+#include "lobby/MatchmakingService.h"
+#include "lobby/OnlineRegistry.h"
+#include "lobby/RoomService.h"
 
 namespace service::gateway
 {
@@ -62,10 +63,10 @@ public:
 };
 
 inline ConnectionHandlerFactory makeAuthTestFactory(
-    std::shared_ptr<OnlineRegistry> registry = {},
+    std::shared_ptr<service::lobby::OnlineRegistry> registry = {},
     bool presence = false,
-    std::shared_ptr<MatchmakingService> matcher = {},
-    std::shared_ptr<RoomService> rooms = {}
+    std::shared_ptr<service::lobby::MatchmakingService> matcher = {},
+    std::shared_ptr<service::lobby::RoomService> rooms = {}
 )
 {
     auto passwords = std::make_shared<
@@ -92,7 +93,7 @@ inline ConnectionHandlerFactory makeAuthTestFactory(
                        .count();
         };
     if (!registry)
-        registry = std::make_shared<OnlineRegistry>();
+        registry = std::make_shared<service::lobby::OnlineRegistry>();
     auto routes = makeLoginMessageRegistry(
         std::move(passwords),
         std::make_shared<service::auth::JwtTokens>(std::move(config)),
@@ -108,13 +109,16 @@ inline ConnectionHandlerFactory makeAuthTestFactory(
         );
     };
 }
-inline void printOnlineTestCounts(const OnlineRegistry& registry)
+inline void
+printOnlineTestCounts(const service::lobby::OnlineRegistry& registry)
 {
     std::cerr << "ONLINE_COUNTS active=" << registry.activeCount()
               << " retained=" << registry.retainedCount()
               << " rooms=" << registry.roomCount() << std::endl;
 }
-inline void printMatchTestCounts(const MatchmakingService& matcher)
+inline void printMatchTestCounts(
+    const service::lobby::MatchmakingService& matcher
+)
 {
     const auto m = matcher.metrics();
     std::cerr << "MATCH_COUNTS joined=" << m.joined
@@ -147,7 +151,8 @@ inline void printMatchTestCounts(const MatchmakingService& matcher)
     histogram("abandoned_wait", m.abandonedWait);
     std::cerr << std::endl;
 }
-inline void printRoomTestCounts(const RoomService& rooms)
+inline void
+printRoomTestCounts(const service::lobby::RoomService& rooms)
 {
     const auto metrics = rooms.metrics();
     std::cerr << "ROOM_COUNTS actors=" << metrics.actors

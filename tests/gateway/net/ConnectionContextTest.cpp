@@ -10,9 +10,9 @@
 
 #include "net/ConnectionHost.h"
 #include "net/MessageRegistry.h"
-#include "net/OnlineRegistry.h"
 
 #include "ProtocolTestHarness.h"
+#include "lobby/OnlineRegistry.h"
 #include "runtime/OwnerScheduler.h"
 
 using namespace service::gateway;
@@ -329,7 +329,8 @@ TEST(
     config.key = "0123456789abcdef0123456789abcdef"; // Test-only key.
     config.now = [] { return std::int64_t{1700000000}; };
     service::auth::JwtTokens tokens(std::move(config));
-    auto accounts = std::make_shared<OnlineRegistry>();
+    auto
+        accounts = std::make_shared<service::lobby::OnlineRegistry>();
     auto context = std::make_shared<ConnectionContext>(
         100,
         InetAddress("127.0.0.1", 1234),
@@ -346,7 +347,13 @@ TEST(
         staleClose
     );
     ASSERT_TRUE(grant);
-    ASSERT_TRUE(context->session->bind(grant->lease));
+    ASSERT_TRUE(context->session->bind(
+        ConnectionSession::Projection{
+            grant->lease->binding,
+            [lease = grant->lease] { return lease->current(); },
+            [lease = grant->lease] { lease->release(); }
+        }
+    ));
     EXPECT_EQ(accounts->activeCount(), 1U);
     std::weak_ptr<const ConnectionContext> observed = context;
     std::weak_ptr<ConnectionSession> session = context->session;
@@ -380,7 +387,8 @@ TEST(
     config.key = "0123456789abcdef0123456789abcdef";
     config.now = [] { return std::int64_t{1700000000}; };
     service::auth::JwtTokens tokens(std::move(config));
-    auto registry = std::make_shared<OnlineRegistry>();
+    auto
+        registry = std::make_shared<service::lobby::OnlineRegistry>();
     ConnectionSession session;
     EXPECT_FALSE(session.binding());
     auto grant = registry->install(
@@ -391,7 +399,13 @@ TEST(
         [] {}
     );
     ASSERT_TRUE(grant);
-    ASSERT_TRUE(session.bind(grant->lease));
+    ASSERT_TRUE(session.bind(
+        ConnectionSession::Projection{
+            grant->lease->binding,
+            [lease = grant->lease] { return lease->current(); },
+            [lease = grant->lease] { lease->release(); }
+        }
+    ));
     const auto current = session.binding();
     ASSERT_TRUE(current);
     EXPECT_EQ(current->playerId, arena::domain::PlayerId{42});

@@ -15,9 +15,11 @@ namespace service::gateway
 // Every real transport runs the same protocol profiles.
 inline ConnectionHandlerFactory transportTestProfile(
     std::string_view mode,
-    std::shared_ptr<OnlineRegistry>* onlineOut = nullptr,
-    std::shared_ptr<MatchmakingService>* matcherOut = nullptr,
-    std::shared_ptr<RoomService>* roomsOut = nullptr
+    std::shared_ptr<service::lobby::OnlineRegistry>* onlineOut =
+        nullptr,
+    std::shared_ptr<service::lobby::MatchmakingService>* matcherOut =
+        nullptr,
+    std::shared_ptr<service::lobby::RoomService>* roomsOut = nullptr
 )
 {
     if (onlineOut)
@@ -31,15 +33,14 @@ inline ConnectionHandlerFactory transportTestProfile(
     if (mode == "auth" || mode == "presence" || mode == "match" ||
         mode == "room")
     {
-        OnlineRegistryConfig config;
+        service::lobby::OnlineRegistryConfig config;
         if (mode != "auth")
             config.grace = std::chrono::milliseconds(1000);
-        auto registry = std::make_shared<OnlineRegistry>(
-            std::move(config)
-        );
+        auto registry = std::make_shared<
+            service::lobby::OnlineRegistry>(std::move(config));
         if (onlineOut)
             *onlineOut = registry;
-        std::shared_ptr<MatchmakingService> matcher;
+        std::shared_ptr<service::lobby::MatchmakingService> matcher;
         if (mode == "match")
         {
             service::match::QueueConfig queue;
@@ -49,7 +50,8 @@ inline ConnectionHandlerFactory transportTestProfile(
             queue.maximumWindow = 300;
             queue.timeout = std::chrono::milliseconds(1000);
             queue.retention = std::chrono::milliseconds(1000);
-            matcher = std::make_shared<MatchmakingService>(
+            matcher = std::make_shared<
+                service::lobby::MatchmakingService>(
                 registry,
                 [](arena::domain::PlayerId player)
                     -> std::optional<std::uint32_t>
@@ -68,10 +70,12 @@ inline ConnectionHandlerFactory transportTestProfile(
             if (matcherOut)
                 *matcherOut = matcher;
         }
-        std::shared_ptr<RoomService> rooms;
+        std::shared_ptr<service::lobby::RoomService> rooms;
         if (mode == "room")
         {
-            rooms = std::make_shared<RoomService>(registry);
+            rooms = std::make_shared<service::lobby::RoomService>(
+                registry
+            );
             if (roomsOut)
                 *roomsOut = rooms;
         }

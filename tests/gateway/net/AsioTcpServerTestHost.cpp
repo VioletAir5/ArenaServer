@@ -9,10 +9,10 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include "net/AsioTcpServer.h"
-#include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
 
 #include "TransportTestProfile.h"
+#include "gateway_test/OnlineRegistryMaintenance.h"
 #include "runtime/OwnerScheduler.h"
 
 int main(int argc, char** argv)
@@ -21,9 +21,9 @@ int main(int argc, char** argv)
     {
         return 2;
     }
-    std::shared_ptr<service::gateway::OnlineRegistry> online;
-    std::shared_ptr<service::gateway::MatchmakingService> matcher;
-    std::shared_ptr<service::gateway::RoomService> rooms;
+    std::shared_ptr<service::lobby::OnlineRegistry> online;
+    std::shared_ptr<service::lobby::MatchmakingService> matcher;
+    std::shared_ptr<service::lobby::RoomService> rooms;
     service::gateway::ConnectionHandlerFactory handlerFactory;
     if (argc == 5)
     {

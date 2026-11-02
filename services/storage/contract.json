@@ -29,9 +29,9 @@
       "owner": "storage",
       "logical_owner": "storage",
       "callers": [
-        "gateway",
         "operations",
-        "auth"
+        "auth",
+        "lobby"
       ],
       "handler": "_ready",
       "request": null,
@@ -50,7 +50,6 @@
       "owner": "storage",
       "logical_owner": "auth",
       "callers": [
-        "gateway",
         "auth"
       ],
       "target_callers": [
@@ -75,7 +74,7 @@
       "owner": "storage",
       "logical_owner": "lobby",
       "callers": [
-        "gateway"
+        "lobby"
       ],
       "target_callers": [
         "lobby"
@@ -99,7 +98,7 @@
       "owner": "storage",
       "logical_owner": "match",
       "callers": [
-        "gateway"
+        "lobby"
       ],
       "handler": "_allocate",
       "request": "AllocateIdsRequest",
@@ -121,7 +120,7 @@
       "owner": "storage",
       "logical_owner": "room",
       "callers": [
-        "gateway"
+        "lobby"
       ],
       "handler": "_save",
       "request": "SaveResultRequest",
@@ -150,7 +149,7 @@
       "owner": "storage",
       "logical_owner": "room",
       "callers": [
-        "gateway"
+        "lobby"
       ],
       "handler": "_match",
       "request": "MatchGetRequest",
@@ -171,7 +170,7 @@
       "owner": "storage",
       "logical_owner": "storage",
       "callers": [
-        "gateway"
+        "lobby"
       ],
       "handler": "_settlement",
       "request": "SettlementGetRequest",

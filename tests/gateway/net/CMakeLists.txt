@@ -3,7 +3,7 @@ arena_collect_tests()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 add_executable(arena_tcp_server_test_host TcpServerTestHost.cpp)
-target_link_libraries(arena_tcp_server_test_host PRIVATE arena_gateway)
+target_link_libraries(arena_tcp_server_test_host PRIVATE arena_gateway arena_gateway_test_support)
 target_compile_options(arena_tcp_server_test_host PRIVATE
     -Wall
     -Wextra
@@ -117,7 +117,7 @@ foreach(scenario churn limit slow stream idle rst stop stop_fast)
 endforeach()
 
 add_executable(arena_asio_tcp_server_test_host AsioTcpServerTestHost.cpp)
-target_link_libraries(arena_asio_tcp_server_test_host PRIVATE arena_gateway)
+target_link_libraries(arena_asio_tcp_server_test_host PRIVATE arena_gateway arena_gateway_test_support)
 target_compile_options(arena_asio_tcp_server_test_host PRIVATE
     -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
@@ -153,7 +153,7 @@ foreach(backend epoll asio)
 endforeach()
 
 add_executable(arena_websocket_test_host WebSocketTestHost.cpp)
-target_link_libraries(arena_websocket_test_host PRIVATE arena_gateway)
+target_link_libraries(arena_websocket_test_host PRIVATE arena_gateway arena_gateway_test_support)
 target_compile_options(arena_websocket_test_host PRIVATE
     -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>
@@ -291,9 +291,9 @@ add_test(NAME ChaosRun_WebSocketFraming
 set_tests_properties(ChaosRun_WebSocketFraming PROPERTIES
     TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;chaos;websocket")
 
-# Exercise actual application assembly, signals and shared listener budgets.
+# Raw lifecycle and Gateway-owned invalid configuration require no business stack.
 add_dependencies(arena_tests ArenaServer)
-foreach(scenario epoll asio invalid shared_ws authenticated_shutdown)
+foreach(scenario epoll asio invalid)
     add_test(NAME ApplicationLifecycle_${scenario}
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/ApplicationLifecycleIntegrationTest.py"
@@ -301,3 +301,46 @@ foreach(scenario epoll asio invalid shared_ws authenticated_shutdown)
     set_tests_properties(ApplicationLifecycle_${scenario} PROPERTIES
         TIMEOUT 30 RUN_SERIAL TRUE LABELS "integration;network;application")
 endforeach()
+
+# Production handshake requires real independent Lobby/Auth/Storage and private PG.
+if(ARENA_ENABLE_POSTGRES_TESTS)
+    set(application_python "${Python3_EXECUTABLE}")
+    if(ARENA_POSTGRES_TEST_PYTHON)
+        set(application_python "${ARENA_POSTGRES_TEST_PYTHON}")
+    endif()
+    set(application_pg_bin "${ARENA_POSTGRES_BIN}")
+    if(NOT application_pg_bin)
+        find_program(ARENA_APPLICATION_PG_CONFIG pg_config REQUIRED)
+        execute_process(COMMAND "${ARENA_APPLICATION_PG_CONFIG}" --bindir
+            OUTPUT_VARIABLE application_pg_bin OUTPUT_STRIP_TRAILING_WHITESPACE
+            COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+    set(application_arguments --repository-root "${PROJECT_SOURCE_DIR}"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
+        --pg-bin "${application_pg_bin}")
+    if(ARENA_POSTGRES_SHARE)
+        list(APPEND application_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+    endif()
+    if(ARENA_POSTGRES_LIB)
+        list(APPEND application_arguments --pg-lib "${ARENA_POSTGRES_LIB}")
+    endif()
+    set(application_clock)
+    if(TARGET arena_test_clock)
+        list(APPEND application_clock "${application_python}"
+            "${PROJECT_SOURCE_DIR}/tests/shared/clock/RunWithClock.py"
+            --clock-shim "$<TARGET_FILE:arena_test_clock>"
+            --sanitizer-binary "$<TARGET_FILE:ArenaServer>" --)
+        add_dependencies(arena_tests arena_test_clock)
+    endif()
+    add_dependencies(arena_tests ArenaAuth ArenaLobby)
+    foreach(scenario shared_ws authenticated_shutdown)
+        add_test(NAME ApplicationLifecycle_${scenario}
+            COMMAND ${application_clock} "${application_python}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ApplicationLifecycleIntegrationTest.py"
+                "$<TARGET_FILE:ArenaServer>" ${scenario} ${application_arguments}
+                --report "${CMAKE_CURRENT_BINARY_DIR}/application-${scenario}-report.json")
+        set_tests_properties(ApplicationLifecycle_${scenario} PROPERTIES
+            TIMEOUT 120 RUN_SERIAL TRUE LABELS "integration;network;application;process;postgresql")
+    endforeach()
+endif()

@@ -1,5 +1,5 @@
 add_executable(arena_match_tests MatchQueueTest.cpp MatchmakingServiceTest.cpp)
-target_link_libraries(arena_match_tests PRIVATE arena_gateway GTest::gtest_main)
+target_link_libraries(arena_match_tests PRIVATE arena_gateway arena_gateway_test_support GTest::gtest_main)
 target_compile_options(arena_match_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 target_link_options(arena_match_tests PRIVATE

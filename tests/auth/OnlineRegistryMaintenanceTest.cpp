@@ -1,4 +1,4 @@
-#include "net/OnlineRegistryMaintenance.h"
+#include "gateway_test/OnlineRegistryMaintenance.h"
 
 #include <chrono>
 #include <memory>
@@ -61,7 +61,8 @@ TEST(
 )
 {
     FakeTimers timer;
-    auto registry = std::make_shared<OnlineRegistry>();
+    auto
+        registry = std::make_shared<service::lobby::OnlineRegistry>();
     EXPECT_THROW(
         (OnlineRegistryMaintenance({}, timer.scheduler())),
         std::invalid_argument
@@ -87,14 +88,14 @@ TEST(
 {
     auto now = std::chrono::steady_clock::time_point{};
     int clockReads = 0;
-    OnlineRegistryConfig config;
+    service::lobby::OnlineRegistryConfig config;
     config.grace = 10ms;
     config.now = [&]
     {
         ++clockReads;
         return now;
     };
-    auto registry = std::make_shared<OnlineRegistry>(
+    auto registry = std::make_shared<service::lobby::OnlineRegistry>(
         std::move(config)
     );
     auto auth = tokens();
@@ -139,7 +140,8 @@ TEST(
     StopPreservesPendingAuthButShutdownClearsEverything
 )
 {
-    auto registry = std::make_shared<OnlineRegistry>();
+    auto
+        registry = std::make_shared<service::lobby::OnlineRegistry>();
     auto auth = tokens();
     auto grant = registry->install(
         arena::domain::PlayerId{42},
@@ -177,7 +179,7 @@ TEST(
 {
     FakeTimers timer;
     OnlineRegistryMaintenance upkeep(
-        std::make_shared<OnlineRegistry>(),
+        std::make_shared<service::lobby::OnlineRegistry>(),
         timer.scheduler()
     );
     std::thread foreign(
@@ -195,13 +197,13 @@ TEST(
 {
     FakeTimers timer;
     int clockReads = 0;
-    OnlineRegistryConfig config;
+    service::lobby::OnlineRegistryConfig config;
     config.now = [&]
     {
         ++clockReads;
         return std::chrono::steady_clock::now();
     };
-    auto registry = std::make_shared<OnlineRegistry>(
+    auto registry = std::make_shared<service::lobby::OnlineRegistry>(
         std::move(config)
     );
     {
@@ -219,7 +221,8 @@ TEST(
 {
     FakeTimers timer;
     timer.failAt = 2;
-    auto registry = std::make_shared<OnlineRegistry>();
+    auto
+        registry = std::make_shared<service::lobby::OnlineRegistry>();
     auto auth = tokens();
     auto grant = registry->install(
         arena::domain::PlayerId{42},
@@ -246,7 +249,8 @@ TEST(
 )
 {
     boost::asio::io_context context;
-    auto registry = std::make_shared<OnlineRegistry>();
+    auto
+        registry = std::make_shared<service::lobby::OnlineRegistry>();
     OnlineRegistryMaintenance upkeep(
         registry,
         arena::runtime::ownerScheduler(context.get_executor())

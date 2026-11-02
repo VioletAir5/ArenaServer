@@ -111,19 +111,48 @@ class Acceptance:
     async def sessions(self):
         store = self.store(namespace="sessions")
         record = self.rs.SessionProjection((1 << 64)-1, (1 << 64)-2, (1 << 64)-3, (1 << 64)-4)
-        require(await store.put_session(record, ttl_ms=120), "session write failed")
+        key = store._session_key(record.player_id)
+        initial_ttl, renewed_ttl, expiry_ttl = 5000, 10000, 120
+        require(await store.put_session(record, ttl_ms=initial_ttl), "session write failed")
         require(await store.get_session(record.player_id) == record, "uint64 session changed")
-        require(not await store.put_session(self.rs.SessionProjection(record.player_id, 7, 1), ttl_ms=1000),
+        require(not await store.put_session(self.rs.SessionProjection(record.player_id, 7, 1), ttl_ms=15000),
                 "stale epoch overwrote current session")
         require(not await store.delete_session(record.player_id, 7, 1), "stale delete removed current session")
-        require(not await store.touch_session(record.player_id, 7, 1, ttl_ms=1000), "stale touch extended session")
-        await asyncio.sleep(.07)
-        require(await store.touch_session(record.player_id, record.session_id, record.epoch, ttl_ms=180),
-                "current owner did not renew")
-        await asyncio.sleep(.09)
-        require(await store.get_session(record.player_id) == record, "renewal expired too early")
-        await asyncio.sleep(.12)
-        require(await store.get_session(record.player_id) is None, "session did not expire")
+        require(not await store.touch_session(record.player_id, 7, 1, ttl_ms=15000), "stale touch extended session")
+        before_renewal = await store._client.pttl(key)
+        require(0 < before_renewal <= initial_ttl, "fixture lease expired or stale CAS extended its TTL")
+        renewal_started = time.monotonic()
+        require(await store.touch_session(record.player_id, record.session_id, record.epoch, ttl_ms=renewed_ttl),
+                "current owner did not renew a live fixture lease")
+        after_renewal = await store._client.pttl(key)
+        require(initial_ttl < after_renewal <= renewed_ttl, "current owner did not extend the actual Redis TTL")
+        require(await store.get_session(record.player_id) == record, "renewal changed the session projection")
+
+        renewal_finished = time.monotonic()
+
+        # Expiry is independent of the time spent checking CAS and renewal.
+        # Poll read-only state until the physical key is gone: PTTL=0 is still
+        # a sub-millisecond live Redis lease, even if get_session returns None.
+        require(await store.touch_session(record.player_id, record.session_id, record.epoch, ttl_ms=expiry_ttl),
+                "current owner could not set a finite expiry on its live lease")
+        expiry_started = time.monotonic()
+        deadline = expiry_started + 2
+        expiry_polls = 0
+        while True:
+            observed = await store.get_session(record.player_id)
+            remaining = await store._client.pttl(key)
+            expiry_polls += 1
+            require(observed in (record, None), "expiring session projection changed")
+            require(remaining == -2 or 0 <= remaining <= expiry_ttl, "session lost its bounded expiry")
+            if observed is None and remaining == -2:
+                break
+            require(time.monotonic() < deadline, "session did not expire within the bounded observation window")
+            await asyncio.sleep(.01)
+        expiry_finished = time.monotonic()
+        require(not await store.touch_session(record.player_id, record.session_id, record.epoch, ttl_ms=initial_ttl),
+                "expired owner resurrected a reclaimed session")
+        require(await store.get_session(record.player_id) is None and await store._client.pttl(key) == -2,
+                "expired touch recreated a session key")
         for i in range(1, 21):
             await store.put_session(self.rs.SessionProjection(i, i+100, i+200), ttl_ms=1000)
         order = (10, 1, 999, 20, 10)
@@ -132,7 +161,11 @@ class Acceptance:
                 "pipeline reordered or conflated duplicate/missing results")
         require(await store.delete_session(1, 101, 201), "current session delete failed")
         require(await store.get_session(1) is None, "deleted session remained")
-        return dict(expiry_checked=True, renewal_checked=True, batch_order=list(order))
+        return dict(expiry_checked=True, renewal_checked=True, expired_touch_rejected=True,
+                    pttl_before_renewal_ms=before_renewal, pttl_after_renewal_ms=after_renewal,
+                    renewal_elapsed_ms=(renewal_finished-renewal_started)*1000,
+                    expiry_elapsed_ms=(expiry_finished-expiry_started)*1000,
+                    expiry_poll_count=expiry_polls, batch_order=list(order))
 
     async def leaderboard(self):
         store = self.store(namespace="leaderboard", max_members=3, max_batch=4)

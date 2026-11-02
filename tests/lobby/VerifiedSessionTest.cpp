@@ -5,11 +5,10 @@
 
 #include <gtest/gtest.h>
 
-#include "net/OnlineRegistry.h"
+#include "lobby/OnlineRegistry.h"
 
 namespace
 {
-using namespace service::gateway;
 using arena::domain::PlayerId;
 using service::auth::AuthError;
 using service::auth::IssuedToken;
@@ -29,8 +28,8 @@ protected:
             return config;
         }()
     };
-    std::shared_ptr<OnlineRegistry>
-        online = std::make_shared<OnlineRegistry>();
+    std::shared_ptr<service::lobby::OnlineRegistry>
+        online = std::make_shared<service::lobby::OnlineRegistry>();
 
     IssuedToken issue(std::uint64_t player, std::uint64_t epoch)
     {

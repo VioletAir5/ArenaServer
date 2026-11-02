@@ -1,8 +1,11 @@
+add_subdirectory(support/gateway)
+
 add_executable(arena_tests)
 add_executable(arena_perf_tests)
 
 target_link_libraries(arena_tests PRIVATE
     arena_gateway
+    arena_gateway_test_support
     arena_shared
     GTest::gtest_main
 )

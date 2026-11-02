@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual Gateway/two-Storage/private-PG configuration, discovery and drain acceptance."""
+"""Real Gateway/Auth/Lobby/two-Storage configuration, discovery and physical drain acceptance."""
 import argparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -20,9 +20,11 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 for directory in (ROOT, ROOT/'tests/storage', ROOT/'tests/room', ROOT/'tests/auth', ROOT/'tests/gateway/net'):
     sys.path.insert(0, str(directory))
-from PersistentGatewayTest import Acceptance as Journey
+from PersistentGatewayTest import Acceptance as Journey, add_arguments, source_hashes
 from StorageMigrationTest import require, run
 from TcpServerIntegrationTest import reserve_port
+from RoomIntegrationTest import unsigned_field
+from OnlinePresenceIntegrationTest import scalar
 
 
 def health_http(port, path='/health/config', timeout=.7):
@@ -64,8 +66,8 @@ class StorageNode:
 
     def start(self):
         write_config(self.config_path, self.test.manifest(1))
-        environment = self.test.cluster.environment(self.test.storage.database)
-        environment.update(ARENA_INTERNAL_TOKEN=self.test.storage.token,
+        environment = self.test.environment()
+        environment.update(ARENA_STORAGE_CALLER_TOKENS=json.dumps(dict(auth=self.test.storage_token,lobby=self.test.other_token)),
             ARENA_RUNTIME_CONFIG=str(self.config_path), ARENA_HEALTH_PORT=str(self.health_port),
             ARENA_NODE_ID=self.name, PYTHONDONTWRITEBYTECODE='1')
         self.stream = self.log_path.open('w')
@@ -114,35 +116,41 @@ class StorageNode:
 
 
 class Acceptance(Journey):
+
     def __init__(self, args):
         super().__init__(args)
-        self.ports = set()
-        self.nodes = [StorageNode(self, name, self.port(), self.port()) for name in ('node-a', 'node-b')]
-        self.health_port = self.port()
-        self.gateway_config = self.cluster.root/'gateway-runtime.json'
+        self.used_ports = set(self.ports.values())
+        self.nodes = [StorageNode(self,'node-a',self.ports['storage'],self.ports['storage-health']),
+                      StorageNode(self,'node-b',self.port(),self.port())]
+        self.health_port = self.ports['gateway-health']
+        self.gateway_config = self.configs['gateway']
         self.gateway_version, self.current = 1, None
+        self.role_versions = dict(auth=1,lobby=1)
+        self.ready_ticks = 100
         self.report.update(clock_fixture=dict(common_origin=bool(os.environ.get('ARENA_TEST_CLOCK_REALTIME_NS'))),
                            parent_fd_baseline=len(os.listdir('/proc/self/fd')))
 
     def port(self):
         while True:
             value = reserve_port()
-            if value not in self.ports:
-                self.ports.add(value)
+            if value not in self.used_ports:
+                self.used_ports.add(value)
                 return value
 
-    def manifest(self, version, selected=None, *, desired=True, grace=5000):
+
+    def manifest(self, version=1, selected=None, *, desired=True, grace=5000):
         return dict(version=str(version), desiredReady=desired, drainGraceMs=grace,
-            nodes=[dict(service='storage', nodeId=node.name, host='127.0.0.1', port=node.port,
-                        ready=selected is None or index == selected) for index,node in enumerate(self.nodes)])
+            nodes=[dict(service='storage',nodeId=node.name,host='127.0.0.1',port=node.port,
+                        ready=selected is None or index == selected) for index,node in enumerate(self.nodes)]
+                + [dict(service=role,nodeId=role+'-smoke',host='127.0.0.1',
+                        port=self.ports[role],ready=True) for role in ('auth','lobby','gateway')])
 
     def until(self, action, description, timeout=5, *, processes=True):
         deadline, last = time.monotonic()+timeout, None
         while time.monotonic() < deadline:
             if processes:
                 children = [node.process for node in self.nodes if node.process is not None]
-                if self.gateway is not None:
-                    children.append(self.gateway)
+                children.extend(child.process for child in self.children.values() if child.process is not None)
                 require(all(child.poll() is None for child in children), 'child exited during '+description)
             try:
                 result = action()
@@ -153,59 +161,73 @@ class Acceptance(Journey):
             time.sleep(.005)
         raise AssertionError('timed out: '+description+(' ('+last+')' if last else ''))
 
+
     def setup(self):
         self.cluster.start()
-        self.cluster.create(self.storage.database)
+        self.cluster.create(self.database)
         migrated = run([sys.executable,self.args.repository_root/'services/storage/migrate.py','up'],
-                       self.cluster.environment(self.storage.database),timeout=95)
+                       self.cluster.environment(self.database),timeout=95)
         require(migrated.returncode == 0, 'private migration failed: '+migrated.stderr)
         self.cluster.sql((self.args.repository_root/'services/storage/fixtures/seed.sql').read_text(),
-                         self.storage.database,single=True)
+                         self.database,single=True)
         salt = secrets.token_bytes(16)
         key = hashlib.pbkdf2_hmac('sha256', b'test-password', salt,100000,32)
         digest = '$arena-pbkdf2-sha256$100000$'+salt.hex()+'$'+key.hex()
         self.query("UPDATE arena.account SET password_digest=%s WHERE account_name IN ('alice','bob')",(digest,))
         self.query('UPDATE arena.player SET mmr=CASE player_id WHEN 42 THEN 1440 ELSE 1480 END WHERE player_id IN(42,43)')
         self.initial = self.query('SELECT player_id,quantity FROM arena.inventory WHERE item_id=1 AND player_id IN(42,43) ORDER BY player_id')
+        self.current = self.manifest(1,0)
+        for path in self.configs.values():
+            write_config(path,self.current)
         for node in self.nodes:
             node.start()
-        self.storage.port = self.nodes[0].port
+        self.children['auth'].start()
+        self.children['lobby'].start()
         self.start_gateway()
+        pids=[self.gateway.pid,self.children['auth'].process.pid,self.children['lobby'].process.pid,
+              *(node.process.pid for node in self.nodes)]
+        require(len(set(pids)) == 5,'discovery fixture did not use five independent service processes')
+        self.report['service_pids']=pids
+
 
     def start_gateway(self, *, ready_ticks=100):
-        self.counter += 1
-        self.tcp,self.ws = self.port(),self.port()
-        self.current = self.manifest(self.gateway_version,0)
-        write_config(self.gateway_config,self.current)
-        environment = self.cluster.environment(self.storage.database)
-        environment.pop('ARENA_ACCOUNTS_FILE',None)
-        environment.update(ARENA_JWT_KEY=self.jwt_key,ARENA_INTERNAL_TOKEN=self.storage.token,
-            ARENA_STORAGE_PORT=str(self.nodes[0].port),ARENA_STORAGE_ID_BLOCK='2',
-            ARENA_RUNTIME_CONFIG=str(self.gateway_config),ARENA_HEALTH_PORT=str(self.health_port),
-            ARENA_NODE_ID='gateway-main',ARENA_SETTLEMENT_SPOOL_DIR=str(self.cluster.root/'spool'),
-            ARENA_TCP_PORT=str(self.tcp),ARENA_WS_PORT=str(self.ws),ARENA_BATTLE_TICKS='80',
-            ARENA_READY_TIMEOUT_TICKS=str(ready_ticks),ARENA_DISCONNECT_GRACE_MS='3000',
-            ARENA_REPLAY_DIR=str(self.cluster.root/'replays'),PYTHONDONTWRITEBYTECODE='1')
-        environment.setdefault('UBSAN_OPTIONS','halt_on_error=1:print_stacktrace=1')
-        self.log_path = self.cluster.root/f'gateway-{self.counter}.log'
-        self.log_stream = self.log_path.open('w')
-        self.gateway = subprocess.Popen([str(self.args.gateway),'asio','handshake'],
-            cwd=self.args.repository_root,env=environment,stdin=subprocess.DEVNULL,
-            stdout=self.log_stream,stderr=self.log_stream)
-        self.until(lambda:'GATEWAY_READY' in self.content(),'Gateway startup',8)
-        self.until(lambda:self.health('/health/ready')[0] == 200,'Gateway actual dependency readiness',8)
+        super().start_gateway()
+        self.until(lambda:self.health('/health/ready')[0] == 200,'Gateway real Lobby dependency readiness',8)
 
     def health(self,path='/health/config'):
         return health_http(self.health_port,path)
 
+
     def publish(self,value,timeout=3,*,wait_ready=True):
         started = time.monotonic()
+        def storage_routes(config):
+            return [(node['nodeId'],node['port'],node['ready']) for node in config['nodes']
+                    if node['service'] == 'storage']
+        # Auth owns account discovery; Lobby owns durable IDs/results. Gateway
+        # publishes only its own immutable snapshot and discovers Lobby.
+        if self.current is not None and storage_routes(value) != storage_routes(self.current):
+            for role in ('auth','lobby'):
+                version=self.role_versions[role]+1
+                selected=copy.deepcopy(value)
+                selected.update(version=str(version),desiredReady=True)
+                for node in selected['nodes']:
+                    if node['service'] in ('auth','lobby','gateway'):
+                        node['ready']=True
+                write_config(self.configs[role],selected)
+                self.children[role].process.send_signal(signal.SIGHUP)
+                self.until(lambda role=role,version=version:
+                    int(health_http(self.ports[role+'-health'])[1]['config_version']) == version,
+                    role+' selected-Storage publication',timeout)
+                self.role_versions[role]=version
         write_config(self.gateway_config,value)
         self.gateway.send_signal(signal.SIGHUP)
-        self.until(lambda:int(self.health()[1]['config_version']) == int(value['version']), 'Gateway publication',timeout)
+        self.until(lambda:int(self.health()[1]['config_version']) == int(value['version']),
+                   'Gateway publication',timeout)
         self.current,self.gateway_version = copy.deepcopy(value),int(value['version'])
-        if wait_ready and value['desiredReady'] and any(node['ready'] for node in value['nodes']):
-            self.until(lambda:self.health('/health/ready')[0] == 200,'published route readiness',timeout)
+        available=all(any(node['service'] == role and node['ready'] for node in value['nodes'])
+                      for role in ('lobby','storage'))
+        if wait_ready and value['desiredReady'] and available:
+            self.until(lambda:self.health('/health/ready')[0] == 200,'published dependency readiness',timeout)
         return time.monotonic()-started
 
     def next_manifest(self,selected=0,*,desired=True):
@@ -231,10 +253,10 @@ class Acceptance(Journey):
                    count(before[index],'match.save_result','completions'),'actual result commit on selected Storage')
         after = [other.health()[1] for other in self.nodes]
         require(count(after[index],'account.find') >= count(before[index],'account.find')+2,
-                'selected node did not perform actual Gateway authentication')
+                'selected node did not perform actual Auth-to-Storage authentication')
         require(count(after[1-index],'account.find') == count(before[1-index],'account.find')
                 and count(after[1-index],'match.save_result') == count(before[1-index],'match.save_result'),
-                'Gateway used an unselected Storage for new business')
+                'Auth/Lobby used an unselected Storage for new business')
         self.close_peers()
         return dict(match_id=match,actual_selected_node=node.name,final_checksum=result['checksum'],
                     methods_before=[entry['methods'] for entry in before],methods_after=[entry['methods'] for entry in after])
@@ -246,7 +268,7 @@ class Acceptance(Journey):
         return result
 
     def lock_accounts(self):
-        connection = self.storage.connection()
+        connection = self.db_connection()
         connection.autocommit = False
         connection.execute("SET LOCAL lock_timeout='500ms'")
         connection.execute('LOCK TABLE arena.account IN ACCESS EXCLUSIVE MODE')
@@ -292,10 +314,52 @@ class Acceptance(Journey):
         require(fresh.login(b'bob')['player'] == 43,'new business did not reach replacement route')
         self.close_peers()
         result = self.play(b)
-        self.until(lambda:count(b.health()[1],'match.allocate_ids') > count(before[1],'match.allocate_ids'),
-                   'real ID reservation on node B')
+        burned=self.exhaust_reserved_ids(b,count(before[1],'match.allocate_ids'))
+        result['cancelled_tickets_to_next_real_block']=burned
         result.update(old_admitted_node='node-a',old_call_replayed=False,switch_ms=switch*1000)
         return result
+
+    def exhaust_reserved_ids(self,node,before):
+        peer=self.connect()
+        peer.login()
+        issued=set()
+        initial,_=self.metadata()
+        wait_started=None
+        def replenished():
+            current,_=self.metadata()
+            return (count(node.health()[1],'match.allocate_ids') > before
+                and current.ticket_last > initial.ticket_last
+                and initial.ticket_last < current.ticket_next <= current.ticket_last
+                and health_http(self.ports['lobby-health'],'/health/ready')[0] == 200
+                and self.health('/health/ready')[0] == 200)
+        for index in range(257):
+            current,_=self.metadata()
+            if current.ticket_next > current.ticket_last:
+                # The final cancelled ticket consumed the committed range.
+                # The production owner replenishes it asynchronously; do not
+                # request another logical join before the new WAL ACK.
+                wait_started=time.monotonic()
+                self.until(replenished,'actual B allocation, durable new range and dependency readiness',8)
+                break
+            if count(node.health()[1],'match.allocate_ids') > before:
+                wait_started=time.monotonic()
+                self.until(replenished,'new ID block is durably published after Storage execution',8)
+                break
+            ticket=scalar(peer.match_join(900000+index),2)
+            require(ticket >= initial.ticket_next and ticket not in issued,'durable ticket ID reused')
+            issued.add(ticket)
+            peer.rpc(42,unsigned_field(1,ticket),43)
+        self.until(replenished,'next real Lobby ID block reserved on selected node B',8)
+        current,_=self.metadata()
+        require(current.ticket_last > initial.ticket_last and current.ticket_next > initial.ticket_last,
+                'allocator reservation reused the old durable range')
+        self.report['id_replenishment']=dict(cancelled_tickets=len(issued),
+            previous_first=initial.ticket_next,previous_last=initial.ticket_last,
+            next_first=current.ticket_next,next_last=current.ticket_last,
+            selected_storage=node.name,actual_allocate_observed=True,
+            wait_ms=0 if wait_started is None else (time.monotonic()-wait_started)*1000)
+        self.close_peers()
+        return len(issued)
 
     def assert_new_connection_rejected(self):
         started = time.monotonic()
@@ -366,11 +430,23 @@ class Acceptance(Journey):
         cutoff = time.monotonic()-started
         require(cutoff <= 1,'publication-to-admission cutoff exceeded1s')
         require(self.health('/health/alive')[0] == 200,'missing route killed Gateway liveness')
+        from shared.runtime.rpc import UNAVAILABLE
+        self.expect(self.request(900000),{UNAVAILABLE})
         after = [node.health()[1] for node in self.nodes]
         require(all(count(a,'account.find') == count(b,'account.find') for a,b in zip(after,before)),
                 'empty discovery fell back to legacy endpoint')
         self.publish(self.next_manifest(0))
         peer = self.connect(); grant = peer.login()
+        no_lobby=self.next_manifest(0)
+        for node in no_lobby['nodes']:
+            if node['service'] == 'lobby':
+                node['ready']=False
+        self.publish(no_lobby,wait_ready=False)
+        self.until(lambda:self.health('/health/ready')[0] == 503,'Gateway has no selected Lobby',1)
+        peer.rpc(20,b'',21,error=2002)
+        self.assert_new_connection_rejected()
+        self.publish(self.next_manifest(0))
+        require(peer.query()['session'] == grant['session'],'missing Lobby route destroyed retained session')
         self.publish(self.next_manifest(0,desired=False),wait_ready=False)
         self.until(lambda:self.health('/health/ready')[0] == 503,'manual not-ready state')
         peer.rpc(20,b'',21,error=2002)
@@ -379,7 +455,9 @@ class Acceptance(Journey):
         self.publish(self.next_manifest(0,desired=True))
         require(peer.query()['session'] == grant['session'],'quiesce destroyed retained session')
         own = self.next_manifest(0)
-        own['nodes'].append(dict(service='gateway',nodeId='gateway-main',host='127.0.0.1',port=self.tcp,ready=False))
+        for node in own['nodes']:
+            if node['service'] == 'gateway':
+                node['ready'] = False
         self.publish(own,wait_ready=False)
         self.until(lambda:self.health('/health/ready')[0] == 503,'own Gateway node not-ready')
         require(self.health()[1]['desired_ready'],'own-node rejection incorrectly changed operator intent')
@@ -404,7 +482,7 @@ class Acceptance(Journey):
         write_config(node.config_path,restored);node.process.send_signal(signal.SIGHUP)
         self.until(lambda:node.health('/health/ready')[0] == 200,'Storage unquiesce')
         require(self.direct_find(node).player.player_id == 42,'restored Storage stopped serving')
-        return dict(no_implicit_endpoint_fallback=True,admission_cutoff_ms=cutoff*1000,
+        return dict(no_implicit_endpoint_fallback=True,gateway_lobby_fallback_rejected=True,auth_storage_fallback_rejected=True,admission_cutoff_ms=cutoff*1000,
                     publication_to_cutoff_ms=cutoff*1000,probe_count=probe_count,
                     quiesce_reversible=True,session_preserved=True,gateway_own_node_quiesce=True)
 
@@ -426,13 +504,11 @@ class Acceptance(Journey):
                 else:
                     health = tcp if business == 'tcp' else ws
                 label = kind+'-'+business
-                environment = self.cluster.environment(self.storage.database)
+                environment = self.environment()
                 environment.update(ARENA_TCP_PORT=str(tcp),ARENA_WS_PORT=str(ws),
                     ARENA_HEALTH_PORT=str(health),
                     ARENA_RUNTIME_CONFIG=str(self.gateway_config),ARENA_NODE_ID='gateway-collision',
-                    ARENA_JWT_KEY=self.jwt_key,ARENA_INTERNAL_TOKEN=self.storage.token,
-                    ARENA_STORAGE_PORT=str(self.nodes[0].port),
-                    ARENA_SETTLEMENT_SPOOL_DIR=str(self.cluster.root/('collision-spool-'+label)))
+                    ARENA_LOBBY_PORT=str(self.ports['lobby']),ARENA_LOBBY_TOKEN=self.lobby_token)
                 result = subprocess.run([str(self.args.gateway),'asio','handshake'],
                     cwd=self.args.repository_root,env=environment,stdin=subprocess.DEVNULL,
                     text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=8)
@@ -538,11 +614,11 @@ class Acceptance(Journey):
     def direct_find(self,node):
         async def lookup():
             from shared.runtime.rpc import Client
-            client = Client(self.storage.protocol,'127.0.0.1',node.port,service_token=self.storage.token)
-            payload = self.storage.message('FindAccountRequest',account_name='alice').SerializeToString()
+            client = Client(self.protocol,'127.0.0.1',node.port,service_token=self.storage_token,caller_service='auth',target_service='storage')
+            payload = self.protocol.message('arena.storage.FindAccountRequest')(account_name='alice').SerializeToString()
             response = await client.call('account.find',payload,timeout=2,correlation_id='drain-owned-query')
             require(client.inflight == 0,'direct RPC retained admission')
-            return self.storage.protocol.message('arena.storage.FindAccountReply').FromString(response)
+            return self.protocol.message('arena.storage.FindAccountReply').FromString(response)
         return asyncio.run(lookup())
 
     def terminal_storage_drain(self):
@@ -588,7 +664,7 @@ class Acceptance(Journey):
                                'Gateway not-ready before drain',1)
                     require(self.health('/health/alive')[0] == 200,'Gateway control died before business drain')
                     lock.rollback()
-                    require(pending.result(timeout=3)['player'] == 42,'admitted Gateway authentication abandoned')
+                    require(pending.result(timeout=3)['player'] == 42,'admitted Gateway/Lobby/Auth authentication abandoned')
                     self.stop_gateway()
                     elapsed = time.monotonic()-started
                 finally:
@@ -633,56 +709,52 @@ class Acceptance(Journey):
 
     def close(self):
         errors = []
-        try:
-            self.stop_gateway()
-        except Exception as error:
-            errors.append('Gateway: '+str(error))
+        for role in ('gateway','lobby','auth'):
+            try:
+                if role == 'gateway':
+                    self.stop_gateway()
+                elif role == 'lobby':
+                    self.stop_lobby()
+                else:
+                    self.children[role].stop()
+            except Exception as error:
+                errors.append(role+': '+str(error))
         self.close_peers()
-        if hasattr(self,'log_stream') and not self.log_stream.closed:
-            self.log_stream.close()
         for node in self.nodes:
             try:
                 node.stop()
             except Exception as error:
                 errors.append(node.name+': '+str(error))
         try:
-            destination = self.args.report.parent/(self.args.report.stem+'-logs')
+            destination=self.args.report.parent/(self.args.report.stem+'-logs')
             destination.mkdir(parents=True,exist_ok=True)
-            artifacts = []
-            for index,text in enumerate(self.logs):
-                output = destination/f'gateway-{index+1}.log'
-                output.write_text(text); artifacts.append(str(output))
+            artifacts=[]
             for node in self.nodes:
                 if node.log_path.exists():
-                    output = destination/(node.name+'.log')
-                    output.write_text(node.log_path.read_text(errors='replace'));artifacts.append(str(output))
+                    output=destination/(node.name+'.log')
+                    output.write_text(node.log_path.read_text(errors='replace'))
+                    artifacts.append(str(output))
             if self.cluster.log.exists():
-                output = destination/'postgres.log'
-                output.write_text(self.cluster.log.read_text(errors='replace'));artifacts.append(str(output))
-            self.report['artifacts'] = artifacts
+                output=destination/'postgres.log'
+                output.write_text(self.cluster.log.read_text(errors='replace'))
+                artifacts.append(str(output))
+            self.report['artifacts']=artifacts
         except Exception as error:
-            errors.append('Artifact capture: '+str(error))
+            errors.append('artifact capture: '+str(error))
         try:
-            self.cluster.close()
+            super().close()
         except Exception as error:
-            errors.append('PostgreSQL: '+str(error))
+            errors.append('shared process cleanup: '+str(error))
         require(not errors,'; '.join(errors))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--repository-root',type=Path,default=ROOT)
-    parser.add_argument('--pg-bin',type=Path,required=True)
-    parser.add_argument('--pg-share',type=Path)
-    parser.add_argument('--pg-lib',type=Path)
-    parser.add_argument('--descriptor',type=Path,required=True)
-    parser.add_argument('--gateway',type=Path,required=True)
-    parser.add_argument('--report',type=Path,required=True)
+    add_arguments(parser)
     parser.add_argument('--through',help='Debug only: stop after a named case and mark partial scope')
     args = parser.parse_args()
-    for name in ('repository_root','pg_bin','pg_share','pg_lib','descriptor','gateway','report'):
-        value = getattr(args,name)
-        if value is not None:
+    for name,value in vars(args).items():
+        if isinstance(value,Path):
             setattr(args,name,value.resolve())
     test = Acceptance(args)
     report = test.report
@@ -706,11 +778,11 @@ def main():
         if report['parent_fd_final'] > report['parent_fd_baseline']:
             report.update(passed=False,parent_fd_leak=True)
         names = ['shared/proto/runtime_config.proto','shared/runtime/config.py','shared/runtime/health.py',
-            'services/storage/server.py','services/gateway/app/main.cpp','shared/src/runtime/RuntimeControl.cpp',
-            'shared/src/runtime/RuntimeConfig.cpp','shared/src/rpc/Client.cpp','services/gateway/src/net/PersistentStorage.cpp',
+            'shared/src/runtime/RuntimeControl.cpp','shared/src/runtime/RuntimeConfig.cpp','shared/src/rpc/Client.cpp',
             'tests/runtime/ConfigDiscoveryIntegrationTest.py']
-        report['source_hashes'] = {name:hashlib.sha256((args.repository_root/name).read_bytes()).hexdigest()
-                                  for name in names if (args.repository_root/name).exists()}
+        report['source_hashes'] = source_hashes(args.repository_root)
+        report['source_hashes'].update({name:hashlib.sha256((args.repository_root/name).read_bytes()).hexdigest()
+                                       for name in names if (args.repository_root/name).exists()})
         args.report.parent.mkdir(parents=True,exist_ok=True)
         args.report.write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps({key:report[key] for key in ('passed','cases','error') if key in report},indent=2))

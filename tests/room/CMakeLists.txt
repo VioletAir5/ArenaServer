@@ -1,6 +1,6 @@
 add_executable(arena_room_tests RoomActorTest.cpp RoomServiceTest.cpp
     ReplayFileTest.cpp ReplayAcceptanceTest.cpp ReplayRecorderTest.cpp)
-target_link_libraries(arena_room_tests PRIVATE arena_gateway arena_room GTest::gtest_main)
+target_link_libraries(arena_room_tests PRIVATE arena_gateway arena_gateway_test_support arena_room GTest::gtest_main)
 target_compile_options(arena_room_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 target_link_options(arena_room_tests PRIVATE
@@ -41,18 +41,42 @@ add_test(NAME ReplayToolAcceptance
 set_tests_properties(ReplayToolAcceptance PROPERTIES
     TIMEOUT 180 RUN_SERIAL TRUE LABELS "integration;replay;determinism")
 
-add_dependencies(arena_room_tests ArenaServer)
-set(journey_clock_arguments)
-if(TARGET arena_test_clock)
-    add_dependencies(arena_room_tests arena_test_clock)
-    list(APPEND journey_clock_arguments --clock-shim "$<TARGET_FILE:arena_test_clock>")
+# The production handshake now requires actual independent business processes.
+if(ARENA_ENABLE_POSTGRES_TESTS)
+    set(journey_python "${Python3_EXECUTABLE}")
+    if(ARENA_POSTGRES_TEST_PYTHON)
+        set(journey_python "${ARENA_POSTGRES_TEST_PYTHON}")
+    endif()
+    set(journey_pg_bin "${ARENA_POSTGRES_BIN}")
+    if(NOT journey_pg_bin)
+        find_program(ARENA_JOURNEY_PG_CONFIG pg_config REQUIRED)
+        execute_process(COMMAND "${ARENA_JOURNEY_PG_CONFIG}" --bindir
+            OUTPUT_VARIABLE journey_pg_bin OUTPUT_STRIP_TRAILING_WHITESPACE
+            COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+    set(journey_arguments "$<TARGET_FILE:ArenaServer>" "$<TARGET_FILE:arena_replay>"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
+        --replay-export "$<TARGET_FILE:arena_replay_export>" --pg-bin "${journey_pg_bin}"
+        --report-dir "${CMAKE_CURRENT_BINARY_DIR}/full-journey-report")
+    if(ARENA_POSTGRES_SHARE)
+        list(APPEND journey_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+    endif()
+    set(journey_clock)
+    if(TARGET arena_test_clock)
+        list(APPEND journey_clock "${journey_python}"
+            "${PROJECT_SOURCE_DIR}/tests/shared/clock/RunWithClock.py"
+            --clock-shim "$<TARGET_FILE:arena_test_clock>"
+            --sanitizer-binary "$<TARGET_FILE:ArenaServer>" --)
+        add_dependencies(arena_room_tests arena_test_clock)
+    endif()
+    add_dependencies(arena_room_tests ArenaServer ArenaAuth ArenaLobby arena_replay_export)
+    add_test(NAME FullJourneyProductionGateway
+        COMMAND ${journey_clock} "${journey_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/FullJourneyIntegrationTest.py" ${journey_arguments})
+    set_tests_properties(FullJourneyProductionGateway PROPERTIES
+        TIMEOUT 120 RUN_SERIAL TRUE LABELS "integration;network;journey;postgresql;process")
 endif()
-add_test(NAME FullJourneyProductionGateway
-    COMMAND "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/FullJourneyIntegrationTest.py"
-        "$<TARGET_FILE:ArenaServer>" "$<TARGET_FILE:arena_replay>" ${journey_clock_arguments})
-set_tests_properties(FullJourneyProductionGateway PROPERTIES
-    TIMEOUT 60 RUN_SERIAL TRUE LABELS "integration;network;journey")
 add_executable(arena_room_recovery_tests RoomRecoveryTest.cpp)
 target_link_libraries(arena_room_recovery_tests PRIVATE arena_room GTest::gtest_main)
 target_compile_options(arena_room_recovery_tests PRIVATE -Wall -Wextra -Wpedantic

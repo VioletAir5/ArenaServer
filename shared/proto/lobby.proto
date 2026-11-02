@@ -1,0 +1,38 @@
+syntax = "proto3";
+package arena.lobby;
+import "envelope.proto";
+
+// Gateway supplies physical identity; public client payloads cannot override it.
+message ExecuteRequest {
+  string gateway_instance = 1;
+  uint64 connection_id = 2;
+  arena.protocol.Envelope message = 3;
+  uint64 player_id = 4;
+  uint64 session_epoch = 5;
+}
+message SessionProjection {
+  uint64 player_id = 1;
+  uint64 epoch = 2;
+  int64 expires_at_unix = 3;
+  uint64 session_id = 4;
+}
+message ExecuteReply {
+  arena.protocol.Envelope message = 1;
+  SessionProjection session = 2;
+  uint64 committed_revision = 3;
+}
+message DetachRequest {
+  string gateway_instance = 1;
+  uint64 connection_id = 2;
+  uint64 player_id = 3;
+  uint64 session_epoch = 4;
+}
+message DetachReply { uint64 committed_revision = 1; }
+message HeartbeatRequest {
+  string gateway_instance = 1;
+  repeated uint64 connection_ids = 2;
+}
+message HeartbeatReply {
+  repeated uint64 revoked_connection_ids = 1;
+  uint64 committed_revision = 2;
+}

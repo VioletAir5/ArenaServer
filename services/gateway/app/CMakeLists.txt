@@ -1,3 +1,5 @@
+find_package(OpenSSL REQUIRED)
+
 # Builds the gateway application executable.
 add_executable(ArenaServer
     main.cpp
@@ -5,6 +7,7 @@ add_executable(ArenaServer
 
 target_link_libraries(ArenaServer PRIVATE
     arena_gateway
+    OpenSSL::Crypto
 )
 
 target_compile_options(ArenaServer PRIVATE

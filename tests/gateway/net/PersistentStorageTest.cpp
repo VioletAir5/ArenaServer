@@ -1,4 +1,4 @@
-#include "net/PersistentStorage.h"
+#include "gateway_test/PersistentStorage.h"
 
 #include <sys/socket.h>
 #include <unistd.h>
@@ -53,7 +53,8 @@ struct Peer
         holdResults{false}, dropOnce{false};
     std::atomic<int> resultStatus{arena::rpc::OK}, accounts{0},
         saves{0}, mutations{0};
-    std::atomic<bool> sawSpool{false};
+    std::atomic<bool> sawSpool{false}, healthProfileValid{true};
+    std::atomic<int> healthStatus{arena::rpc::OK}, healthCalls{0};
     std::filesystem::path spool;
     std::string digest;
     std::uint64_t nextId{10000};
@@ -125,9 +126,29 @@ struct Peer
             arena::rpc::Response reply;
             reply.set_request_id(request.request_id());
             reply.set_correlation_id(request.correlation_id());
+            reply.set_protocol_version(request.protocol_version());
             reply.set_status(arena::rpc::OK);
             bool drop = false;
-            if (request.method() == "match.allocate_ids")
+            if (request.method() == "health.ready")
+            {
+                if (request.protocol_version() !=
+                        arena::internal_rpc::protocolVersion ||
+                    request.caller_service() != "gateway" ||
+                    request.target_service() != "storage" ||
+                    request.service_path_size() != 1 ||
+                    request.service_path(0) != "gateway" ||
+                    !request.request_id() ||
+                    request.correlation_id().empty() ||
+                    !request.deadline_unix_ms())
+                    healthProfileValid = false;
+                ++healthCalls;
+                reply.set_status(
+                    static_cast<arena::rpc::Status>(
+                        healthStatus.load()
+                    )
+                );
+            }
+            else if (request.method() == "match.allocate_ids")
             {
                 arena::storage::AllocateIdsRequest value;
                 value.ParseFromString(request.payload());
@@ -331,6 +352,22 @@ protected:
     }
 };
 
+TEST_F(PersistentStorageTest, HealthProbeUsesExplicitStorageV1Profile)
+{
+    Peer peer(directory);
+    peer.healthStatus = arena::rpc::UNAVAILABLE;
+    auto settings = config(peer);
+    settings.probeHealth = true;
+    PersistentStorage storage(settings);
+    ASSERT_TRUE(until([&] { return peer.healthCalls.load() > 0; }));
+    EXPECT_FALSE(storage.ready());
+    EXPECT_TRUE(peer.healthProfileValid);
+    peer.healthStatus = arena::rpc::OK;
+    ASSERT_TRUE(until([&] { return storage.ready(); }));
+    EXPECT_TRUE(peer.healthProfileValid);
+    storage.stop();
+    EXPECT_FALSE(storage.ready());
+}
 TEST_F(
     PersistentStorageTest,
     CanonicalAuthenticationAndBoundedCancellation

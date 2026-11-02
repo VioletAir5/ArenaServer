@@ -23,9 +23,7 @@
       "shared"
     ],
     "gateway": [
-      "auth",
-      "match",
-      "room",
+      "lobby",
       "domain",
       "shared"
     ],
@@ -33,6 +31,9 @@
       "shared"
     ],
     "lobby": [
+      "auth",
+      "match",
+      "room",
       "domain",
       "shared"
     ]

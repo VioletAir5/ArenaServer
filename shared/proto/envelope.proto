@@ -105,6 +105,9 @@ message LoginRequest {
   bytes credential = 2;
   string client_version = 3;
   CredentialKind credential_kind = 4;
+  // Retain one unpredictable key across retries of the same login operation.
+  // Older clients may omit it; normal password/JWT flows remain supported.
+  string operation_key = 5;
 }
 
 message LoginResponse {

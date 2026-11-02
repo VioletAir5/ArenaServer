@@ -14,12 +14,12 @@
 #include "net/AsioTcpServer.h"
 #include "net/ConnectionHandler.h"
 #include "net/InetAddress.h"
-#include "net/OnlineRegistryMaintenance.h"
 #include "net/PacketEcho.h"
 #include "net/PreLoginHandshake.h"
 #include "net/WebSocketServer.h"
 
 #include "TransportTestProfile.h"
+#include "gateway_test/OnlineRegistryMaintenance.h"
 #include "runtime/OwnerScheduler.h"
 
 using namespace service::gateway;
@@ -40,9 +40,9 @@ int main(int argc, char** argv)
     const bool lifecycle = mode == "drain" || mode == "stop_drain" ||
                            mode == "deadline" ||
                            mode == "destroy_drain";
-    std::shared_ptr<OnlineRegistry> online;
-    std::shared_ptr<MatchmakingService> matcher;
-    std::shared_ptr<RoomService> rooms;
+    std::shared_ptr<service::lobby::OnlineRegistry> online;
+    std::shared_ptr<service::lobby::MatchmakingService> matcher;
+    std::shared_ptr<service::lobby::RoomService> rooms;
     ConnectionHandlerFactory handshake = transportTestProfile(
         mode == "flood" || lifecycle ? "handshake" : mode,
         &online,

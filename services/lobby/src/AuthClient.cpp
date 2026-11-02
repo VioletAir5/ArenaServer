@@ -180,25 +180,8 @@ AuthClient::authenticate(
     RequestCleanup cleanup{request};
     if (!completion || !validRequest(request))
         return std::unexpected(arena::rpc::INVALID_ARGUMENT);
-    if (context.deadline <= std::chrono::steady_clock::now())
-        return std::unexpected(arena::rpc::DEADLINE_EXCEEDED);
-    auto endpoint = m_config.endpoint;
-    if (m_config.runtime)
-    {
-        const auto snapshot = m_config.runtime->snapshot();
-        const auto selected = snapshot->resolve("auth");
-        if (!selected)
-            return std::unexpected(arena::rpc::UNAVAILABLE);
-        endpoint = {
-            boost::asio::ip::make_address(selected->host),
-            selected->port
-        };
-    }
     arena::rpc::Request wire;
     wire.set_method("auth.authenticate");
-    wire.set_caller_service("lobby");
-    wire.set_target_service("auth");
-    wire.set_service_token(m_config.token);
     if (!request.SerializeToString(wire.mutable_payload()))
     {
         arena::security::eraseSecret(*wire.mutable_service_token());
@@ -208,13 +191,9 @@ AuthClient::authenticate(
     const auto proposed = request.proposed_epoch();
     const bool resumed = request.credential_kind() ==
                          arena::auth::AuthenticateRequest::JWT;
-    arena::internal_rpc::Options options;
-    options.timeout = m_config.timeout;
-    options.context = std::move(context);
-    options.endpoint = endpoint;
-    return m_client.call(
+    return exchange(
         std::move(wire),
-        std::move(options),
+        std::move(context),
         [proposed, resumed, complete = std::move(completion)](
             arena::rpc::Response response
         ) mutable
@@ -242,6 +221,78 @@ AuthClient::authenticate(
             }
             reply.DiscardUnknownFields();
             complete(Result(std::move(reply)));
+        }
+    );
+}
+std::expected<arena::internal_rpc::Call, Status> AuthClient::exchange(
+    arena::rpc::Request wire,
+    arena::internal_rpc::Context context,
+    arena::internal_rpc::Client::Completion complete
+)
+{
+    struct Cleanup
+    {
+        arena::rpc::Request& wire;
+        ~Cleanup()
+        {
+            arena::security::eraseSecret(
+                *wire.mutable_service_token()
+            );
+            arena::security::eraseSecret(*wire.mutable_payload());
+        }
+    } cleanup{wire};
+    if (context.deadline <= std::chrono::steady_clock::now())
+        return std::unexpected(arena::rpc::DEADLINE_EXCEEDED);
+    auto endpoint = m_config.endpoint;
+    if (m_config.runtime)
+    {
+        const auto snapshot = m_config.runtime->snapshot();
+        const auto selected = snapshot->resolve("auth");
+        if (!selected)
+            return std::unexpected(arena::rpc::UNAVAILABLE);
+        endpoint = {
+            boost::asio::ip::make_address(selected->host),
+            selected->port
+        };
+    }
+    wire.set_caller_service("lobby");
+    wire.set_target_service("auth");
+    wire.set_service_token(m_config.token);
+    arena::internal_rpc::Options options;
+    options.timeout = m_config.timeout;
+    options.context = std::move(context);
+    options.endpoint = endpoint;
+    return m_client.call(
+        std::move(wire),
+        std::move(options),
+        std::move(complete)
+    );
+}
+std::expected<arena::internal_rpc::Call, Status> AuthClient::probe(
+    arena::internal_rpc::Context context, ProbeCompletion complete
+)
+{
+    if (!complete)
+        return std::unexpected(arena::rpc::INVALID_ARGUMENT);
+    arena::rpc::Request wire;
+    wire.set_method("health.ready");
+    return exchange(
+        std::move(wire),
+        std::move(context),
+        [complete = std::move(complete)](
+            arena::rpc::Response response
+        ) mutable
+        {
+            const auto status = response.status() != arena::rpc::OK
+                                    ? response.status()
+                                : response.payload().empty()
+                                    ? arena::rpc::OK
+                                    : arena::rpc::INTERNAL;
+            arena::security::eraseSecret(*response.mutable_payload());
+            if (status == arena::rpc::OK)
+                complete(ProbeResult{});
+            else
+                complete(std::unexpected(status));
         }
     );
 }

@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "service": "lobby",
+  "implementation": "services/lobby/app/main.cpp",
+  "registration_kind": "native_server",
+  "transport": {
+    "request": "arena.rpc.Request",
+    "response": "arena.rpc.Response",
+    "max_timeout_ms": 1000,
+    "max_frame_bytes": 262144,
+    "compatibility": "strict-v1-role-bound-profile",
+    "automatic_transport_retries": 0
+  },
+  "common_errors": [
+    "CANCELLED",
+    "DEADLINE_EXCEEDED",
+    "INTERNAL",
+    "INVALID_ARGUMENT",
+    "OUTCOME_UNKNOWN",
+    "OVERLOADED",
+    "UNAUTHENTICATED",
+    "UNAVAILABLE",
+    "INCOMPATIBLE_VERSION",
+    "CALL_CYCLE"
+  ],
+  "methods": [
+    {
+      "name": "health.ready",
+      "owner": "lobby",
+      "logical_owner": "lobby",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "health.ready",
+      "request": null,
+      "response": null,
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "exclude-before-WAL-admission; after-admission-retain-physical-write-and-conditional-publication",
+      "result_semantics": "complete-authority-and-replay-journal-synced-before-success; no-remote-effects-inside-candidate"
+    },
+    {
+      "name": "lobby.execute",
+      "owner": "lobby",
+      "logical_owner": "lobby",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "lobby.execute",
+      "request": "arena.lobby.ExecuteRequest",
+      "response": "arena.lobby.ExecuteReply",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "non_idempotent",
+        "key": null,
+        "automatic_retries": 0,
+        "payload_policies": {
+          "login": "verified-player/operation_key receipt; legacy same-physical-request identity only",
+          "match_join": "canonical player/join_key",
+          "room_input": "session/room/incarnation/input_sequence",
+          "other_mutations": "no blanket automatic replay; caller must resolve current authority"
+        }
+      },
+      "cancellation": "exclude-before-WAL-admission; after-admission-retain-physical-write-and-conditional-publication",
+      "result_semantics": "complete-authority-and-replay-journal-synced-before-success; no-remote-effects-inside-candidate"
+    },
+    {
+      "name": "lobby.detach",
+      "owner": "lobby",
+      "logical_owner": "lobby",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "lobby.detach",
+      "request": "arena.lobby.DetachRequest",
+      "response": "arena.lobby.DetachReply",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "gateway_instance/connection_id/player_id/session_epoch",
+        "automatic_retries": 0
+      },
+      "cancellation": "exclude-before-WAL-admission; after-admission-retain-physical-write-and-conditional-publication",
+      "result_semantics": "complete-authority-and-replay-journal-synced-before-success; no-remote-effects-inside-candidate"
+    },
+    {
+      "name": "lobby.heartbeat",
+      "owner": "lobby",
+      "logical_owner": "lobby",
+      "callers": [
+        "gateway"
+      ],
+      "handler": "lobby.heartbeat",
+      "request": "arena.lobby.HeartbeatRequest",
+      "response": "arena.lobby.HeartbeatReply",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "gateway_instance/connection_ids",
+        "automatic_retries": 0
+      },
+      "cancellation": "exclude-before-WAL-admission; after-admission-retain-physical-write-and-conditional-publication",
+      "result_semantics": "complete-authority-and-replay-journal-synced-before-success; no-remote-effects-inside-candidate"
+    }
+  ]
+}

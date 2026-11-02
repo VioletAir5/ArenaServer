@@ -15,8 +15,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <gtest/gtest.h>
 
-#include "net/RoomService.h"
-
+#include "lobby/RoomService.h"
 #include "room/ReplayFile.h"
 #include "room/ReplayRecorder.h"
 #include "runtime/OwnerScheduler.h"
@@ -341,13 +340,12 @@ TEST(ReplayAcceptanceTest, DiagnosticArchiveStartsAtAbsoluteTickThree)
 
 TEST(ReplayAcceptanceTest, RoomOwnerArchivePersistsEveryObservedTick)
 {
-    namespace gw = service::gateway;
     using namespace std::chrono_literals;
     ArtifactDirectory output;
     ReplayRecorderConfig recorderConfig;
     recorderConfig.directory = output.path / "owner-recordings";
     auto recorder = std::make_shared<ReplayRecorder>(recorderConfig);
-    auto online = std::make_shared<gw::OnlineRegistry>();
+    auto online = std::make_shared<service::lobby::OnlineRegistry>();
     service::auth::JwtConfig jwtConfig;
     jwtConfig.key = "0123456789abcdef0123456789abcdef";
     jwtConfig.now = [] { return std::int64_t{1700000000}; };
@@ -357,10 +355,10 @@ TEST(ReplayAcceptanceTest, RoomOwnerArchivePersistsEveryObservedTick)
     ASSERT_TRUE(online->joinRoom(grant->lease->binding, RoomId{77}));
     boost::asio::io_context context;
     boost::asio::steady_timer watchdog(context);
-    gw::RoomServiceConfig config;
+    service::lobby::RoomServiceConfig config;
     config.replays = recorder;
     config.actor.historyTicks = 2;
-    gw::RoomService rooms(online, config);
+    service::lobby::RoomService rooms(online, config);
     rooms.start(
         arena::runtime::ownerScheduler(context.get_executor())
     );
@@ -373,7 +371,8 @@ TEST(ReplayAcceptanceTest, RoomOwnerArchivePersistsEveryObservedTick)
         boost::system::error_code ignored;
         watchdog.cancel(ignored);
     };
-    std::function<void(gw::RoomService::InputResult)> receive;
+    std::function<void(service::lobby::RoomService::InputResult)>
+        receive;
     receive = [&](auto result)
     {
         EXPECT_TRUE(result);

@@ -9,7 +9,6 @@
 #include <openssl/evp.h>
 
 #include "net/ConnectionHost.h"
-#include "net/LoginHandler.h"
 #include "net/PacketBuffer.h"
 #include "net/PreLoginHandshake.h"
 #include "protocol/EnvelopeCodec.hpp"
@@ -17,6 +16,7 @@
 
 #include "auth/JwtTokens.h"
 #include "auth/LoginAuthenticator.h"
+#include "gateway_test/LoginHandler.h"
 #include "runtime/OwnerScheduler.h"
 
 namespace
@@ -322,13 +322,13 @@ TEST(
 {
     const auto auth = passwords();
     JwtTokens tokens(config());
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     std::atomic<int> kicks{0};
     std::barrier start(100);
-    std::vector<std::expected<SessionGrant, AuthError>> grants(
-        100,
-        std::unexpected(AuthError::Unavailable)
-    );
+    std::vector<
+        std::expected<service::lobby::SessionGrant, AuthError>>
+        grants(100, std::unexpected(AuthError::Unavailable));
     std::vector<std::thread> workers;
     for (std::size_t i = 0; i < grants.size(); ++i)
         workers.emplace_back(
@@ -390,7 +390,8 @@ TEST(
 TEST(OnlineRegistryTest, ConditionalReleaseChecksEpochAndConnectionId)
 {
     JwtTokens tokens(config());
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     const auto first = directory->install(
         PlayerId{42},
         1,
@@ -421,7 +422,8 @@ TEST(OnlineRegistryTest, ConditionalReleaseChecksEpochAndConnectionId)
 TEST(OnlineRegistryTest, DetachedSessionResumesOnceAndRotatesEpoch)
 {
     JwtTokens tokens(config());
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     const auto first = directory->install(
         PlayerId{42},
         1,
@@ -448,7 +450,8 @@ TEST(OnlineRegistryTest, DetachedSessionResumesOnceAndRotatesEpoch)
     EXPECT_FALSE(
         directory->install(PlayerId{42}, 3, *prior, tokens, [] {})
     );
-    auto freshDirectory = std::make_shared<OnlineRegistry>();
+    auto freshDirectory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     EXPECT_FALSE(
         freshDirectory
             ->install(PlayerId{42}, 3, *prior, tokens, [] {})
@@ -461,7 +464,9 @@ TEST(
 )
 {
     JwtTokens tokens(config());
-    auto directory = std::make_shared<OnlineRegistry>(1);
+    auto directory = std::make_shared<service::lobby::OnlineRegistry>(
+        1
+    );
     const auto first = directory->install(
         PlayerId{42},
         1,
@@ -631,7 +636,8 @@ TEST(
     PasswordJwtResumeAndOldDisconnectUseTheSameDirectory
 )
 {
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     auto tokens = std::make_shared<JwtTokens>(config());
     const auto routes = makeLoginMessageRegistry(
         passwords(),
@@ -670,7 +676,8 @@ TEST(
     LoginHandlerTest, OldPingAndRepeatedLoginFailBeforeKickQueueDrains
 )
 {
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     auto routes = makeLoginMessageRegistry(
         passwords(),
         std::make_shared<JwtTokens>(config()),
@@ -700,7 +707,8 @@ TEST(
     BadPasswordOrMalformedJwtNeverReplacesAValidSession
 )
 {
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     auto routes = makeLoginMessageRegistry(
         passwords(),
         std::make_shared<JwtTokens>(config()),
@@ -735,7 +743,8 @@ TEST(
     LoginHandlerTest, SupersededAsynchronousCompletionCannotSendAReply
 )
 {
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     auto tokens = std::make_shared<JwtTokens>(config());
     auto routes = std::make_shared<MessageRegistry>();
     RequestCompletion delayed;
@@ -758,7 +767,13 @@ TEST(
         first.context->session->closeRequest()
     );
     ASSERT_TRUE(grant);
-    ASSERT_TRUE(first.context->session->bind(grant->lease));
+    ASSERT_TRUE(first.context->session->bind(
+        ConnectionSession::Projection{
+            grant->lease->binding,
+            [lease = grant->lease] { return lease->current(); },
+            [lease = grant->lease] { lease->release(); }
+        }
+    ));
     first.send(ping());
     ASSERT_EQ(calls, 1);
     auto newer = directory
@@ -777,7 +792,7 @@ TEST(LoginHandlerTest, SavedKickCannotPostAfterRuntimeTeardown)
     auto routes = makeLoginMessageRegistry(
         passwords(),
         std::make_shared<JwtTokens>(config()),
-        std::make_shared<OnlineRegistry>()
+        std::make_shared<service::lobby::OnlineRegistry>()
     );
     std::function<void()> kick;
     {
@@ -796,7 +811,8 @@ TEST(
     ReplacementBeforeOwnerBindStillInvalidatesTheOldConnection
 )
 {
-    auto directory = std::make_shared<OnlineRegistry>();
+    auto directory = std::make_shared<
+        service::lobby::OnlineRegistry>();
     auto tokens = std::make_shared<JwtTokens>(config());
     auto routes = makeLoginMessageRegistry(
         passwords(),
@@ -815,7 +831,13 @@ TEST(
     auto current = directory
                        ->install(PlayerId{42}, 2, {}, *tokens, [] {});
     ASSERT_TRUE(current);
-    ASSERT_FALSE(first.context->session->bind(old->lease));
+    ASSERT_FALSE(first.context->session->bind(
+        ConnectionSession::Projection{
+            old->lease->binding,
+            [lease = old->lease] { return lease->current(); },
+            [lease = old->lease] { lease->release(); }
+        }
+    ));
     EXPECT_EQ(
         first.context->session->loginState(),
         ConnectionSession::LoginState::Expired

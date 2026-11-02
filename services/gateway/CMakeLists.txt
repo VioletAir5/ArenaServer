@@ -11,9 +11,7 @@ target_include_directories(arena_gateway PUBLIC
 
 target_link_libraries(arena_gateway PUBLIC
     arena_shared
-    arena_auth
-    arena_match
-    arena_room
+    arena_lobby_contract
     Boost::boost
     Threads::Threads
     spdlog::spdlog

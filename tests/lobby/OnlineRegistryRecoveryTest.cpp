@@ -12,11 +12,10 @@
 
 #include <gtest/gtest.h>
 
-#include "net/OnlineRegistry.h"
+#include "lobby/OnlineRegistry.h"
 
 namespace
 {
-using namespace service::gateway;
 using namespace std::chrono_literals;
 using arena::domain::PlayerId;
 using arena::domain::RoomId;
@@ -25,9 +24,10 @@ using service::auth::IssuedToken;
 using service::auth::JwtTokens;
 using service::auth::TokenClaims;
 using Clock = std::chrono::steady_clock;
-using Effects = std::shared_ptr<std::vector<SessionBinding>>;
+using Effects = std::shared_ptr<
+    std::vector<service::lobby::SessionBinding>>;
 
-std::string describe(const RegistryCheckpoint& saved)
+std::string describe(const service::lobby::RegistryCheckpoint& saved)
 {
     std::ostringstream text;
     text << saved.epochWatermark << ':' << saved.sessionWatermark
@@ -72,14 +72,14 @@ class OnlineRegistryRecoveryTest : public testing::Test
 protected:
     std::atomic<std::int64_t> wall{1000}, steady{0};
     std::atomic<bool> rejectClock{false};
-    Effects
-        liveEffects = std::make_shared<std::vector<SessionBinding>>();
+    Effects liveEffects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     std::unique_ptr<JwtTokens> tokens;
-    std::shared_ptr<OnlineRegistry> online;
+    std::shared_ptr<service::lobby::OnlineRegistry> online;
 
-    OnlineRegistryConfig configuration()
+    service::lobby::OnlineRegistryConfig configuration()
     {
-        OnlineRegistryConfig config;
+        service::lobby::OnlineRegistryConfig config;
         config.grace = 100ms;
         config.now = [this]
         {
@@ -103,9 +103,12 @@ protected:
             return wall.load();
         };
     }
-    static OnlineRegistry::KickFactory effectsFactory(Effects effects)
+    static service::lobby::OnlineRegistry::KickFactory
+    effectsFactory(Effects effects)
     {
-        return [effects = std::move(effects)](SessionBinding binding)
+        return [effects = std::move(effects)](
+                   service::lobby::SessionBinding binding
+               )
         {
             return [effects, binding]
             { effects->push_back(binding); };
@@ -117,7 +120,9 @@ protected:
         config.key = "0123456789abcdef0123456789abcdef";
         config.now = wallClock();
         tokens = std::make_unique<JwtTokens>(std::move(config));
-        online = std::make_shared<OnlineRegistry>(configuration());
+        online = std::make_shared<service::lobby::OnlineRegistry>(
+            configuration()
+        );
     }
     void TearDown() override
     {
@@ -125,8 +130,9 @@ protected:
         online->shutdown();
         online.reset();
     }
-    SessionGrant install(
-        const std::shared_ptr<OnlineRegistry>& registry,
+    service::lobby::SessionGrant install(
+        const std::shared_ptr<service::lobby::OnlineRegistry>&
+            registry,
         std::uint64_t player,
         std::uint64_t connection,
         std::optional<TokenClaims> resume = {},
@@ -145,7 +151,7 @@ protected:
             resume,
             wallClock(),
             effectsFactory(effects ? effects : liveEffects)(
-                SessionBinding{
+                service::lobby::SessionBinding{
                     PlayerId{player},
                     connection,
                     registry->epochWatermark() + 1
@@ -156,7 +162,7 @@ protected:
             throw std::runtime_error("fixture install failed");
         return std::move(*result);
     }
-    SessionGrant
+    service::lobby::SessionGrant
     login(std::uint64_t player, std::uint64_t connection = 0)
     {
         return install(
@@ -165,7 +171,7 @@ protected:
             connection ? connection : 100 + player
         );
     }
-    TokenClaims claims(const SessionGrant& grant)
+    TokenClaims claims(const service::lobby::SessionGrant& grant)
     {
         auto verified = tokens->verify(grant.token);
         if (!verified)
@@ -174,10 +180,12 @@ protected:
             );
         return *verified;
     }
-    std::shared_ptr<OnlineRegistry>
-    clone(const RegistryCheckpoint& saved, Effects effects)
+    std::shared_ptr<service::lobby::OnlineRegistry> clone(
+        const service::lobby::RegistryCheckpoint& saved,
+        Effects effects
+    )
     {
-        auto result = OnlineRegistry::restore(
+        auto result = service::lobby::OnlineRegistry::restore(
             saved,
             configuration(),
             wallClock(),
@@ -190,8 +198,8 @@ protected:
         return std::move(*result);
     }
     void same(
-        const std::shared_ptr<OnlineRegistry>& left,
-        const std::shared_ptr<OnlineRegistry>& right
+        const std::shared_ptr<service::lobby::OnlineRegistry>& left,
+        const std::shared_ptr<service::lobby::OnlineRegistry>& right
     )
     {
         EXPECT_EQ(
@@ -200,15 +208,15 @@ protected:
         );
     }
     void rejected(
-        const RegistryCheckpoint& saved,
-        RegistryRecoveryError expected
+        const service::lobby::RegistryCheckpoint& saved,
+        service::lobby::RegistryRecoveryError expected
     )
     {
-        auto
-            effects = std::make_shared<std::vector<SessionBinding>>();
+        auto effects = std::make_shared<
+            std::vector<service::lobby::SessionBinding>>();
         const auto before = describe(online->checkpoint());
         const auto liveBefore = liveEffects->size();
-        auto result = OnlineRegistry::restore(
+        auto result = service::lobby::OnlineRegistry::restore(
             saved,
             configuration(),
             wallClock(),
@@ -241,7 +249,8 @@ TEST_F(
     dana.lease->release();
     steady = 42;
     const auto saved = online->checkpoint();
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(saved, effects);
     EXPECT_TRUE(effects->empty());
     EXPECT_EQ(describe(candidate->checkpoint()), describe(saved));
@@ -256,11 +265,11 @@ TEST_F(
     EXPECT_TRUE(alice.lease->current());
     EXPECT_EQ(
         online->snapshot(PlayerId{1})->presence,
-        Presence::Online
+        service::lobby::Presence::Online
     );
     EXPECT_EQ(
         candidate->snapshot(PlayerId{1})->presence,
-        Presence::Detached
+        service::lobby::Presence::Detached
     );
     EXPECT_EQ(
         candidate->snapshot(PlayerId{2})->graceDeadline,
@@ -282,7 +291,8 @@ TEST_F(
     steady = 100;
     rejectClock = true;
     const auto saved = online->checkpoint();
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(saved, effects);
     EXPECT_EQ(describe(candidate->checkpoint()), describe(saved));
     EXPECT_EQ(candidate->retainedCount(), 2u);
@@ -307,7 +317,8 @@ TEST_F(
     steady = 10;
     alice.lease->release();
     steady = 109;
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(online->checkpoint(), effects);
     auto detached = candidate->snapshot(PlayerId{1});
     ASSERT_TRUE(detached);
@@ -329,7 +340,8 @@ TEST_F(
     const auto prior = claims(alice);
     ASSERT_TRUE(online->joinRoom(alice.lease->binding, RoomId{99}));
     const auto saved = online->checkpoint();
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(saved, effects);
     auto resumed = install(candidate, 1, 201, prior, effects);
     EXPECT_TRUE(resumed.resumed);
@@ -363,9 +375,9 @@ TEST_F(
 {
     auto alice = login(1);
     auto firstEffects = std::make_shared<
-        std::vector<SessionBinding>>();
+        std::vector<service::lobby::SessionBinding>>();
     auto secondEffects = std::make_shared<
-        std::vector<SessionBinding>>();
+        std::vector<service::lobby::SessionBinding>>();
     auto first = clone(online->checkpoint(), firstEffects);
     auto second = clone(online->checkpoint(), secondEffects);
     first->shutdown();
@@ -388,7 +400,8 @@ TEST_F(
 {
     auto alice = login(1), bob = login(2);
     auto prior = claims(bob);
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(online->checkpoint(), effects);
     for (auto registry : {online, candidate})
         ASSERT_TRUE(
@@ -423,7 +436,7 @@ TEST_F(
         copiedCharlie.snapshot.sessionId
     );
     same(online, candidate);
-    const std::array<MatchParticipant, 2> cohort{
+    const std::array<service::lobby::MatchParticipant, 2> cohort{
         {{PlayerId{1}, replacement.snapshot.sessionId, 1400},
          {PlayerId{3}, charlie.snapshot.sessionId, 1600}}
     };
@@ -466,7 +479,8 @@ TEST_F(
     const auto saved = online->checkpoint();
     ASSERT_EQ(saved.rooms.size(), 1u);
     EXPECT_TRUE(saved.rooms.front().players.empty());
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(saved, effects);
     auto historical = candidate->managedRoom(allocation->roomId);
     ASSERT_TRUE(historical);
@@ -494,17 +508,21 @@ TEST_F(
 )
 {
     auto alice = login(1);
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(online->checkpoint(), effects);
     alice.lease->release();
     EXPECT_FALSE(alice.lease->current());
     EXPECT_EQ(
         online->snapshot(PlayerId{1})->presence,
-        Presence::Detached
+        service::lobby::Presence::Detached
     );
     auto current = candidate->state(alice.lease->binding);
     ASSERT_TRUE(current);
-    EXPECT_EQ(current->session.presence, Presence::Online);
+    EXPECT_EQ(
+        current->session.presence,
+        service::lobby::Presence::Online
+    );
     online->shutdown();
     EXPECT_TRUE(candidate->state(alice.lease->binding));
     EXPECT_TRUE(effects->empty());
@@ -540,7 +558,9 @@ TEST_F(
         }
         return Clock::time_point{};
     };
-    auto registry = std::make_shared<OnlineRegistry>(config);
+    auto registry = std::make_shared<service::lobby::OnlineRegistry>(
+        config
+    );
     auto alice = install(registry, 1, 101);
     {
         std::lock_guard lock(gate->mutex);
@@ -602,11 +622,12 @@ TEST_F(
     ASSERT_EQ(saved.entries.size(), 1u);
     EXPECT_EQ(
         saved.entries.front().snapshot.presence,
-        Presence::Detached
+        service::lobby::Presence::Detached
     );
     EXPECT_EQ(saved.entries.front().snapshot.connectionId, 0u);
     EXPECT_FALSE(saved.entries.front().leaseValid);
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(saved, effects);
     EXPECT_EQ(describe(candidate->checkpoint()), describe(saved));
     EXPECT_TRUE(effects->empty());
@@ -617,8 +638,9 @@ TEST_F(
     RestoresZeroStoppedAndExhaustedHighWatermarksWithoutRandomInitialization
 )
 {
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
-    RegistryCheckpoint empty;
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
+    service::lobby::RegistryCheckpoint empty;
     auto candidate = clone(empty, effects);
     EXPECT_EQ(candidate->epochWatermark(), 0u);
     EXPECT_EQ(candidate->checkpoint().sessionWatermark, 0u);
@@ -628,7 +650,7 @@ TEST_F(
     EXPECT_EQ(first->snapshot.epoch, 1u);
     EXPECT_EQ(first->snapshot.sessionId.value(), 1u);
     EXPECT_TRUE(tokens->verify(first->token));
-    RegistryCheckpoint exhausted;
+    service::lobby::RegistryCheckpoint exhausted;
     exhausted
         .epochWatermark = std::numeric_limits<std::uint64_t>::max();
     exhausted
@@ -644,7 +666,7 @@ TEST_F(
     ASSERT_FALSE(unavailable);
     EXPECT_EQ(unavailable.error(), AuthError::Unavailable);
     EXPECT_EQ(describe(full->checkpoint()), describe(exhausted));
-    RegistryCheckpoint stopped;
+    service::lobby::RegistryCheckpoint stopped;
     stopped.epochWatermark = 42;
     stopped.sessionWatermark = 43;
     stopped.stopped = true;
@@ -666,7 +688,7 @@ TEST_F(
     ASSERT_TRUE(online->joinRoom(bob.lease->binding, RoomId{99}));
     bob.lease->release();
     const auto valid = online->checkpoint();
-    using Error = RegistryRecoveryError;
+    using Error = service::lobby::RegistryRecoveryError;
     const auto check = [&](auto mutate, Error expected)
     {
         auto broken = valid;
@@ -708,9 +730,9 @@ TEST_F(
     check(
         [](auto& s)
         {
-            s.entries[0].snapshot.presence = static_cast<Presence>(
-                99
-            );
+            s.entries[0]
+                .snapshot
+                .presence = static_cast<service::lobby::Presence>(99);
         },
         Error::Entry
     );
@@ -777,7 +799,10 @@ TEST_F(OnlineRegistryRecoveryTest, RejectsCorruptManagedCohorts)
     {
         auto broken = valid;
         mutate(*broken.rooms[0].managed);
-        rejected(broken, RegistryRecoveryError::Cohort);
+        rejected(
+            broken,
+            service::lobby::RegistryRecoveryError::Cohort
+        );
     };
     check([](auto& s) { s.matchId = 0; });
     check([](auto& s) { s.roomId = RoomId{99}; });
@@ -803,14 +828,16 @@ TEST_F(
     auto alice = login(1), bob = login(2);
     ASSERT_TRUE(online->joinRoom(alice.lease->binding, RoomId{99}));
     ASSERT_TRUE(online->joinRoom(bob.lease->binding, RoomId{100}));
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     const auto saved = online->checkpoint();
-    const auto check = [&](OnlineRegistryConfig config,
-                           auto clock,
-                           OnlineRegistry::KickFactory factory,
-                           RegistryRecoveryError expected)
+    const auto check =
+        [&](service::lobby::OnlineRegistryConfig config,
+            auto clock,
+            service::lobby::OnlineRegistry::KickFactory factory,
+            service::lobby::RegistryRecoveryError expected)
     {
-        auto result = OnlineRegistry::restore(
+        auto result = service::lobby::OnlineRegistry::restore(
             saved,
             std::move(config),
             std::move(clock),
@@ -828,7 +855,7 @@ TEST_F(
         config,
         wallClock(),
         effectsFactory(effects),
-        RegistryRecoveryError::Configuration
+        service::lobby::RegistryRecoveryError::Configuration
     );
     config = configuration();
     config.maxPlayers = 1;
@@ -836,7 +863,7 @@ TEST_F(
         config,
         wallClock(),
         effectsFactory(effects),
-        RegistryRecoveryError::Capacity
+        service::lobby::RegistryRecoveryError::Capacity
     );
     config = configuration();
     config.maxRooms = 1;
@@ -844,37 +871,40 @@ TEST_F(
         config,
         wallClock(),
         effectsFactory(effects),
-        RegistryRecoveryError::Capacity
+        service::lobby::RegistryRecoveryError::Capacity
     );
     check(
         configuration(),
         std::function<std::int64_t()>{},
         effectsFactory(effects),
-        RegistryRecoveryError::Configuration
+        service::lobby::RegistryRecoveryError::Configuration
     );
     check(
         configuration(),
         wallClock(),
         {},
-        RegistryRecoveryError::Callback
+        service::lobby::RegistryRecoveryError::Callback
     );
     check(
         configuration(),
         wallClock(),
         [](auto) { return std::function<void()>{}; },
-        RegistryRecoveryError::Callback
+        service::lobby::RegistryRecoveryError::Callback
     );
     ASSERT_TRUE(online->joinRoom(bob.lease->binding, RoomId{99}));
     config = configuration();
     config.maxRoomMembers = 1;
-    auto result = OnlineRegistry::restore(
+    auto result = service::lobby::OnlineRegistry::restore(
         online->checkpoint(),
         config,
         wallClock(),
         effectsFactory(effects)
     );
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error(), RegistryRecoveryError::Capacity);
+    EXPECT_EQ(
+        result.error(),
+        service::lobby::RegistryRecoveryError::Capacity
+    );
 }
 
 TEST_F(
@@ -883,15 +913,16 @@ TEST_F(
 )
 {
     auto alice = login(1), bob = login(2);
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto calls = std::make_shared<unsigned>(0);
     const auto saved = online->checkpoint();
-    auto result = OnlineRegistry::restore(
+    auto result = service::lobby::OnlineRegistry::restore(
         saved,
         configuration(),
         wallClock(),
-        [effects,
-         calls](SessionBinding binding) -> std::function<void()>
+        [effects, calls](service::lobby::SessionBinding binding)
+            -> std::function<void()>
         {
             if (++*calls == 2)
                 throw std::runtime_error(
@@ -902,22 +933,28 @@ TEST_F(
         }
     );
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error(), RegistryRecoveryError::Callback);
+    EXPECT_EQ(
+        result.error(),
+        service::lobby::RegistryRecoveryError::Callback
+    );
     EXPECT_EQ(*calls, 2u);
     EXPECT_TRUE(effects->empty());
     EXPECT_TRUE(liveEffects->empty());
     EXPECT_TRUE(alice.lease->current());
     EXPECT_TRUE(bob.lease->current());
     EXPECT_EQ(describe(online->checkpoint()), describe(saved));
-    result = OnlineRegistry::restore(
+    result = service::lobby::OnlineRegistry::restore(
         saved,
         configuration(),
         wallClock(),
-        [](SessionBinding) -> std::function<void()>
+        [](service::lobby::SessionBinding) -> std::function<void()>
         { throw std::bad_alloc(); }
     );
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error(), RegistryRecoveryError::Allocation);
+    EXPECT_EQ(
+        result.error(),
+        service::lobby::RegistryRecoveryError::Allocation
+    );
     EXPECT_TRUE(liveEffects->empty());
 }
 
@@ -927,11 +964,12 @@ TEST_F(
 )
 {
     auto alice = login(1);
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidateWall = std::make_shared<std::atomic<std::int64_t>>(
         1000
     );
-    auto result = OnlineRegistry::restore(
+    auto result = service::lobby::OnlineRegistry::restore(
         online->checkpoint(),
         configuration(),
         [candidateWall] { return candidateWall->load(); },
@@ -957,13 +995,14 @@ TEST_F(
     auto alice = login(1, 101);
     alice.lease->release();
     auto bob = login(2, 101);
-    auto effects = std::make_shared<std::vector<SessionBinding>>();
+    auto effects = std::make_shared<
+        std::vector<service::lobby::SessionBinding>>();
     auto candidate = clone(online->checkpoint(), effects);
     same(online, candidate);
     EXPECT_TRUE(candidate->state(bob.lease->binding));
     EXPECT_EQ(
         candidate->snapshot(PlayerId{1})->presence,
-        Presence::Detached
+        service::lobby::Presence::Detached
     );
 }
 } // namespace

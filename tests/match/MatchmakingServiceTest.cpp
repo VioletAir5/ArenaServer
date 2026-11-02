@@ -1,4 +1,4 @@
-#include "net/MatchmakingService.h"
+#include "lobby/MatchmakingService.h"
 
 #include <array>
 #include <atomic>
@@ -15,11 +15,11 @@
 #include <spdlog/spdlog.h>
 
 #include "net/ArenaProtocol.h"
-#include "net/MatchHandler.h"
 #include "net/PacketBuffer.h"
 #include "protocol/EnvelopeCodec.hpp"
 
 #include "../gateway/net/ProtocolTestHarness.h"
+#include "gateway_test/MatchHandler.h"
 #include "runtime/OwnerScheduler.h"
 
 using namespace service::gateway;
@@ -92,11 +92,11 @@ service::auth::JwtTokens jwt()
 struct MatchmakingServiceTest : testing::Test
 {
     Scheduler scheduler;
-    std::shared_ptr<OnlineRegistry>
-        online = std::make_shared<OnlineRegistry>();
+    std::shared_ptr<service::lobby::OnlineRegistry>
+        online = std::make_shared<service::lobby::OnlineRegistry>();
     service::auth::JwtTokens tokens = jwt();
-    std::shared_ptr<MatchmakingService> matcher;
-    SessionGrant
+    std::shared_ptr<service::lobby::MatchmakingService> matcher;
+    service::lobby::SessionGrant
     login(std::uint64_t player = 42, std::uint64_t connection = 7)
     {
         auto result = online->install(
@@ -112,7 +112,8 @@ struct MatchmakingServiceTest : testing::Test
     }
     void start(std::size_t pending = 1024)
     {
-        matcher = std::make_shared<MatchmakingService>(
+        matcher = std::make_shared<
+            service::lobby::MatchmakingService>(
             online,
             [](auto) -> std::optional<std::uint32_t> { return 1000; },
             service::match::QueueConfig{},
@@ -131,15 +132,20 @@ TEST_F(
     auto ratings = [](auto) -> std::optional<std::uint32_t>
     { return 1000; };
     EXPECT_THROW(
-        (MatchmakingService({}, ratings)),
+        (service::lobby::MatchmakingService({}, ratings)),
         std::invalid_argument
     );
     EXPECT_THROW(
-        (MatchmakingService(online, {})),
+        (service::lobby::MatchmakingService(online, {})),
         std::invalid_argument
     );
     EXPECT_THROW(
-        (MatchmakingService(online, ratings, {}, 0ms)),
+        (service::lobby::MatchmakingService(
+            online,
+            ratings,
+            {},
+            0ms
+        )),
         std::invalid_argument
     );
     start();
@@ -157,7 +163,7 @@ TEST_F(
 {
     auto grant = login();
     start();
-    std::optional<MatchmakingService::Result> result;
+    std::optional<service::lobby::MatchmakingService::Result> result;
     const auto owner = std::this_thread::get_id();
     std::thread worker(
         [&]
@@ -315,7 +321,7 @@ TEST_F(
 {
     auto old = login();
     start();
-    std::optional<MatchmakingService::Result> result;
+    std::optional<service::lobby::MatchmakingService::Result> result;
     ASSERT_TRUE(matcher->join(
         old.lease->binding,
         old.snapshot.sessionId,
@@ -338,7 +344,7 @@ TEST_F(
 {
     auto grant = login();
     start();
-    std::optional<MatchmakingService::Result> joined;
+    std::optional<service::lobby::MatchmakingService::Result> joined;
     ASSERT_TRUE(matcher->join(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -349,7 +355,7 @@ TEST_F(
     ASSERT_TRUE(joined);
     ASSERT_TRUE(*joined);
     const auto ticket = (**joined).ticketId;
-    std::optional<MatchmakingService::Result> stale;
+    std::optional<service::lobby::MatchmakingService::Result> stale;
     ASSERT_TRUE(matcher->cancel(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -372,7 +378,8 @@ TEST_F(
     ASSERT_TRUE(stale);
     ASSERT_FALSE(*stale);
     EXPECT_EQ(stale->error(), wire::ERR_UNAUTHENTICATED);
-    std::optional<MatchmakingService::Result> recovered;
+    std::optional<service::lobby::MatchmakingService::Result>
+        recovered;
     ASSERT_TRUE(matcher->join(
         resumed->lease->binding,
         resumed->snapshot.sessionId,
@@ -541,12 +548,12 @@ TEST_F(
 )
 {
     auto grant = login();
-    matcher = std::make_shared<MatchmakingService>(
+    matcher = std::make_shared<service::lobby::MatchmakingService>(
         online,
         [](auto) -> std::optional<std::uint32_t> { return {}; }
     );
     matcher->start(scheduler.get());
-    std::optional<MatchmakingService::Result> result;
+    std::optional<service::lobby::MatchmakingService::Result> result;
     ASSERT_TRUE(matcher->join(
         grant.lease->binding,
         grant.snapshot.sessionId,
@@ -583,7 +590,7 @@ TEST_F(
     std::optional<std::uint32_t> rating = 1000;
     bool throwing = false;
     int providerCalls = 0;
-    matcher = std::make_shared<MatchmakingService>(
+    matcher = std::make_shared<service::lobby::MatchmakingService>(
         online,
         [&](auto) -> std::optional<std::uint32_t>
         {
@@ -597,7 +604,8 @@ TEST_F(
     std::uint64_t identity = 0;
     const auto retry = [&](std::uint64_t key)
     {
-        std::optional<MatchmakingService::Result> result;
+        std::optional<service::lobby::MatchmakingService::Result>
+            result;
         EXPECT_TRUE(matcher->join(
             grant.lease->binding,
             grant.snapshot.sessionId,
@@ -629,7 +637,7 @@ TEST_F(
     EXPECT_EQ(providerCalls, 1);
     throwing = false;
     auto newcomer = login(43, 8);
-    std::optional<MatchmakingService::Result> result;
+    std::optional<service::lobby::MatchmakingService::Result> result;
     ASSERT_TRUE(matcher->join(
         newcomer.lease->binding,
         newcomer.snapshot.sessionId,
@@ -700,11 +708,11 @@ TEST_F(
 struct MatchRouteTest : service::gateway::test::ProtocolTest
 {
     Scheduler manager;
-    std::shared_ptr<OnlineRegistry>
-        online = std::make_shared<OnlineRegistry>();
+    std::shared_ptr<service::lobby::OnlineRegistry>
+        online = std::make_shared<service::lobby::OnlineRegistry>();
     service::auth::JwtTokens tokens = jwt();
-    std::shared_ptr<MatchmakingService>
-        matcher = std::make_shared<MatchmakingService>(
+    std::shared_ptr<service::lobby::MatchmakingService> matcher =
+        std::make_shared<service::lobby::MatchmakingService>(
             online,
             [](auto) -> std::optional<std::uint32_t> { return 1200; }
         );
@@ -725,7 +733,14 @@ struct MatchRouteTest : service::gateway::test::ProtocolTest
                 [] {}
             );
             ASSERT_TRUE(grant);
-            ASSERT_TRUE(context->session->bind(grant->lease));
+            ASSERT_TRUE(context->session->bind(
+                ConnectionSession::Projection{
+                    grant->lease->binding,
+                    [lease = grant->lease]
+                    { return lease->current(); },
+                    [lease = grant->lease] { lease->release(); }
+                }
+            ));
         }
     }
     void TearDown() override
@@ -849,15 +864,15 @@ TEST_F(
 )
 {
     const auto alice = login(42, 7), bob = login(43, 8);
-    std::optional<ManagedRoom> room;
+    std::optional<service::lobby::ManagedRoom> room;
     int calls = 0;
-    matcher = std::make_shared<MatchmakingService>(
+    matcher = std::make_shared<service::lobby::MatchmakingService>(
         online,
         [](auto) -> std::optional<std::uint32_t> { return 1000; },
         service::match::QueueConfig{},
         1ms,
         1024,
-        [&](const ManagedRoom& allocated)
+        [&](const service::lobby::ManagedRoom& allocated)
         {
             ++calls;
             room = allocated;
@@ -908,7 +923,8 @@ TEST_F(
                                       alice.snapshot.playerId
                                   ? alice.lease->binding
                                   : bob.lease->binding;
-        std::optional<MatchmakingService::Result> status;
+        std::optional<service::lobby::MatchmakingService::Result>
+            status;
         ASSERT_TRUE(matcher->status(
             binding,
             saved.sessionId,
@@ -932,7 +948,7 @@ TEST_F(
         [] {}
     );
     ASSERT_TRUE(resumed);
-    std::optional<MatchmakingService::Result> retry;
+    std::optional<service::lobby::MatchmakingService::Result> retry;
     ASSERT_TRUE(matcher->join(
         resumed->lease->binding,
         resumed->snapshot.sessionId,
@@ -971,13 +987,14 @@ TEST_F(
         const auto alice = login(42, 7), bob = login(43, 8);
         const auto timer = scheduler.timers.size();
         int calls = 0;
-        matcher = std::make_shared<MatchmakingService>(
+        matcher = std::make_shared<
+            service::lobby::MatchmakingService>(
             online,
             [](auto) -> std::optional<std::uint32_t> { return 1000; },
             service::match::QueueConfig{},
             1ms,
             1024,
-            [&](const ManagedRoom&) -> bool
+            [&](const service::lobby::ManagedRoom&) -> bool
             {
                 ++calls;
                 if (throwing)
@@ -1013,7 +1030,8 @@ TEST_F(
         );
         EXPECT_FALSE(online->snapshot(bob.snapshot.playerId)->roomId);
         EXPECT_EQ(matcher->metrics().assignedPlayers, 0U);
-        std::optional<MatchmakingService::Result> status;
+        std::optional<service::lobby::MatchmakingService::Result>
+            status;
         ASSERT_TRUE(matcher->status(
             alice.lease->binding,
             alice.snapshot.sessionId,
@@ -1047,7 +1065,7 @@ TEST_F(
 )
 {
     const auto alice = login();
-    matcher = std::make_shared<MatchmakingService>(
+    matcher = std::make_shared<service::lobby::MatchmakingService>(
         online,
         [&](auto) -> std::optional<std::uint32_t>
         {
@@ -1056,7 +1074,7 @@ TEST_F(
         }
     );
     matcher->start(scheduler.get());
-    std::optional<MatchmakingService::Result> reply;
+    std::optional<service::lobby::MatchmakingService::Result> reply;
     ASSERT_TRUE(matcher->join(
         alice.lease->binding,
         alice.snapshot.sessionId,
@@ -1115,13 +1133,13 @@ TEST_F(
 )
 {
     const auto alice = login(42, 7), bob = login(43, 8);
-    matcher = std::make_shared<MatchmakingService>(
+    matcher = std::make_shared<service::lobby::MatchmakingService>(
         online,
         [](auto) -> std::optional<std::uint32_t> { return 1000; },
         service::match::QueueConfig{},
         1ms,
         1024,
-        [&](const ManagedRoom&)
+        [&](const service::lobby::ManagedRoom&)
         {
             matcher->stop();
             return true;

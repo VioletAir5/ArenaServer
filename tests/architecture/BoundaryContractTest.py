@@ -47,23 +47,31 @@ def main():
 
     baseline = module.analyze(root, contract, policy)
     check(baseline['passed'], str(baseline['issues']))
-    check(len(baseline['contracts']['declared']) == 8, 'actual Auth/Storage contract coverage changed')
+    check(set(baseline['contracts']['declared']) == {
+        'account.find','player.get','auth.authenticate','health.ready','match.allocate_ids',
+        'match.save_result','match.get','settlement.get','lobby.execute','lobby.detach','lobby.heartbeat'},
+        'actual Gateway/Auth/Lobby/Storage method contract set changed')
     check(baseline['contracts']['declared'] == baseline['contracts']['registered'],
           'a declared method is missing an actual dispatch registration')
     check(all(not cycles for cycles in baseline['cycles'].values()), 'baseline dependency cycle')
     check({entry['method'] for entry in baseline['contracts']['native_and_python_calls']} ==
-          {'account.find', 'auth.authenticate', 'match.allocate_ids', 'match.save_result', 'match.get', 'settlement.get', 'health.ready'},
+          {'account.find','player.get','auth.authenticate','match.allocate_ids','match.save_result',
+           'match.get','settlement.get','health.ready','lobby.execute','lobby.detach','lobby.heartbeat'},
           'current native method coverage must follow real source calls')
     check(baseline['contracts']['qualified_declared'] == baseline['contracts']['qualified_registered']
-          and len(baseline['contracts']['qualified_declared']) == 9,
-          'service-qualified registrations must include both real health handlers')
-    check({'auth/auth.authenticate', 'auth/health.ready', 'storage/health.ready'} <=
+          and set(baseline['contracts']['qualified_declared']) == {
+              'storage/health.ready','storage/account.find','storage/player.get','storage/match.allocate_ids',
+              'storage/match.save_result','storage/match.get','storage/settlement.get',
+              'auth/health.ready','auth/auth.authenticate',
+              'lobby/health.ready','lobby/lobby.execute','lobby/lobby.detach','lobby/lobby.heartbeat'},
+          'service-qualified registrations must include every real service health and business handler')
+    check({'auth/auth.authenticate','auth/health.ready','storage/health.ready','lobby/health.ready'} <=
           set(baseline['contracts']['qualified_declared']), 'native listener coverage missing')
     messages, _ = module._proto((root/'shared/proto/auth.proto').read_text())
     check(messages['AuthenticateRequest']['proposed_epoch'] == ('uint64', 1)
           and messages['AuthenticateRequest']['credential_kind'] == ('CredentialKind', 2),
           'nested enum must not hide its enclosing message fields')
-    cases.append(dict(name='current_production_sources_and_nine_qualified_rpc_contracts', passed=True))
+    cases.append(dict(name='current_production_sources_and_thirteen_qualified_rpc_contracts', passed=True))
 
     def mutation(name, mutate, code):
         with tempfile.TemporaryDirectory(prefix='arena-boundary-') as directory:

@@ -11,8 +11,9 @@
 #include <thread>
 
 #include "net/InetAddress.h"
-#include "net/OnlineRegistry.h"
 #include "net/RejectionCounters.h"
+
+#include "lobby/SessionBinding.h"
 
 namespace service::gateway
 {
@@ -32,6 +33,20 @@ public:
         Expired
     };
 
+    /** @brief Owns a local projection and thread-safe remote cleanup
+     * handles. */
+    struct Projection
+    {
+        /// Immutable permission tuple, rechecked by Lobby for every
+        /// command.
+        service::lobby::SessionBinding binding;
+        /// Nonblocking revocation and expiry check without mutable
+        /// session access.
+        std::function<bool()> current;
+        /// Nonblocking once-only detach handoff, safe on final
+        /// foreign release.
+        std::function<void()> release;
+    };
     ConnectionSession();
     /** @brief Releases passive metadata after its final shared owner.
      * Final release may occur on a business thread after protocol
@@ -53,13 +68,15 @@ public:
      */
     void setCloseRequest(std::function<void()>);
     std::function<void()> closeRequest() const;
-    bool bind(std::shared_ptr<SessionLease>);
+    /** @brief Consumes one projection and releases it once even on
+     * rejection. */
+    bool bind(Projection);
     bool superseded() const;
     /** @brief Returns the current authenticated binding on its
-     * connection owner. Returns empty when no authoritative lease is
+     * connection owner. Returns empty when no local projection is
      * bound or it was superseded.
      */
-    std::optional<SessionBinding> binding() const;
+    std::optional<service::lobby::SessionBinding> binding() const;
     /** @brief Releases the session binding on its connection owner.
      * @throws std::logic_error When called from a foreign thread.
      */
@@ -77,7 +94,9 @@ private:
     const std::thread::id m_owner;
     /// Authentication state mutated only by the owner thread.
     LoginState m_loginState{LoginState::Pending};
-    std::shared_ptr<SessionLease> m_binding;
+    /// Local value and callbacks; no Lobby registry or lease
+    /// ownership.
+    std::optional<Projection> m_binding;
     struct CloseEndpoint;
     std::shared_ptr<CloseEndpoint> m_closeEndpoint;
 };

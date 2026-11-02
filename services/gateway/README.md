@@ -1,233 +1,160 @@
 # Gateway
 
-The gateway is the implemented Linux networking service. CMake builds
-`arena_gateway` and the `ArenaServer` executable. Source is under `include/net`,
-`src/net` and `app`; other service scopes must not be inferred from target-design
-documents.
+CMake builds `arena_gateway` and `services/gateway/app/ArenaServer`. Production
+handshake mode serves TCP/WebSocket transports and forwards application requests
+to the independent `ArenaLobby` process. Gateway owns no authoritative online
+registry, matching queue, room actor, JWT signing key, password KDF or persistence
+worker. Embedded adapters live under `tests/support/gateway` for test fixtures
+and are excluded from the production Gateway link image. Main uses
+`makeRemoteLobbyMessageRegistry` and `LobbyClient`.
 
-## Current modules
+```text
+TCP / WebSocket -> Gateway -> Lobby -> Auth -> Storage -> PostgreSQL
+                                +--------------^
+```
+
+Lobby owns session/grace state, matching, room simulation and the local durable
+journal. Auth performs credential verification and JWT signing; Storage owns SQL
+and database transactions. See the [Lobby runtime](../lobby/README.md) for startup,
+recovery, settlement and offline replay export.
+
+## Connection modules and ownership
 
 | Module | Responsibility |
 | --- | --- |
-| `TcpServer`, `AsioTcpServer`, `WebSocketServer` | Listening, accepted descriptor handoff, owner registries and stop completion |
-| `AdmissionController` | Shared process-local total/IP admission leases and bounded-cardinality counters |
-| `ITransport` | Concrete byte I/O, buffers, partial reads/writes, half-close and physical close |
-| `ConnectionHost` | One connection's lifetime, read pause composition, transport pressure and bounded owner mailbox |
-| `ConnectionChannel` | Explicit owner-thread interface provided to protocol handlers, separate from concrete transport |
-| `FrameProtocol` | Bounded framing and complete-frame packet policy checks |
-| `ArenaProtocol` | Envelope decoding, request conversion and reply encoding |
-| `RequestDispatcher` | Request admission, authentication requirements, 64 pending requests, deadlines and once-only completion |
-| `MessageRegistry` | A sealed route table shared by connection owners |
-| `OnlineRegistry` | Logical sessions, auth leases, presence, manual rosters and atomic two-player managed allocation |
-| `OnlineRegistryMaintenance` | Management-owner sweeps and shutdown, independent of a disconnected transport |
-| `MatchmakingService` | Bounded commands, session fencing, matching/expiry and trusted owner-side room allocation |
-| `MatchHandler` | Authenticated join/cancel/status wire adapters; MMR comes from the server |
-| `RoomService` | Tick mailboxes, domain Room/Battle lifecycle, 20 Hz simulation and retained result stubs |
-| `RoomHandler` | Authenticated controls, readiness, recovery and result adapters with actor/membership fences |
+| `TcpServer`, `AsioTcpServer`, `WebSocketServer` | Listener descriptors, accepted handoff, connection owners and finite stop |
+| `AdmissionController` | Shared process-local total/IP reservation leases and counters |
+| `ITransport` | Concrete nonblocking byte I/O, buffers, partial reads/writes and physical close |
+| `ConnectionHost` / `ConnectionChannel` | Owner-thread lifetime, read pauses, backpressure and bounded completion mailbox |
+| `FrameProtocol` / `ArenaProtocol` | Packet framing, policies, Envelope decoding and canonical reply encoding |
+| `RequestDispatcher` / `MessageRegistry` | Sealed routes, authentication requirements, 64 pending requests, deadlines and once-only completion |
+| `RemoteLobbyRoutes` / `LobbyClient` | Typed v1 RPC, captured Lobby route, cancellation, transport heartbeats and readiness probes |
+| `ConnectionSession` | Passive binding projection, validity check and exactly-once release; no Lobby authority object |
 
-The input path is transport -> Host -> per-connection protocol -> packet
-policies -> Envelope -> Dispatcher -> registered handler. The reply path runs
-through protocol encoding and the same channel back to the transport. There
-are no RTTI capability casts between these modules.
+The input path is transport -> Host -> framing/policies -> Envelope -> Dispatcher
+-> remote route. Ping stays local; Login, session/room operations, matching,
+inputs and settlement go to Lobby using the existing public message IDs.
+Business errors enter the same canonical frontend error encoder and rejection
+counters as local errors. Typed successful replies must still match their request.
 
-`ConnectionContext` retains immutable connection ID, trusted socket peer and
-steady-clock acceptance time, plus owner-thread `ConnectionSession`
-authentication state and shared rejection counters. That authentication state
-is distinct from the domain's recoverable `Session` model. The old unused
-network `Session`/`SessionManager` and generic `PacketHandler` chain are removed.
+`ConnectionContext` owns immutable physical connection ID, trusted socket peer,
+acceptance time and rejection counters. Session mutation belongs to the connection
+owner. A foreign RPC completion prepares owning values and crosses the weak owner
+mailbox; only a live, unexpired request may install a login projection. Late
+successful logins trigger conditional remote detach rather than binding a closed
+connection. RPC cancellation does not prove a remote durable mutation rolled back.
 
-## Application profiles
+Gateway's dedicated RPC executor is separate from connection owners. Finite
+business calls, one heartbeat slot and one independent readiness slot drain before
+that executor retires. Heartbeats run in bounded batches of at most 512 current
+connections. Only a successful qualified revocation can invalidate the matching
+projection; dependency failure cannot revive a projection or create a new session.
+Reconnect/grace and stable logical session/room identity belong to Lobby.
 
-```bash
-ArenaServer epoll raw
-ArenaServer asio packet
-ArenaServer asio handshake http://localhost:3000
+## Executable profiles
+
+```sh
+build/services/gateway/app/ArenaServer epoll raw
+build/services/gateway/app/ArenaServer asio packet
+build/services/gateway/app/ArenaServer asio handshake http://localhost:3000
 ```
 
-`raw` echoes bytes. `packet` echoes binary request frames. `handshake` uses the
-Arena request protocol and remains available in main with the Asio backend.
-TCP listens on `127.0.0.1:8888`; handshake additionally listens on
-`127.0.0.1:8889/ws`. Both carry the existing PacketCodec binary frame. WebSocket
-requires binary messages and the exact configured Origin (default
-`http://localhost:3000`). Missing/different Origin is rejected before upgrade.
+`raw` echoes bytes; `packet` echoes binary frames. Production `handshake` requires
+Asio and an explicit `ARENA_LOBBY_TOKEN`; Auth, Lobby and Storage must be running.
+It does not enable embedded business by setting `ARENA_JWT_KEY` or an account file.
+Use the [unified launcher](../lobby/README.md#unified-startup-and-offline-replay)
+for the four-process stack.
 
-The default route table handles Ping and returns unavailable for Login. With
-`ARENA_JWT_KEY`, main installs JWT/session, matching and room routes. Adding
-`ARENA_ACCOUNTS_FILE` installs the file-backed password account adapter and
-OpenSSL PBKDF2 verifier; without it password login remains unavailable. See the
-[authentication contract](../auth/README.md) for the account file and KDF limits.
-Online/session authority remains process-local.
+TCP defaults to `127.0.0.1:8888`; handshake also serves `127.0.0.1:8889/ws`.
+Both carry PacketCodec binary frames. WS accepts binary messages and the exact
+configured Origin, default `http://localhost:3000`; missing/different Origin is
+rejected before upgrade. Handshake packet policies allow outer type `{1}` with a
+200-packet burst replenished at 100 packets/s, once per complete frame before
+protobuf decoding. Malformed framing/payload closes the connection; typed
+business errors produce replies.
 
-## Online sessions and reconnect
-
-The authenticated registry exposes SessionState (20/21), RoomJoin (30/31) and
-RoomLeave (32/33) request/response routes. A nonzero room ID creates a bounded
-manual roster on first join. Match-created rooms use server-managed allocation:
-direct RoomJoin cannot enter that namespace or move active participants out;
-RoomLeave cannot bypass its lifecycle. Invitations and distributed membership
-authority remain planned.
-The defaults are 100000 retained players, 10000 rooms and 64 members per room.
-Room moves, leaving, session replacement and expiry update both indexes in
-one mutex transaction; snapshots own their data and include Online/Detached
-member presence. The owner-affine domain Session/Room models are not shared
-across worker threads.
-
-LoginResponse adds `session_id`, `room_id` (zero if unbound) and `resumed`.
-The logical SessionId stays stable across authorized JWT recovery; the
-connection ID, epoch and token change. Password login starts a fresh logical
-session and removes previous room membership. Existing JWT LoginRequest
-(`credential_kind=CREDENTIAL_JWT`, empty account) is the reconnect entry.
-Its signed token must still match the current registry epoch/expiry.
-
-The first matching disconnect changes presence to Detached and keeps the
-logical session and room slot for grace. It retains no Host or socket.
-Repeated or old disconnects cannot extend grace or remove a replacement.
-Recovery at or after the monotonic deadline is rejected, even before the
-next maintenance tick. A management timer sweeps every 100 ms without login
-traffic, removing expired sessions/members and empty manual rosters. Managed
-metadata remains until its room owner releases the allocation. JWT expiry
-also reclaims records. Application shutdown stops maintenance before draining
-owners, then clears registry state after their retirement. Reconnect restores
-session/room state; it does not replay requests cancelled by the old connection.
-
-Handshake packet policy is a 200-packet burst, replenished at 100 packets/s,
-and an outer request-type allowlist `{1}`. It applies once per complete frame
-before protobuf decoding. Malformed framing/payload closes the connection;
-typed request errors are encoded as replies.
-
-## Match tickets
-
-With the authenticated route table, MatchJoin (40/41), MatchCancel (42/43)
-and MatchStatus (44/45) use the process-local `arena_match` queue. Join takes
-a nonzero client join key, returns promptly, and can be retried after an
-uncertain RPC outcome. Cancel/status target a ticket ID and are restricted to
-the authenticated logical session. A connection request deadline cancels reply
-delivery; an already admitted business command may still commit. Retry the
-same join key to recover its outcome. No client-supplied rating is accepted.
-
-Matching runs every 100 ms on the management owner, separately from connection
-owners. Defaults: 1v1, window 50 +25 per second up to 500, both windows must
-accept, timeout 30 seconds. Detached sessions pause pairing while their original
-waiting time/deadline continue. JWT recovery retains the ticket; fresh password
-sessions cannot steal it. Expired/replaced/room-bound sessions cancel waiting
-tickets on upkeep. Authorization is rechecked when each deferred command runs.
-
-Main supplies a provisional rating of 1500; a rating store plugs into
-`RatingProvider`. Each new pair is exported once from the queue. The configured
-owner atomically binds both logical sessions to one server room in
-`OnlineRegistry`, then opens its `RoomService` lifecycle. Failed hosting rolls
-back allocation. Success releases the queue assignment fences and saves the
-same `room_id` in both retained tickets; the managed room prevents another
-admission. Allocation failure returns unavailable. Assemblies without an
-allocator keep the explicit assignment-release contract. See the
-[match queue contract](../match/README.md).
-
-## Managed room protocol and recovery
-
-Existing IDs 10–53 and their fields remain stable. The lobby uses authenticated
-SessionState: no room means lobby; LoginResponse, SessionState or assigned
-MatchTicket.room_id discovers an allocated room.
-
-| Request / response | IDs | Contract |
+| Gateway setting | Default | Meaning |
 | --- | --- | --- |
-| RoomInput | 50 / 51 | Existing actor/member fences, contiguous sequence and integer control |
-| RoomSnapshot | 52 / 53 | Existing committed kernel snapshot; manual rooms may initialize lazily |
-| RoomReady | 54 / 55 | bool ready, actor incarnation and membership epoch; returns managed status |
-| RoomStatus | 56 / 57 | Current managed status or this logical session's latest retained result |
-| Settlement | 58 / 59 | Nonzero match ID; immutable result for the same participant/session |
+| `ARENA_LOBBY_TOKEN` | required | Explicit Gateway-to-Lobby credential; no generated/default token |
+| `ARENA_LOBBY_PORT` | `7102` | Loopback dependency port when runtime discovery is absent |
+| `ARENA_LOBBY_MAX_INFLIGHT` | `64` | Business RPC bound, 1..1024; heartbeat/probe have separate finite slots |
+| `ARENA_LOBBY_TIMEOUT_MS` | `1000` | RPC deadline cap, 1..1000 ms, also clipped to the parent request |
+| `ARENA_TCP_PORT` / `ARENA_WS_PORT` | `8888` / `8889` | Distinct nonzero business ports |
+| `ARENA_MAX_CONNECTIONS` | `1000` | Shared TCP/WS admitted connection bound; handshake accepts at most 65536 |
+| `ARENA_MAX_CONNECTIONS_PER_IP` | `100` | Reservations for the real peer IPv4, excluding source port |
+| `ARENA_HEALTH_PORT` | unset | Separate loopback HTTP listener; direct application startup permits `0` |
+| `ARENA_RUNTIME_CONFIG` / `ARENA_NODE_ID` | unset / `gateway` | Optional versioned discovery file and operator node identity |
 
-RoomStatus contains the kernel snapshot, match ID, phase, both members' readiness
-and presence, start/finish tick, played/duration ticks and optional result.
-Incarnation, membership epoch and last applied input sequence allow authorized
-JWT recovery to continue with the next sequence. The room owner rechecks the
-transport generation and logical session after admission; callbacks retain
-values and completion handles rather than a raw connection.
+Only total/IP admission is process-local. Pending worker handoff and incomplete
+WS upgrades retain their reservations. Setup failure and owner cleanup release
+leases. TCP/WS share one controller in main; independently assembled listeners
+can have their own controller. Counters use fixed labels rather than peer/player
+metric labels.
 
-Managed phases are Forming → Ready → Playing → Settling → Finished. Both ready
-flags produce Ready at a cutoff; a following cutoff starts Playing. Input
-applies only during Playing. After the configured successful Playing ticks,
-the owner creates one draw result stub and freezes simulation; the next cutoff
-releases registry membership. Result ID equals match ID; both participants see
-the same final tick/checksum and winner zero. Missing/replaced members, grace
-expiry and readiness timeout settle with a typed reason. Clients cannot finish
-a match or choose a winner.
+## Runtime discovery and health
 
-Detached members remain in the fixed cohort during grace. JWT recovery retains
-actor incarnation, membership, readiness and input sequence. Fresh or expired
-logical sessions cannot query old results. Finished status and settlement remain
-queryable after room unbinding for bounded retention. These are in-memory
-stubs without economy, ranking or restart recovery; general combat rules remain
-future work.
+An optional `ARENA_RUNTIME_CONFIG` file uses the shared runtime schema:
 
-The service mailbox admits at most 1024 pending commands. Capacity/history
-limits fail closed. Shutdown closes command admission, completes accepted
-pending commands with unavailable, cancels the timer, and destroys domain
-tickets on the management owner before the executor retires. `event=match_tick`
-reports changed counters; final `MATCH_COUNTS` includes disjoint wait/gap
-histograms and cumulative sums, with no per-player metric labels.
+```json
+{
+  "version": "1",
+  "desiredReady": true,
+  "drainGraceMs": 5000,
+  "nodes": [
+    {"service": "lobby", "nodeId": "lobby-a", "host": "127.0.0.1", "port": 7102, "ready": true}
+  ]
+}
+```
+
+Gateway selects the first ready Lobby node in canonical service/node order. Each
+admitted call retains one route snapshot; reload cannot retarget it. A configured
+store without a ready Lobby node fails closed, with no fixed-endpoint fallback,
+transport retry or local-business fallback. This is static service discovery;
+Room sharding, owner epochs and replicated routing are not implemented.
+
+Publish a complete regular file by atomic rename, then send `SIGHUP` to configured
+processes. Unknown/duplicate fields, malformed values, files over 64 KiB and stale
+versions are rejected. Versions must strictly increase, including when restoring
+older contents. Publication is atomic within each process, not across the stack.
+One loader and one coalesced pending reload bound repeated signals. Startup
+listener/key configuration does not change through discovery reload.
+
+- `/health/alive` reports the control owner's liveness, including drain.
+- `/health/ready` requires bound listeners, operator/node intent, no drain and a
+  recent authenticated **Lobby** `health.ready` result for the current route.
+- `/health/config` exposes version, readiness, inflight and reload counters.
+
+Providers read cached state rather than issuing SQL/RPC. Health has at most 16
+peers, 4 KiB request headers and 250 ms I/O deadlines. Lobby probes run before any
+login and recur on the 250 ms control timer, with a 300 ms maximum RPC timeout.
+Route changes and probe errors cannot leave a stale ready result authoritative.
+New connections fail readiness admission when the dependency is unavailable.
+With runtime control, existing connections can still request room input/status
+while unrelated Auth/Storage dependencies are down; login, match join and
+settlement require dependency readiness. Explicit operator quiescence gates all
+new business requests.
 
 ## Capacity and shutdown
 
-For a manual roster, authenticated RoomSnapshot (52/53) lazily initializes an
-`arena_room` actor. RoomInput (50/51) carries its incarnation, membership epoch,
-contiguous sequence and integer controls. Actors run on the management owner
-at an absolute 50 ms cadence. Connection workers enqueue bounded value commands;
-only a tick cutoff changes room state. JWT recovery preserves member sequence;
-leaving and rejoining increments a separate membership fence. Every committed
-tick has a canonical checksum and a bounded replay record. See the
-[room runtime contract](../room/README.md) for input ordering, catch-up,
-reclamation, replay schema and the reference integer update rule.
+Frame bodies are limited to 256 KiB; transport output has a 1 MiB hard bound.
+Host backpressure composes read-pause reasons, resuming only when all clear.
+The owner mailbox accepts at most 256 outstanding foreign actions. Queue and
+transport bounds remain active regardless of optional policies.
 
-All rooms share one management owner. Managed matches create actors during
-allocation; manual rosters still initialize lazily. The service owns domain
-Room/Battle lifecycle entities; `RoomActor` owns deterministic reference
-simulation and replay state. Finished actors retain their last snapshot/result
-until bounded retention expires. General combat rules and a standalone Room
-network process remain planned.
-Shutdown stops room ticking and command admission before connection drain,
-then prints final `ROOM_COUNTS` with zero actors after owner reclamation.
-
-| Environment variable | Default | Meaning |
-| --- | --- | --- |
-| `ARENA_MAX_CONNECTIONS` | `1000` | Shared total TCP/WS admitted connections |
-| `ARENA_MAX_CONNECTIONS_PER_IP` | `100` | Shared reservations for a real peer IPv4, excluding source port |
-| `ARENA_TCP_PORT` | `8888` | TCP port, 1..65535 |
-| `ARENA_WS_PORT` | `8889` | WebSocket port, 1..65535 |
-| `ARENA_DISCONNECT_GRACE_MS` | `30000` | Detached session retention, 1..3600000 milliseconds |
-| `ARENA_MATCH_MAX_QUEUED` | `1024` | Maximum waiting players in the process-local queue |
-| `ARENA_MATCH_MAX_TICKETS` | `4096` | Waiting, pinned assignment and retry-history records; at least max queued |
-| `ARENA_MATCH_TIMEOUT_MS` | `30000` | Queue deadline, 1..3600000 milliseconds |
-| `ARENA_JWT_KEY` | unset | Enables authenticated session/match/room assembly with an explicit signing key |
-| `ARENA_ACCOUNTS_FILE` | unset | File-backed password accounts, used with authenticated assembly |
-| `ARENA_BATTLE_TICKS` | `100` | Successful Playing ticks before the result stub, 1..72000 |
-| `ARENA_READY_TIMEOUT_TICKS` | `600` | Managed pre-start tick limit, 1..72000 |
-| `ARENA_RESULT_RETENTION_MS` | `60000` | Finished status/result retention, 1..3600000 milliseconds |
-
-Limits must be positive representable integers. Listener constructors still
-accept an optional shared controller; omitting it creates a listener-local
-controller with the old max/max limits. Application assembly explicitly shares
-one controller. Reservations include pending worker handoff and incomplete WS
-upgrades, and retire after setup failure or connection cleanup. Shutdown prints
-active/peak/global/IP/local admission counters without per-peer metric labels.
-
-SIGINT/SIGTERM initiate owner-thread shutdown. Host first quiesces input,
+SIGINT/SIGTERM close admission and begin owner-thread drain. Host quiesces input,
 including later frames in a coalesced batch. ArenaProtocol waits for accepted
-requests to complete or time out, enqueues their replies, then allows transport
-write shutdown. TCP drains queued bytes, half-closes and waits for peer EOF.
-WS drains queued binary messages before normal Close. The server grace deadline
-bounds the whole sequence and forces retirement if necessary. Native reads
-continue during drain to observe EOF; application bytes are discarded. An
-immediate/policy close may discard pending output and requests. Stop completion
-and owner I/O retirement precede executor destruction.
+requests to finish or time out and enqueues their replies before transport write
+shutdown. TCP drains output, half-closes and waits for EOF; WS drains messages
+before normal Close. A finite grace deadline forces retirement when needed.
+Native reads continue to observe EOF while application bytes are discarded.
+Immediate/policy closure may discard pending output and requests.
 
-Gateway frame bodies are limited to 256 KiB; transport output has a 1 MiB hard
-limit. Host backpressure pauses at the high watermark and resumes only after
-all read pause reasons clear. Hard transport bounds remain active regardless
-of optional policies.
-
-Successful maintenance reclamation logs `event=online_sweep` with active,
-retained and room counts. These are process-local counts, without token or
-credential values.
+Connection owners and physical I/O retire before their executors. The remote
+client then cancels/drains actual calls and timer deliveries. Final
+`LOBBY_COUNTS` reports tracked/business/heartbeat/probe/owner-post work at zero;
+`connection_admission active=0` reports transport reservations. These physical
+cleanup counters do not require Lobby's durable sessions or retained results to
+be cleared at process shutdown.
 
 ## Extending a protocol or route
 
@@ -279,139 +206,31 @@ Concrete TCP byte operations use the `ITransport` names and byte spans:
 owner cleanup exactly once. The low-level `Socket::shutdownWrite` remains the
 actual write-half shutdown operation.
 
-## Verification
+## Verification and replay
 
-`cmake --build build -j4` builds all migrated targets. `ctest --preset gcc15`
-runs the normal matrix excluding performance suites. Gateway tests include
-transport lifecycle, all real TCP/WS policy/request profiles, shared admission,
-factory exception isolation, foreign replies, stale posters and bounded queues.
-`ApplicationLifecycleIntegrationTest.py` exercises real executable configuration
-and signals. ASan/UBSan are separate build checks; two legacy epoll FD-exhaustion
-cases can conflict with the installed UBSan runtime's own pipe allocation and
-must be reported separately from a passing non-UBSan verification.
+Focused executable checks include:
 
-The real-main journey harness creates temporary PBKDF2 account files and runs
-TCP/WebSocket bots through login/lobby/match/automatic allocation, readiness,
-fixed-tick input, result lookup and replay, with RST recovery and grace expiry.
-After rebuilding both executables, run:
-
-```bash
-python3 tests/room/FullJourneyIntegrationTest.py build/services/gateway/app/ArenaServer build/services/room/arena_replay --report-dir /tmp/arena-journey
+```sh
+ctest --test-dir build -R 'RemoteLobby|ConnectionContext|ServiceSupervisorAcceptance' --output-on-failure
+ctest --test-dir build -R '^(LobbyProcessAcceptance|FullJourneyProductionGateway|RuntimeConfigDiscovery|SupervisedProcessAcceptance)$' --output-on-failure
 ```
 
-On Linux, CTest adds `--clock-shim` with the built
-`build/tests/shared/clock/libarena_test_clock.so` for the Gateway child only.
-This test fixture advances civil time from a startup anchor using the real
-monotonic clock, isolating the journey from host wall-clock steps. Session grace,
-room ticks and replay assertions still use real elapsed time; production JWT
-validation is unchanged. Reports record the fixture mode. The direct command
-above uses the host clock unless the same optional flag is supplied. Existing
-preloads are retained, with dynamic sanitizer runtimes loaded before the fixture.
-This is an acceptance procedure, not a claim that a particular run passed.
-It uses the production application/account adapter; reports and logs go to the
-supplied directory.
+PostgreSQL-backed checks require the configured private PostgreSQL test tools and
+Python dependencies; see [Storage](../storage/README.md). The complete journey
+uses real Gateway/Auth/Lobby/Storage processes, TCP/WS bots, password/JWT recovery,
+matching, room input, settlement and offline durable replay. It creates no
+Gateway-local account file or persistence assembly. `SupervisedProcessAcceptance`
+uses the production launcher and verifies automatic Auth recovery with unchanged
+bystander PIDs, session/room/input continuity and final process/FD/pool cleanup.
 
-Multi-instance session authority, deployed load-balancer readiness integration, a
-connection login deadline and distributed business idempotency remain planned.
-This architecture supports their placement but does not claim deployed high
-availability or automatic recovery of in-flight business operations.
+CTest direct-stack journey/discovery checks use `RunWithClock.py` for the process
+tree when the test clock target is enabled. The production launcher deliberately
+filters test clock injection; its real acceptance uses the host clock. Production
+JWT verification is unchanged. Test fixtures and focused passes are not evidence
+that the separate 90-restart/99.9% gate or the full normal matrix has finished;
+final run reports provide that evidence.
 
-## Runtime configuration, discovery and health
-
-`ARENA_RUNTIME_CONFIG` opts into a versioned JSON file shared in schema with
-Storage. Keep the existing authenticated Storage settings and service token;
-the discovery file contains public endpoints and operator intent, not secrets.
-A minimal document is:
-
-```json
-{
-  "version": "1",
-  "desiredReady": true,
-  "drainGraceMs": 5000,
-  "nodes": [
-    {"service": "storage", "nodeId": "node-a", "host": "127.0.0.1", "port": 7105, "ready": true}
-  ]
-}
-```
-
-All fields are required, including explicit boolean values. The version is a
-nonzero uint64; a decimal string preserves its range in JSON tools. Grace is
-0..10000 ms; there must be 1..128 nodes with unique `(service,nodeId)` identities.
-Service/node names are bounded lowercase ASCII identifiers. Endpoints currently
-support only loopback `127.0.0.1` or `::1` and ports 1..65535, matching the internal
-RPC transport boundary. Unknown/duplicate fields, duplicate snake/camel aliases,
-string booleans, documents over 64 KiB and nesting beyond 16 levels are rejected.
-
-Publish a complete regular file with an atomic rename, then send `SIGHUP` to
-Gateway and the relevant Storage processes. Symlinks and unstable/partial reads
-are rejected. Each process has its own store and reload counters: publication
-is atomic within one process, not an atomic cluster-wide deployment. Readers
-retain an immutable snapshot; new versions replace one shared pointer. Versions
-must strictly increase. Restore previous contents with a higher version to roll
-back; a stale version cannot replace the current snapshot. Rejected loads keep
-the complete previous version serving. One loader plus one coalesced pending
-reload bounds repeated signals and callback-triggered requests.
-
-Gateway resolves the first ready Storage node in canonical `(service,nodeId)`
-order. Each admitted authentication, lookup, ID reservation or result attempt
-captures its endpoint; reload cannot retarget an in-flight call. When a runtime
-store is present and no Storage node is ready, admission fails closed without
-falling back to `ARENA_STORAGE_PORT`. This is static selection, not weighted load
-balancing or automatic replay of failed business commands.
-
-Set `ARENA_HEALTH_PORT` to a distinct loopback HTTP port; `0` selects an ephemeral
-port printed in `GATEWAY_READY`. A runtime file also enables health on an
-ephemeral port when the variable is absent. `ARENA_NODE_ID` defaults to `gateway`.
-An optional matching `gateway` node entry with `ready=false` closes this node's
-admission even when global `desiredReady` is true. Invalid configuration or
-listener startup fails with exit status 2.
-
-- `GET /health/alive`: 200 while the control owner is alive, including quiescence
-  and business drain.
-- `GET /health/ready`: 200 only after business listeners are bound, operator and
-  matching-node intent allow traffic, drain has not begun, and the current
-  Storage route has a recent successful authenticated `health.ready` probe.
-  Otherwise it returns 503.
-- `GET /health/config`: JSON with version, desired/configured readiness, drain,
-  inflight and reload counters. Health runs independently of business reactors;
-  at most 16 peers, 4 KiB request headers and 250 ms read/write deadlines bound
-  slow clients. Providers read cached state and never execute SQL or RPC.
-
-Without Storage, readiness needs only the local listener/intent/drain conditions.
-Storage probes are serialized, have a 300 ms upper RPC timeout, and schedule the
-next probe 250 ms after completion. A stale reply cannot make a replacement
-route ready. Existing rooms retain local input/status operations during a
-Storage outage; new connections and SQL-dependent login/join/settlement
-requests are gated. Explicit operator quiescence rejects all new business
-requests but is reversible with a higher-version ready configuration.
-
-On SIGINT/SIGTERM, control becomes permanently not-ready before business
-shutdown starts. Listeners use the current `drainGraceMs`, accepted persistence
-work is joined, and health closes last. A health request observes actual
-inflight RPC ownership; it does not count an abandoned caller as completed work.
-See the `RuntimeConfigPython`, `RuntimeConfigParity`, `RuntimeConfigDiscovery`
-and native runtime CTest cases for schema parity, reload storms, route capture,
-reversible quiescence, outage recovery and bounded real inflight drain.
-
-## Persistent room replay
-
-Set `ARENA_REPLAY_DIR=/safe/local/replays` when starting the authenticated
-handshake configuration to archive active rooms. The management owner copies
-an initial snapshot and every committed canonical tick to `ReplayRecorder`;
-a bounded private disk worker writes the complete stream independently of the
-actor's rolling in-memory history. Empty ticks and rejected simulation input
-attempts remain in the archive.
-
-Each run uses its own directory. Explicit room retirement/service stop seals
-accepted jobs; only a flushed, closed archive with its footer is renamed to
-`.areplay`. Queue/storage failures invalidate that recording and leave any
-partial file as `.part`, while simulation continues. Shutdown reports
-`REPLAY_COUNTS` with completed, failed and rejected counts. Recording does not
-promise fsync-level durability, unlimited disk retention or crash recovery.
-
-Run `build/services/room/arena_replay <file.areplay> --report <desync.json>`.
-Exit 0 means every recorded tick matched; 1 reports the first absolute desync
-tick and expected/actual checksum; 2 means malformed, unsupported, bounded-out
-or unreadable input/report output. The JSON also exposes every successful
-replay tick, with 64-bit integers as decimal strings. See
-[room replay format and tools](../room/README.md) for limits and examples.
+Production replay comes from Lobby's synced journal. Stop Lobby, run
+`arena_replay_export --state-dir ... --output-dir ...`, then verify the exported
+`.arena` with `build/services/room/arena_replay FILE --report REPORT.json`.
+See [offline export and local-durability limits](../lobby/README.md#unified-startup-and-offline-replay).

@@ -9,14 +9,14 @@
 #include <gtest/gtest.h>
 
 #include "net/ConnectionHost.h"
-#include "net/LoginHandler.h"
 #include "net/PacketBuffer.h"
 #include "net/PreLoginHandshake.h"
-#include "net/RoomService.h"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/PacketCodec.hpp"
 
 #include "auth/LoginAuthenticator.h"
+#include "gateway_test/LoginHandler.h"
+#include "lobby/RoomService.h"
 #include "runtime/OwnerScheduler.h"
 
 namespace
@@ -294,18 +294,18 @@ member(const wire::SessionStateResponse& state, std::uint64_t player)
 struct OnlineProtocolTest : testing::Test
 {
     arena::runtime::OwnerClock::time_point now{};
-    std::shared_ptr<OnlineRegistry> registry;
+    std::shared_ptr<service::lobby::OnlineRegistry> registry;
     std::shared_ptr<const MessageRegistry> routes;
 
     void SetUp() override
     {
-        OnlineRegistryConfig config;
+        service::lobby::OnlineRegistryConfig config;
         config.grace = std::chrono::milliseconds(100);
         config.maxPlayers = 10;
         config.maxRooms = 2;
         config.maxRoomMembers = 2;
         config.now = [this] { return now; };
-        registry = std::make_shared<OnlineRegistry>(
+        registry = std::make_shared<service::lobby::OnlineRegistry>(
             std::move(config)
         );
         auth::JwtConfig jwt;
@@ -732,7 +732,9 @@ TEST_F(
     auth::JwtConfig jwt;
     jwt.key = "0123456789abcdef0123456789abcdef";
     jwt.now = [] { return 1700000000LL; };
-    auto rooms = std::make_shared<RoomService>(registry);
+    auto rooms = std::make_shared<service::lobby::RoomService>(
+        registry
+    );
     auto production = makeLoginMessageRegistry(
         std::make_shared<auth::LoginAuthenticator>(
             std::make_shared<Accounts>(),

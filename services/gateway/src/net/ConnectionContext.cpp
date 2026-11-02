@@ -7,8 +7,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include "net/OnlineRegistry.h"
-
 namespace service::gateway
 {
 struct ConnectionSession::CloseEndpoint
@@ -100,17 +98,53 @@ std::function<void()> ConnectionSession::closeRequest() const
     };
 }
 
-bool ConnectionSession::bind(std::shared_ptr<SessionLease> binding)
+namespace
 {
-    requireOwner();
-    if (m_loginState != LoginState::Pending || !binding)
-        return false;
-    m_binding = std::move(binding);
-    if (!m_binding->current())
+bool projectionCurrent(
+    const ConnectionSession::Projection& projection
+) noexcept
+{
+    try
     {
-        m_loginState = LoginState::Expired;
+        return projection.current && projection.current();
+    }
+    catch (...)
+    {
         return false;
     }
+}
+void releaseProjection(
+    ConnectionSession::Projection projection
+) noexcept
+{
+    try
+    {
+        if (projection.release)
+            projection.release();
+    }
+    catch (...)
+    { /* Cleanup cannot unwind through transport shutdown. */
+    }
+}
+} // namespace
+
+bool ConnectionSession::bind(Projection projection)
+{
+    requireOwner();
+    if (m_loginState != LoginState::Pending || !projection.current ||
+        !projection.release || !projection.binding.connectionId ||
+        !projection.binding.epoch)
+    {
+        releaseProjection(std::move(projection));
+        return false;
+    }
+    if (!projectionCurrent(projection))
+    {
+        m_loginState = LoginState::Expired;
+        releaseProjection(std::move(projection));
+        return false;
+    }
+    m_binding.emplace(std::move(projection));
     m_loginState = LoginState::Authenticated;
     return true;
 }
@@ -118,17 +152,17 @@ bool ConnectionSession::bind(std::shared_ptr<SessionLease> binding)
 bool ConnectionSession::superseded() const
 {
     requireOwner();
-    return m_binding && !m_binding->current();
+    return m_binding && !projectionCurrent(*m_binding);
 }
 
-std::optional<SessionBinding> ConnectionSession::binding() const
+std::optional<service::lobby::SessionBinding>
+ConnectionSession::binding() const
 {
     requireOwner();
-    if (m_binding && m_binding->current())
-        return m_binding->binding;
-    return std::nullopt;
+    return m_binding && projectionCurrent(*m_binding)
+               ? std::optional(m_binding->binding)
+               : std::nullopt;
 }
-
 void ConnectionSession::disconnect()
 {
     requireOwner();
@@ -141,8 +175,8 @@ void ConnectionSession::cleanup() noexcept
         std::lock_guard lock(m_closeEndpoint->mutex);
         m_closeEndpoint->post = {};
     }
-    if (m_binding)
-        m_binding->release();
+    if (auto binding = std::exchange(m_binding, std::nullopt))
+        releaseProjection(std::move(*binding));
     m_loginState = LoginState::Expired;
 }
 

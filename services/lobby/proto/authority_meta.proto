@@ -1,0 +1,58 @@
+syntax = "proto3";
+package arena.lobby_meta;
+
+// Private durable metadata. No password or Auth signing key belongs here.
+message Transport {
+  string gateway_instance = 1;
+  uint64 connection_id = 2;
+  uint64 handle = 3;
+  uint64 player_id = 4;
+  uint64 epoch = 5;
+  int64 token_expires_at_unix = 6;
+  sint64 lease_deadline_nanos = 7;
+}
+message Receipt {
+  string key = 1;
+  uint32 method = 2;
+  bytes request_fingerprint = 3;
+  uint64 player_id = 4;
+  uint64 session_id = 5;
+  uint64 epoch = 6;
+  sint64 expires_nanos = 7;
+  bytes reply = 8;
+  // Only verified old claims are retained; never the original credential.
+  uint64 prior_epoch = 9;
+  int64 prior_expires_at_unix = 10;
+  uint32 credential_kind = 11;
+  string account = 12;
+}
+// Each attempt is reserved durably before sending; reconciliation uses
+// the same finite attempt and monotonic elapsed budget after restart.
+message SettlementDelivery {
+  enum Phase { PENDING = 0; IN_FLIGHT = 1; OUTCOME_UNKNOWN = 2; BLOCKED = 3; ACKNOWLEDGED = 4; }
+  uint64 match_id = 1;
+  string stable_idempotency_key = 2;
+  uint32 attempts = 3;
+  uint32 max_attempts = 4;
+  sint64 first_attempt_nanos = 5;
+  sint64 deadline_nanos = 6;
+  sint64 next_attempt_nanos = 7;
+  uint32 retry_base_ms = 8;
+  uint32 retry_max_ms = 9;
+  Phase phase = 10;
+  bytes request = 11;
+  uint32 last_status = 12;
+  sint64 retention_deadline_nanos = 13;
+}
+message Metadata {
+  uint32 version = 1;
+  string boot_id = 2;
+  uint64 reserved_epoch = 3;
+  uint64 transport_high_water = 4;
+  uint64 ticket_next = 5;
+  uint64 ticket_last = 6;
+  uint64 incarnation_high_water = 7;
+  repeated Transport transports = 8;
+  repeated Receipt receipts = 9;
+  repeated SettlementDelivery settlements = 10;
+}

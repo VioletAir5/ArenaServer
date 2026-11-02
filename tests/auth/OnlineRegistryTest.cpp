@@ -1,4 +1,4 @@
-#include "net/OnlineRegistry.h"
+#include "lobby/OnlineRegistry.h"
 
 #include <atomic>
 #include <barrier>
@@ -26,12 +26,12 @@ class OnlineRegistryPresenceTest : public ::testing::Test
 protected:
     std::atomic<std::int64_t> steadyMilliseconds{0};
     std::atomic<std::int64_t> wallSeconds{1700000000};
-    std::shared_ptr<OnlineRegistry> registry;
+    std::shared_ptr<service::lobby::OnlineRegistry> registry;
     std::unique_ptr<JwtTokens> tokens;
 
-    OnlineRegistryConfig configuration()
+    service::lobby::OnlineRegistryConfig configuration()
     {
-        OnlineRegistryConfig config;
+        service::lobby::OnlineRegistryConfig config;
         config.grace = 100ms;
         config.now = [this]
         {
@@ -54,7 +54,9 @@ protected:
     void SetUp() override
     {
         tokens = std::make_unique<JwtTokens>(tokenConfiguration());
-        registry = std::make_shared<OnlineRegistry>(configuration());
+        registry = std::make_shared<service::lobby::OnlineRegistry>(
+            configuration()
+        );
     }
 
     void TearDown() override
@@ -62,7 +64,7 @@ protected:
         registry->shutdown();
     }
 
-    std::expected<SessionGrant, AuthError> login(
+    std::expected<service::lobby::SessionGrant, AuthError> login(
         std::uint64_t player = 1,
         std::uint64_t connection = 1,
         std::function<void()> kick = [] {}
@@ -77,7 +79,7 @@ protected:
         );
     }
 
-    TokenClaims claims(const SessionGrant& grant)
+    TokenClaims claims(const service::lobby::SessionGrant& grant)
     {
         return tokens->verify(grant.token).value();
     }
@@ -87,13 +89,22 @@ TEST_F(OnlineRegistryPresenceTest, RejectsInvalidConfiguration)
 {
     auto config = configuration();
     config.maxPlayers = 0;
-    EXPECT_THROW(OnlineRegistry{config}, std::invalid_argument);
+    EXPECT_THROW(
+        service::lobby::OnlineRegistry{config},
+        std::invalid_argument
+    );
     config = configuration();
     config.maxRooms = 0;
-    EXPECT_THROW(OnlineRegistry{config}, std::invalid_argument);
+    EXPECT_THROW(
+        service::lobby::OnlineRegistry{config},
+        std::invalid_argument
+    );
     config = configuration();
     config.maxRoomMembers = 0;
-    EXPECT_THROW(OnlineRegistry{config}, std::invalid_argument);
+    EXPECT_THROW(
+        service::lobby::OnlineRegistry{config},
+        std::invalid_argument
+    );
     for (const auto grace :
          {0ms,
           -1ms,
@@ -102,11 +113,17 @@ TEST_F(OnlineRegistryPresenceTest, RejectsInvalidConfiguration)
     {
         config = configuration();
         config.grace = grace;
-        EXPECT_THROW(OnlineRegistry{config}, std::invalid_argument);
+        EXPECT_THROW(
+            service::lobby::OnlineRegistry{config},
+            std::invalid_argument
+        );
     }
     config = configuration();
     config.now = {};
-    EXPECT_THROW(OnlineRegistry{config}, std::invalid_argument);
+    EXPECT_THROW(
+        service::lobby::OnlineRegistry{config},
+        std::invalid_argument
+    );
 }
 
 TEST_F(
@@ -136,7 +153,10 @@ TEST_F(
         original->snapshot.sessionId
     );
     EXPECT_EQ(resumed->snapshot.roomId, RoomId{42});
-    EXPECT_EQ(resumed->snapshot.presence, Presence::Online);
+    EXPECT_EQ(
+        resumed->snapshot.presence,
+        service::lobby::Presence::Online
+    );
     EXPECT_EQ(resumed->snapshot.connectionId, 2u);
     EXPECT_FALSE(resumed->snapshot.graceDeadline);
     EXPECT_GT(resumed->snapshot.epoch, original->snapshot.epoch);
@@ -256,7 +276,10 @@ TEST_F(
     alice->lease->release();
     const auto aliceState = registry->snapshot(PlayerId{1});
     ASSERT_TRUE(aliceState);
-    EXPECT_EQ(aliceState->presence, Presence::Detached);
+    EXPECT_EQ(
+        aliceState->presence,
+        service::lobby::Presence::Detached
+    );
     EXPECT_EQ(aliceState->connectionId, 0u);
     ASSERT_TRUE(aliceState->graceDeadline);
     EXPECT_EQ(
@@ -266,13 +289,19 @@ TEST_F(
     const auto state = registry->state(bob->lease->binding);
     ASSERT_TRUE(state);
     ASSERT_EQ(state->members.size(), 2u);
-    EXPECT_EQ(state->members[0].presence, Presence::Detached);
-    EXPECT_EQ(state->members[1].presence, Presence::Online);
+    EXPECT_EQ(
+        state->members[0].presence,
+        service::lobby::Presence::Detached
+    );
+    EXPECT_EQ(
+        state->members[1].presence,
+        service::lobby::Presence::Online
+    );
     EXPECT_EQ(registry->activeCount(), 1u);
     EXPECT_EQ(registry->retainedCount(), 2u);
     EXPECT_EQ(
         registry->state(alice->lease->binding).error(),
-        OnlineError::NotCurrent
+        service::lobby::OnlineError::NotCurrent
     );
 }
 
@@ -361,7 +390,7 @@ TEST_F(
     EXPECT_FALSE(registry->snapshot(PlayerId{1}));
     EXPECT_EQ(
         registry->joinRoom(alice->lease->binding, RoomId{8}).error(),
-        OnlineError::NotCurrent
+        service::lobby::OnlineError::NotCurrent
     );
     EXPECT_EQ(registry->retainedCount(), 1u);
 }
@@ -430,7 +459,9 @@ TEST_F(
     auto config = configuration();
     config.maxRooms = 1;
     config.maxRoomMembers = 1;
-    registry = std::make_shared<OnlineRegistry>(config);
+    registry = std::make_shared<service::lobby::OnlineRegistry>(
+        config
+    );
     auto alice = login(1, 1);
     auto bob = login(2, 2);
     ASSERT_TRUE(alice);
@@ -456,7 +487,9 @@ TEST_F(
     auto config = configuration();
     config.maxPlayers = 2;
     config.maxRooms = 1;
-    registry = std::make_shared<OnlineRegistry>(config);
+    registry = std::make_shared<service::lobby::OnlineRegistry>(
+        config
+    );
     auto alice = login(1, 1);
     auto bob = login(2, 2);
     ASSERT_TRUE(alice);
@@ -503,7 +536,7 @@ TEST_F(
     advance = true;
     EXPECT_EQ(
         registry->state(alice->lease->binding).error(),
-        OnlineError::NotCurrent
+        service::lobby::OnlineError::NotCurrent
     );
     EXPECT_EQ(registry->retainedCount(), 0u);
     EXPECT_EQ(registry->roomCount(), 0u);
@@ -618,7 +651,9 @@ TEST_F(
     config.maxPlayers = 2;
     config.maxRooms = 2;
     config.maxRoomMembers = 1;
-    registry = std::make_shared<OnlineRegistry>(config);
+    registry = std::make_shared<service::lobby::OnlineRegistry>(
+        config
+    );
     auto alice = login(1, 1);
     auto bob = login(2, 2);
     ASSERT_TRUE(alice);
@@ -638,7 +673,7 @@ TEST_F(
     EXPECT_EQ(
         registry->joinRoom(resumed->lease->binding, RoomId{8})
             .error(),
-        OnlineError::RoomFull
+        service::lobby::OnlineError::RoomFull
     );
     EXPECT_EQ(
         registry->state(resumed->lease->binding)->session.roomId,
@@ -655,7 +690,9 @@ TEST_F(
 {
     auto config = configuration();
     config.maxRooms = 1;
-    registry = std::make_shared<OnlineRegistry>(config);
+    registry = std::make_shared<service::lobby::OnlineRegistry>(
+        config
+    );
     auto alice = login(1, 1);
     auto bob = login(2, 2);
     ASSERT_TRUE(alice);
@@ -663,7 +700,7 @@ TEST_F(
     ASSERT_TRUE(registry->joinRoom(alice->lease->binding, RoomId{7}));
     EXPECT_EQ(
         registry->joinRoom(bob->lease->binding, RoomId{8}).error(),
-        OnlineError::Capacity
+        service::lobby::OnlineError::Capacity
     );
     EXPECT_FALSE(
         registry->state(bob->lease->binding)->session.roomId
@@ -696,15 +733,15 @@ TEST_F(
     ASSERT_TRUE(resumed);
     EXPECT_EQ(
         registry->state(old->lease->binding).error(),
-        OnlineError::NotCurrent
+        service::lobby::OnlineError::NotCurrent
     );
     EXPECT_EQ(
         registry->joinRoom(old->lease->binding, RoomId{8}).error(),
-        OnlineError::NotCurrent
+        service::lobby::OnlineError::NotCurrent
     );
     EXPECT_EQ(
         registry->leaveRoom(old->lease->binding).error(),
-        OnlineError::NotCurrent
+        service::lobby::OnlineError::NotCurrent
     );
     old->lease->release();
     EXPECT_EQ(
@@ -721,9 +758,8 @@ TEST_F(
     for (int iteration = 0; iteration != 30; ++iteration)
     {
         steadyMilliseconds = 0;
-        auto current = std::make_shared<OnlineRegistry>(
-            configuration()
-        );
+        auto current = std::make_shared<
+            service::lobby::OnlineRegistry>(configuration());
         auto old = current
                        ->install(PlayerId{1}, 1, {}, *tokens, [] {});
         ASSERT_TRUE(old);
@@ -734,7 +770,7 @@ TEST_F(
         old->lease->release();
         steadyMilliseconds = 99;
         std::barrier start(2);
-        std::expected<SessionGrant, AuthError>
+        std::expected<service::lobby::SessionGrant, AuthError>
             recovered = std::unexpected(AuthError::Unavailable);
         std::thread resume(
             [&]
@@ -833,8 +869,10 @@ TEST_F(
     EXPECT_FALSE(grant->lease->current());
     EXPECT_NO_THROW(grant->lease->release());
     EXPECT_EQ(copied.playerId, PlayerId{1});
-    EXPECT_EQ(copied.presence, Presence::Online);
-    registry = std::make_shared<OnlineRegistry>(configuration());
+    EXPECT_EQ(copied.presence, service::lobby::Presence::Online);
+    registry = std::make_shared<service::lobby::OnlineRegistry>(
+        configuration()
+    );
 }
 
 TEST_F(
@@ -847,10 +885,13 @@ TEST_F(
     ASSERT_TRUE(alice);
     ASSERT_TRUE(bob);
     ASSERT_TRUE(outsider);
-    const std::array<MatchParticipant, 2> participants{
-        {{bob->snapshot.playerId, bob->snapshot.sessionId, 1480},
-         {alice->snapshot.playerId, alice->snapshot.sessionId, 1440}}
-    };
+    const std::array<service::lobby::MatchParticipant, 2>
+        participants{
+            {{bob->snapshot.playerId, bob->snapshot.sessionId, 1480},
+             {alice->snapshot.playerId,
+              alice->snapshot.sessionId,
+              1440}}
+        };
     auto allocated = registry->allocateMatch(17, participants);
     ASSERT_TRUE(allocated);
     EXPECT_EQ(allocated->members[0].playerId, PlayerId{1});
@@ -902,7 +943,10 @@ TEST_F(
         RoomId{(UINT64_C(1) << 63) | 45}
     );
     ASSERT_FALSE(future);
-    EXPECT_EQ(future.error(), OnlineError::InvalidRoom);
+    EXPECT_EQ(
+        future.error(),
+        service::lobby::OnlineError::InvalidRoom
+    );
     auto room = registry->allocateMatch(
         45,
         {{{PlayerId{1}, alice->snapshot.sessionId},
@@ -914,15 +958,18 @@ TEST_F(
     {
         const auto joined = registry->joinRoom(binding, room->roomId);
         ASSERT_FALSE(joined);
-        EXPECT_EQ(joined.error(), OnlineError::InvalidRoom);
+        EXPECT_EQ(
+            joined.error(),
+            service::lobby::OnlineError::InvalidRoom
+        );
     }
     EXPECT_EQ(
         registry->leaveRoom(alice->lease->binding).error(),
-        OnlineError::InvalidRoom
+        service::lobby::OnlineError::InvalidRoom
     );
     EXPECT_EQ(
         registry->joinRoom(alice->lease->binding, RoomId{7}).error(),
-        OnlineError::InvalidRoom
+        service::lobby::OnlineError::InvalidRoom
     );
     EXPECT_EQ(registry->roomMembers(room->roomId).size(), 2U);
     EXPECT_FALSE(registry->snapshot(PlayerId{3})->roomId);
@@ -952,7 +999,7 @@ TEST_F(
     ASSERT_TRUE(room);
     EXPECT_EQ(
         registry->roomMembers(room->roomId)[0].presence,
-        Presence::Detached
+        service::lobby::Presence::Detached
     );
     auto recovered = registry->install(
         PlayerId{1},
@@ -993,7 +1040,10 @@ TEST_F(
           {PlayerId{2}, bob->snapshot.sessionId}}}
     );
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error(), OnlineError::NotCurrent);
+    EXPECT_EQ(
+        result.error(),
+        service::lobby::OnlineError::NotCurrent
+    );
     EXPECT_FALSE(registry->snapshot(PlayerId{1}));
     EXPECT_FALSE(registry->snapshot(PlayerId{2})->roomId);
     EXPECT_EQ(registry->roomCount(), 0U);
@@ -1064,7 +1114,9 @@ TEST_F(
 {
     auto settings = configuration();
     settings.maxRoomMembers = 1;
-    registry = std::make_shared<OnlineRegistry>(settings);
+    registry = std::make_shared<service::lobby::OnlineRegistry>(
+        settings
+    );
     auto alice = login(1, 1), bob = login(2, 2);
     ASSERT_TRUE(alice);
     ASSERT_TRUE(bob);
@@ -1076,13 +1128,15 @@ TEST_F(
                   {PlayerId{2}, bob->snapshot.sessionId}}}
             )
             .error(),
-        OnlineError::RoomFull
+        service::lobby::OnlineError::RoomFull
     );
     EXPECT_FALSE(registry->snapshot(PlayerId{1})->roomId);
     EXPECT_FALSE(registry->snapshot(PlayerId{2})->roomId);
     settings = configuration();
     settings.maxRooms = 1;
-    registry = std::make_shared<OnlineRegistry>(settings);
+    registry = std::make_shared<service::lobby::OnlineRegistry>(
+        settings
+    );
     alice = login(1, 1);
     bob = login(2, 2);
     auto third = login(3, 3);
@@ -1098,7 +1152,7 @@ TEST_F(
                   {PlayerId{2}, bob->snapshot.sessionId}}}
             )
             .error(),
-        OnlineError::Capacity
+        service::lobby::OnlineError::Capacity
     );
     EXPECT_FALSE(registry->snapshot(PlayerId{1})->roomId);
     EXPECT_FALSE(registry->snapshot(PlayerId{2})->roomId);
@@ -1121,8 +1175,10 @@ TEST_F(
     ASSERT_TRUE(bob);
     ASSERT_TRUE(charlie);
     std::barrier gate(3);
-    std::optional<std::expected<ManagedRoom, OnlineError>> first,
-        second;
+    std::optional<std::expected<
+        service::lobby::ManagedRoom,
+        service::lobby::OnlineError>>
+        first, second;
     std::thread left(
         [&]
         {
