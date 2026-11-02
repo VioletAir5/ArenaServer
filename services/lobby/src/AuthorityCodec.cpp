@@ -1031,6 +1031,22 @@ void encode(
     w->set_started(v.started);
     w->set_accepting(v.accepting);
     w->set_incarnation_high_water(v.incarnationHighWater);
+    w->set_counter_version(v.counterVersion);
+    budget.collection(v.roomCounters.size());
+    for (const auto& item : v.roomCounters)
+    {
+        auto* value = w->add_room_counters();
+        value->set_room_id(item.roomId.value());
+        value->set_known_since_tick(item.knownSinceTick);
+        value->set_complete_history(item.completeHistory);
+        encode(item.counters, value->mutable_counters(), budget);
+    }
+    if (v.counterVersion)
+        encode(
+            v.unattributedCounters,
+            w->mutable_unattributed_counters(),
+            budget
+        );
 }
 RoomCheckpoint decode(const wire::RoomCheckpoint& w, Budget& budget)
 {
@@ -1052,6 +1068,31 @@ RoomCheckpoint decode(const wire::RoomCheckpoint& w, Budget& budget)
         v.actors.push_back(decode(a, budget));
     for (const auto& m : w.matches())
         v.matches.push_back(decode(m, budget));
+    require(w.counter_version() <= 1);
+    v.counterVersion = w.counter_version();
+    budget.collection(w.room_counters_size());
+    if (v.counterVersion)
+    {
+        require(w.has_unattributed_counters());
+        v.unattributedCounters = decode(
+            w.unattributed_counters(),
+            budget
+        );
+    }
+    else
+        require(
+            !w.room_counters_size() && !w.has_unattributed_counters()
+        );
+    for (const auto& item : w.room_counters())
+    {
+        require(item.has_counters());
+        v.roomCounters.push_back(
+            {arena::domain::RoomId{identity(item.room_id())},
+             item.known_since_tick(),
+             item.complete_history(),
+             decode(item.counters(), budget)}
+        );
+    }
     return v;
 }
 wire::CoreCheckpoint encodeCore(const CoreCheckpoint& v)

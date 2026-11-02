@@ -37,6 +37,8 @@ namespace
 {
 constexpr std::size_t fileHeaderBytes = 16;
 constexpr std::size_t frameHeaderBytes = 24;
+constexpr std::size_t checkpointHeaderBytes = 28;
+constexpr std::string_view checkpointMagic = "ARLOBBY2";
 constexpr std::string_view fileMagic = "ARLOBBY1";
 constexpr std::string_view frameMagic = "KVTX";
 
@@ -167,6 +169,21 @@ std::string header()
     return result;
 }
 
+/** @brief Records the revision and mandatory checkpoint frame count.
+ * A partial checkpoint is corruption; only later append tails may be
+ * cut.
+ */
+std::string
+checkpointHeader(std::uint64_t revision, std::uint32_t frames)
+{
+    std::string result(checkpointMagic);
+    put32(result, 2);
+    put64(result, revision);
+    put32(result, frames);
+    put32(result, checksum(result));
+    return result;
+}
+
 /** @brief Canonical payloads reject duplicate keys, ambiguous tags
  * and trailing data. */
 std::optional<std::vector<DurableStateStore::Mutation>>
@@ -241,6 +258,56 @@ std::string frame(std::uint64_t revision, std::string_view payload)
     put32(result, checksum(payload));
     put32(result, checksum(result));
     result += payload;
+    return result;
+}
+
+/** @brief Bounds each checkpoint frame by the same admission limit as
+ * normal mutations. The immutable image is prepared before touching
+ * disk.
+ */
+std::optional<std::string> checkpoint(
+    const DurableStateStore::Snapshot& snapshot,
+    const DurableStateStore::Config& config,
+    std::size_t appendBytes
+)
+{
+    std::vector<DurableStateStore::Mutation> chunk;
+    std::vector<std::string> frames;
+    std::size_t encoded = 4, total = checkpointHeaderBytes;
+    const auto flush = [&]() -> bool
+    {
+        if (chunk.empty())
+            return true;
+        auto bytes = frame(snapshot.revision, encode(chunk));
+        if (bytes.size() > config.maxBytes - total)
+            return false;
+        total += bytes.size();
+        frames.push_back(std::move(bytes));
+        chunk.clear();
+        encoded = 4;
+        return true;
+    };
+    for (const auto& [key, value] : snapshot.values)
+    {
+        const auto charge = 9 + key.size() + value.size();
+        if (charge > config.maxRecordBytes - 4)
+            return std::nullopt;
+        if ((charge > config.maxRecordBytes - encoded ||
+             chunk.size() == 65536) &&
+            !flush())
+            return std::nullopt;
+        chunk.push_back({key, value});
+        encoded += charge;
+    }
+    if (!flush() || appendBytes > config.maxBytes - total)
+        return std::nullopt;
+    auto result = checkpointHeader(
+        snapshot.revision,
+        static_cast<std::uint32_t>(frames.size())
+    );
+    result.reserve(total);
+    for (const auto& bytes : frames)
+        result += bytes;
     return result;
 }
 
@@ -374,10 +441,34 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
         if (size < fileHeaderBytes)
             invalidJournal();
         std::string bytes(fileHeaderBytes, '\0');
-        if (!readAll(journal.get(), bytes, 0) || bytes != header())
+        if (!readAll(journal.get(), bytes, 0))
             invalidJournal();
         auto current = std::make_shared<Snapshot>();
         std::size_t offset = fileHeaderBytes;
+        std::uint32_t checkpointFrames = 0;
+        std::set<std::string> checkpointKeys;
+        if (bytes != header())
+        {
+            if (bytes.substr(0, 8) != checkpointMagic ||
+                size < checkpointHeaderBytes)
+                invalidJournal();
+            bytes.assign(checkpointHeaderBytes, '\0');
+            if (!readAll(journal.get(), bytes, 0) ||
+                get32(std::string_view(bytes).substr(8)) != 2 ||
+                checksum(std::string_view(bytes).substr(0, 24)) !=
+                    get32(std::string_view(bytes).substr(24)))
+                invalidJournal();
+            current->revision = get64(
+                std::string_view(bytes).substr(12)
+            );
+            checkpointFrames = get32(
+                std::string_view(bytes).substr(20)
+            );
+            if (!current->revision ||
+                checkpointFrames > config.maxKeys)
+                invalidJournal();
+            offset = checkpointHeaderBytes;
+        }
         bool tail = false;
         while (offset < size)
         {
@@ -396,6 +487,8 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
                 invalidJournal();
             if (remaining < frameHeaderBytes)
             {
+                if (checkpointFrames)
+                    invalidJournal();
                 tail = true;
                 break;
             }
@@ -412,12 +505,17 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
                 std::string_view(bytes).substr(16)
             );
             if (!length || length > config.maxRecordBytes ||
-                current->revision ==
-                    std::numeric_limits<std::uint64_t>::max() ||
-                revision != current->revision + 1)
+                (checkpointFrames
+                     ? revision != current->revision
+                     : (current->revision ==
+                            std::numeric_limits<
+                                std::uint64_t>::max() ||
+                        revision != current->revision + 1)))
                 invalidJournal();
             if (length > remaining - frameHeaderBytes)
             {
+                if (checkpointFrames)
+                    invalidJournal();
                 tail = true;
                 break;
             }
@@ -430,11 +528,23 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
                 checksum(bytes) != crc)
                 invalidJournal();
             const auto mutations = decode(bytes);
-            if (!mutations || !apply(*current, *mutations, config))
+            if (!mutations)
+                invalidJournal();
+            if (checkpointFrames)
+            {
+                for (const auto& mutation : *mutations)
+                    if (!mutation.value ||
+                        !checkpointKeys.insert(mutation.key).second)
+                        invalidJournal();
+                --checkpointFrames;
+            }
+            if (!apply(*current, *mutations, config))
                 invalidJournal();
             current->revision = revision;
             offset += frameHeaderBytes + length;
         }
+        if (checkpointFrames)
+            invalidJournal();
         const auto after = inspect(journal.get());
         if (before.st_size != after.st_size ||
             before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
@@ -455,6 +565,58 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
             std::move(current),
             std::memory_order_release
         );
+    }
+
+    /** @brief Replaces only an acknowledged prefix on the disk owner.
+     * The separate lock file fences both inodes. Sync-before-rename
+     * and directory sync make recovery choose a complete old or new
+     * prefix.
+     */
+    bool replaceJournal(std::string_view bytes)
+    {
+        FileDescriptor replacement(
+            ::openat(
+                directory.get(),
+                ".authority.compact",
+                O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW |
+                    O_NONBLOCK,
+                0600
+            )
+        );
+        try
+        {
+            inspect(replacement.get());
+        }
+        catch (...)
+        {
+            return false;
+        }
+        if (::ftruncate(replacement.get(), 0) != 0 ||
+            !writeAll(replacement.get(), bytes, 0) ||
+            !syncFile(replacement.get()) ||
+            ::renameat(
+                directory.get(),
+                ".authority.compact",
+                directory.get(),
+                "authority.wal"
+            ) != 0 ||
+            !syncDirectory(directory.get()))
+            return false;
+        journal = std::move(replacement);
+        std::lock_guard gate(mutex);
+        counts.fileBytes = bytes.size();
+        ++counts.compactions;
+        return true;
+    }
+
+    Result uncertain()
+    {
+        std::lock_guard gate(mutex);
+        ++counts.ioFailures;
+        counts.poisoned = true;
+        counts.accepting = false;
+        stopping = true;
+        return std::unexpected(Error::OutcomeUnknown);
     }
 
     Result process(const Job& job)
@@ -488,17 +650,21 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
             offset = counts.fileBytes;
         }
         if (bytes.size() > config.maxBytes - offset)
-            return std::unexpected(Error::Capacity);
+        {
+            const auto image = checkpoint(
+                *current,
+                config,
+                bytes.size()
+            );
+            if (!image)
+                return std::unexpected(Error::Capacity);
+            if (!replaceJournal(*image))
+                return uncertain();
+            offset = image->size();
+        }
         if (!writeAll(journal.get(), bytes, offset) ||
             !syncFile(journal.get()))
-        {
-            std::lock_guard gate(mutex);
-            ++counts.ioFailures;
-            counts.poisoned = true;
-            counts.accepting = false;
-            stopping = true;
-            return std::unexpected(Error::OutcomeUnknown);
-        }
+            return uncertain();
         published.store(std::move(next), std::memory_order_release);
         {
             std::lock_guard gate(mutex);

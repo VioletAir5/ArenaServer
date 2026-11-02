@@ -2,7 +2,7 @@ add_executable(arena_lobby_state_tests DurableStateStoreTest.cpp)
 target_link_libraries(arena_lobby_state_tests PRIVATE arena_lobby_state GTest::gtest_main)
 target_compile_options(arena_lobby_state_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
-target_link_options(arena_lobby_state_tests PRIVATE -Wl,--wrap=fdatasync
+target_link_options(arena_lobby_state_tests PRIVATE -Wl,--wrap=fdatasync -Wl,--wrap=renameat -Wl,--wrap=fsync
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
 include(GoogleTest)
 gtest_discover_tests(arena_lobby_state_tests)
@@ -160,3 +160,23 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
     set_tests_properties(ServiceBoundaryProcessAcceptance PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE
         LABELS "integration;process;contract;rpc;postgresql;deadline")
 endif()
+
+add_executable(arena_room_aggregate_tests RoomAggregateTest.cpp)
+target_link_libraries(arena_room_aggregate_tests PRIVATE arena_lobby_codec GTest::gtest_main)
+target_compile_options(arena_room_aggregate_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_room_aggregate_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_room_aggregate_tests)
+
+add_executable(arena_room_migration_tests RoomMigrationTest.cpp)
+
+target_link_libraries(arena_room_migration_tests PRIVATE arena_lobby_migration GTest::gtest_main)
+
+target_compile_options(arena_room_migration_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+
+target_link_options(arena_room_migration_tests PRIVATE -Wl,--wrap=fdatasync
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+
+gtest_discover_tests(arena_room_migration_tests)

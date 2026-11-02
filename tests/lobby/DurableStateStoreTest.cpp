@@ -27,6 +27,36 @@ namespace
 {
 std::atomic<bool> failNextWalSync{false};
 std::atomic<unsigned> injectedSyncFailures{0};
+std::atomic<bool> failNextCheckpointSync{false};
+std::atomic<bool> failNextDirectorySync{false};
+std::atomic<int> checkpointPausePhase{0};
+int checkpointSignal = -1;
+
+bool checkpointDescriptor(int descriptor)
+{
+    std::array<char, 4096> path{};
+    const auto length = ::readlink(
+        ("/proc/self/fd/" + std::to_string(descriptor)).c_str(),
+        path.data(),
+        path.size()
+    );
+    return length > 0 && std::string_view(
+                             path.data(),
+                             static_cast<std::size_t>(length)
+                         )
+                             .ends_with("/.authority.compact");
+}
+
+void checkpointPause(int phase)
+{
+    if (checkpointPausePhase.load() != phase)
+        return;
+    const char signal = static_cast<char>('0' + phase);
+    if (::write(checkpointSignal, &signal, 1) != 1)
+        ::_exit(91);
+    for (;;)
+        ::pause();
+}
 } // namespace
 
 // Only arena_lobby_state_tests links --wrap=fdatasync. The journal
@@ -35,6 +65,18 @@ std::atomic<unsigned> injectedSyncFailures{0};
 extern "C" int __real_fdatasync(int descriptor);
 extern "C" int __wrap_fdatasync(int descriptor)
 {
+    if (checkpointDescriptor(descriptor))
+    {
+        if (failNextCheckpointSync.exchange(false))
+        {
+            errno = EIO;
+            return -1;
+        }
+        const auto result = __real_fdatasync(descriptor);
+        if (result == 0)
+            checkpointPause(1);
+        return result;
+    }
     if (failNextWalSync.load())
     {
         std::array<char, 4096> path{};
@@ -59,6 +101,31 @@ extern "C" int __wrap_fdatasync(int descriptor)
         }
     }
     return __real_fdatasync(descriptor);
+}
+
+extern "C" int __real_fsync(int descriptor);
+extern "C" int __wrap_fsync(int descriptor)
+{
+    struct stat info{};
+    if (failNextDirectorySync.load() &&
+        ::fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+        failNextDirectorySync.exchange(false))
+    {
+        errno = EIO;
+        return -1;
+    }
+    return __real_fsync(descriptor);
+}
+
+extern "C" int __real_renameat(int, const char*, int, const char*);
+extern "C" int
+__wrap_renameat(int a, const char* b, int c, const char* d)
+{
+    const auto result = __real_renameat(a, b, c, d);
+    if (result == 0 && std::string_view(b) == ".authority.compact" &&
+        std::string_view(d) == "authority.wal")
+        checkpointPause(2);
+    return result;
 }
 
 namespace service::lobby
@@ -191,6 +258,327 @@ struct Harness
     std::unique_ptr<Store> store;
     std::thread runner;
 };
+
+TEST(
+    DurableStateStoreTest,
+    DirectorySyncLossAfterRenameQuarantinesAndRecoversCheckpoint
+)
+{
+    Directory directory;
+    Store::Config config{directory.root};
+    config.maxBytes = 384;
+    config.maxRecordBytes = 128;
+    const auto baseline = descriptors();
+    {
+        Harness owner(config);
+        for (std::uint64_t revision = 0; revision < 3; ++revision)
+            ASSERT_TRUE(owner.commit(
+                revision,
+                {{"data", std::string(80, '0' + revision)}}
+            ));
+        failNextDirectorySync = true;
+        const auto failed = owner.commit(
+            3,
+            {{"data", std::string(80, '3')}}
+        );
+        ASSERT_FALSE(failed);
+        EXPECT_FALSE(failNextDirectorySync.load());
+        EXPECT_EQ(failed.error(), Store::Error::OutcomeUnknown);
+        EXPECT_EQ(owner.store->snapshot()->revision, 3);
+        EXPECT_EQ(
+            owner.store->snapshot()->values.at("data"),
+            std::string(80, '2')
+        );
+        EXPECT_TRUE(owner.store->stats().poisoned);
+        EXPECT_FALSE(owner.store->commit(
+            3,
+            {{"data", "rejected"}},
+            [](auto) {}
+        ));
+        owner.store->stop();
+        ASSERT_TRUE(until([&]
+                          { return owner.store->stats().closed; }));
+        EXPECT_EQ(owner.store->stats().pending, 0);
+        EXPECT_EQ(owner.store->stats().pendingBytes, 0);
+    }
+    {
+        std::ifstream input(
+            directory.root / "authority.wal",
+            std::ios::binary
+        );
+        std::string magic(8, '\0');
+        input.read(magic.data(), 8);
+        EXPECT_EQ(magic, "ARLOBBY2");
+    }
+    {
+        Harness restored(config);
+        EXPECT_EQ(restored.store->snapshot()->revision, 3);
+        EXPECT_EQ(
+            restored.store->snapshot()->values.at("data"),
+            std::string(80, '2')
+        );
+        ASSERT_TRUE(
+            restored.commit(3, {{"data", std::string(80, '3')}})
+        );
+    }
+    {
+        Harness restored(config);
+        EXPECT_EQ(restored.store->snapshot()->revision, 4);
+        EXPECT_EQ(
+            restored.store->snapshot()->values.at("data"),
+            std::string(80, '3')
+        );
+    }
+    EXPECT_EQ(descriptors(), baseline);
+}
+
+TEST(
+    DurableStateStoreTest,
+    CheckpointSyncLossLeavesAcknowledgedPrefixAndReusesStaleTemp
+)
+{
+    Directory directory;
+    Store::Config config{directory.root};
+    config.maxBytes = 384;
+    config.maxRecordBytes = 128;
+    const auto baseline = descriptors();
+    {
+        Harness owner(config);
+        for (std::uint64_t revision = 0; revision < 3; ++revision)
+            ASSERT_TRUE(owner.commit(
+                revision,
+                {{"data", std::string(80, '0' + revision)}}
+            ));
+        failNextCheckpointSync = true;
+        const auto failed = owner.commit(
+            3,
+            {{"data", std::string(80, '3')}}
+        );
+        ASSERT_FALSE(failed);
+        EXPECT_FALSE(failNextCheckpointSync.load());
+        EXPECT_EQ(failed.error(), Store::Error::OutcomeUnknown);
+        EXPECT_TRUE(owner.store->stats().poisoned);
+        EXPECT_EQ(owner.store->snapshot()->revision, 3);
+        EXPECT_EQ(
+            owner.store->snapshot()->values.at("data"),
+            std::string(80, '2')
+        );
+    }
+    EXPECT_TRUE(
+        std::filesystem::exists(directory.root / ".authority.compact")
+    );
+    {
+        Harness restored(config);
+        EXPECT_EQ(restored.store->snapshot()->revision, 3);
+        ASSERT_TRUE(
+            restored.commit(3, {{"data", std::string(80, '3')}})
+        );
+        EXPECT_EQ(restored.store->stats().compactions, 1);
+    }
+    {
+        Harness restored(config);
+        EXPECT_EQ(restored.store->snapshot()->revision, 4);
+        EXPECT_EQ(
+            restored.store->snapshot()->values.at("data"),
+            std::string(80, '3')
+        );
+    }
+    EXPECT_EQ(descriptors(), baseline);
+}
+
+TEST(
+    DurableStateStoreTest,
+    KillBeforeAndAfterRenameRecoversSamePrefixAndNewWriter
+)
+{
+    for (const int phase : {1, 2})
+    {
+        Directory directory;
+        Store::Config config{directory.root};
+        config.maxBytes = 384;
+        config.maxRecordBytes = 128;
+        {
+            Harness owner(config);
+            for (std::uint64_t revision = 0; revision < 3; ++revision)
+                ASSERT_TRUE(owner.commit(
+                    revision,
+                    {{"data", std::string(80, '0' + revision)}}
+                ));
+        }
+        const auto baseline = descriptors();
+        std::array<int, 2> channel{};
+        ASSERT_EQ(::pipe(channel.data()), 0);
+        const auto child = ::fork();
+        ASSERT_GE(child, 0);
+        if (child == 0)
+        {
+            ::close(channel[0]);
+            checkpointSignal = channel[1];
+            checkpointPausePhase = phase;
+            try
+            {
+                Harness owner(config);
+                owner.commit(3, {{"data", std::string(80, '3')}});
+            }
+            catch (...)
+            {
+                ::_exit(92);
+            }
+            ::_exit(93);
+        }
+        ::close(channel[1]);
+        char observed = 0;
+        const bool reached = readByte(channel[0], observed);
+        ::close(channel[0]);
+        const auto killed = ::kill(child, SIGKILL);
+        int status = 0;
+        const bool reaped = reapChild(child, status);
+        ASSERT_TRUE(reached) << phase;
+        EXPECT_EQ(observed, '0' + phase);
+        EXPECT_EQ(killed, 0);
+        ASSERT_TRUE(reaped);
+        EXPECT_TRUE(WIFSIGNALED(status));
+        EXPECT_EQ(WTERMSIG(status), SIGKILL);
+        {
+            Harness restored(config);
+            EXPECT_EQ(restored.store->snapshot()->revision, 3);
+            EXPECT_EQ(
+                restored.store->snapshot()->values.at("data"),
+                std::string(80, '2')
+            );
+            ASSERT_TRUE(
+                restored.commit(3, {{"data", std::string(80, '3')}})
+            );
+        }
+        {
+            Harness restored(config);
+            EXPECT_EQ(restored.store->snapshot()->revision, 4);
+            EXPECT_EQ(
+                restored.store->snapshot()->values.at("data"),
+                std::string(80, '3')
+            );
+        }
+        EXPECT_EQ(descriptors(), baseline);
+    }
+}
+
+TEST(
+    DurableStateStoreTest,
+    CompactedEmptyStateRetainsRevisionAndRejectsIncompleteCheckpoint
+)
+{
+    Directory directory;
+    Store::Config config{directory.root};
+    config.maxBytes = 384;
+    config.maxRecordBytes = 128;
+    {
+        Harness owner(config);
+        for (std::uint64_t revision = 0; revision < 3; ++revision)
+            ASSERT_TRUE(owner.commit(
+                revision,
+                {{"data", std::string(80, '0')}}
+            ));
+        ASSERT_TRUE(owner.commit(3, {{"data", std::nullopt}}));
+        ASSERT_TRUE(
+            owner.commit(4, {{"again", std::string(80, 'x')}})
+        );
+        EXPECT_GT(owner.store->stats().compactions, 0);
+    }
+    const auto journal = directory.root / "authority.wal";
+    {
+        Harness restored(config);
+        EXPECT_EQ(restored.store->snapshot()->revision, 5);
+        EXPECT_FALSE(
+            restored.store->snapshot()->values.contains("data")
+        );
+        EXPECT_EQ(
+            restored.store->snapshot()->values.at("again"),
+            std::string(80, 'x')
+        );
+        for (std::uint64_t revision = 5; revision < 12; ++revision)
+            ASSERT_TRUE(restored.commit(
+                revision,
+                {{"again", std::string(80, 'y')}}
+            ));
+    }
+    std::ifstream input(journal, std::ios::binary);
+    const std::string bytes(
+        (std::istreambuf_iterator<char>(input)),
+        {}
+    );
+    input.close();
+    ASSERT_EQ(bytes.substr(0, 8), "ARLOBBY2");
+    const auto baseline = descriptors();
+    // Header declares a mandatory checkpoint frame. This partial body
+    // must fail closed instead of returning an empty state at the
+    // base revision.
+    std::filesystem::resize_file(journal, 30);
+    boost::asio::io_context io;
+    EXPECT_THROW(
+        Store(io.get_executor(), config),
+        std::runtime_error
+    );
+    EXPECT_EQ(std::filesystem::file_size(journal), 30);
+    EXPECT_EQ(descriptors(), baseline);
+}
+
+TEST(
+    DurableStateStoreTest,
+    RewritesCompactBoundedMultiFrameStateAndPreserveCas
+)
+{
+    Directory directory;
+    const auto baseline = descriptors();
+    Store::Config config{directory.root};
+    config.maxBytes = 1024;
+    config.maxRecordBytes = 128;
+    std::shared_ptr<const Store::Snapshot> old;
+    {
+        Harness owner(config);
+        ASSERT_TRUE(
+            owner.commit(0, {{"left", std::string(80, 'a')}})
+        );
+        ASSERT_TRUE(
+            owner.commit(1, {{"right", std::string(80, 'b')}})
+        );
+        ASSERT_TRUE(
+            owner.commit(2, {{"stable", std::string(80, 'c')}})
+        );
+        old = owner.store->snapshot();
+        for (std::uint64_t revision = 3; revision < 1000; ++revision)
+        {
+            const auto result = owner.commit(
+                revision,
+                {{"left", std::to_string(revision)}}
+            );
+            ASSERT_TRUE(result) << revision;
+            EXPECT_EQ(*result, revision + 1);
+            EXPECT_LE(
+                owner.store->stats().fileBytes,
+                config.maxBytes
+            );
+        }
+        EXPECT_GT(owner.store->stats().compactions, 0);
+        const auto stale = owner.commit(2, {{"left", "stale"}});
+        ASSERT_FALSE(stale);
+        EXPECT_EQ(stale.error(), Store::Error::Conflict);
+        EXPECT_EQ(old->values.at("left"), std::string(80, 'a'));
+    }
+    {
+        Harness restored(config);
+        EXPECT_EQ(restored.store->snapshot()->revision, 1000);
+        EXPECT_EQ(
+            restored.store->snapshot()->values.at("left"),
+            "999"
+        );
+        EXPECT_EQ(
+            restored.store->snapshot()->values.at("right"),
+            std::string(80, 'b')
+        );
+        ASSERT_TRUE(restored.commit(1000, {{"right", std::nullopt}}));
+    }
+    EXPECT_EQ(descriptors(), baseline);
+}
 
 TEST(
     DurableStateStoreTest,
@@ -361,12 +749,12 @@ TEST(
         owner.store->commit(0, std::move(reserved), callback)
     );
     EXPECT_EQ(unexpected, 0);
-    ASSERT_TRUE(owner.commit(0, {{"a", "1"}}));
-    ASSERT_TRUE(owner.commit(1, {{"b", "2"}}));
+    ASSERT_TRUE(owner.commit(0, {{"a", "12345678"}}));
+    ASSERT_TRUE(owner.commit(1, {{"b", "12345678"}}));
     const auto bytes = std::filesystem::file_size(
         directory.root / "authority.wal"
     );
-    const auto full = owner.commit(2, {{"c", "3"}});
+    const auto full = owner.commit(2, {{"c", "12345678"}});
     ASSERT_FALSE(full);
     EXPECT_EQ(full.error(), Store::Error::Capacity);
     EXPECT_EQ(owner.store->snapshot()->revision, 2);

@@ -173,6 +173,7 @@ struct RoomSettlement
     /// Simulation lifecycle facts are excluded from its deterministic
     /// hash.
     std::uint64_t startedTick{0}, playedTicks{0};
+    bool operator==(const RoomSettlement&) const = default;
 };
 /** @brief Owns recovery state, including sequence fences and any
  * final result. */
@@ -247,6 +248,60 @@ struct ManagedMatchCheckpoint
     /// Zero is pending, one committed, two terminal failure. A
     /// pending callback-owned attempt is not checkpointable.
     int persistenceOutcome;
+    bool operator==(const ManagedMatchCheckpoint&) const;
+};
+
+/** @brief Attributes only explicitly observed cumulative room events.
+ */
+struct RoomCounterCheckpoint
+{
+    /// Stable identity of the contribution's resident room.
+    arena::domain::RoomId roomId;
+    /// Earlier legacy history stays in the partition's unattributed
+    /// ledger.
+    std::uint64_t knownSinceTick{0};
+    /// False never means that unknown historical outcomes were zero.
+    bool completeHistory{true};
+    /// Gauges and skipped wall slots are always zero in a room
+    /// contribution.
+    RoomMetrics counters;
+};
+
+/** @brief Copies one room without registry, callback or executor
+ * ownership. */
+struct RoomAggregate
+{
+    /// Value schema version, independent of the partition counter
+    /// format.
+    std::uint32_t version{1};
+    /// Immutable policies; runtime callbacks are never copied.
+    RoomPolicy policy;
+    /// Exact committed kernel state, including sequence and control
+    /// fences.
+    service::room::Snapshot actor;
+    /// Historical cohort and lifecycle; absent for an ordinary manual
+    /// room.
+    std::optional<ManagedMatchCheckpoint> managed;
+    /// Known event contribution and its explicit historical coverage.
+    RoomCounterCheckpoint contribution;
+    /// Bounded, self-contained tail whose final snapshot equals
+    /// actor.
+    service::room::ReplayLog replay;
+};
+
+enum class RoomAggregateError
+{
+    Busy,
+    NotFound,
+    Invalid,
+    PolicyMismatch,
+    Capacity,
+    Conflict
+};
+enum class RoomImport
+{
+    Imported,
+    AlreadyPresent
 };
 
 /** @brief Owns a quiescent service cut without schedulers or archive
@@ -270,6 +325,14 @@ struct RoomCheckpoint
     /// Includes retired incarnations, preventing later allocation
     /// collisions.
     std::uint64_t incarnationHighWater;
+    /// Zero is the original partition-only schema; one carries
+    /// explicit coverage.
+    std::uint32_t counterVersion{0};
+    /// Resident contributions in canonical ascending RoomId order.
+    std::vector<RoomCounterCheckpoint> roomCounters{};
+    /// Retired rooms, old unattributed history and scheduler-only
+    /// events.
+    RoomMetrics unattributedCounters{};
 };
 
 enum class RoomRecoveryError
@@ -334,6 +397,19 @@ public:
      * replies/effects.
      */
     bool advance();
+    /** @brief Copies one quiescent room; does not freeze, retire or
+     * detach it. */
+    std::expected<RoomAggregate, RoomAggregateError>
+        exportRoom(arena::domain::RoomId) const;
+    /** @brief Validates and installs one room against an already
+     * supplied roster. Exact duplicate content is a no-op; failures
+     * never change registry or counters. No clock, ID source or
+     * external callback is invoked. An earlier image after room
+     * advancement conflicts; durable migration receipts belong to the
+     * coordinator.
+     */
+    std::expected<RoomImport, RoomAggregateError>
+    importRoom(const RoomAggregate&);
     /** @brief Completes one externally owned durable intent. False
      * acknowledgement blocks the existing budget permanently.
      * Duplicate facts are idempotent.

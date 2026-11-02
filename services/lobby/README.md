@@ -88,10 +88,35 @@ Only an incomplete final journal frame is truncated. CRC/version/revision errors
 preserve the journal and prevent readiness. An uncertain write quarantines new
 writes until a real reopen reconciles its durable prefix.
 
-The journal is local, defaults to 256 MiB, and has no automatic compaction yet.
-This is not replicated failover durability. Recovery assembles complete replay
-histories and can use more peak memory than individual-segment validation; the
-journal capacity is not a promise that the same amount of RAM is sufficient.
+The local journal defaults to 256 MiB. When the next append would exceed its
+bound, the disk owner writes a checksummed, chunked checkpoint of the acknowledged
+state to a private temporary file, syncs it, atomically replaces the journal and
+syncs its directory before appending the new revision. Checkpointing preserves
+the revision, does not discard live values or replay history, and rejects capacity
+when the live checkpoint plus the next batch cannot fit. The temporary checkpoint
+can coexist with the old file during replacement. This is local durability;
+replicated failover is not implemented.
+
+Recovery reads original version-one journals and compacted version-two journals.
+Only an incomplete append tail can be truncated; an incomplete mandatory
+checkpoint fails closed. A compacted journal requires a version-two reader, so
+rolling back only the executable cannot reopen that directory with an old reader.
+Recovery assembles complete replay histories and can use more peak memory than
+individual-segment validation; file capacity is not a RAM requirement estimate.
+
+The `arena_lobby_migration` library is a tested foundation, not the deployed room
+path. It plans explicit routes, owner epochs, ordered ingress, bounded receipts
+and Prepare/Freeze/Transfer/Commit transitions as values for the same authority
+CAS. Successful publication consumes its candidate after verifying the real
+Store acknowledgment; it never owns a second writer or runs a simulation.
+`RoomService::exportRoom/importRoom` transfers one value aggregate only while the
+current partition is quiescent. These APIs do not implement process migration.
+
+Production still runs RoomService locally in Lobby. Independent Room workers,
+authenticated RPC, semantic validation of opaque worker images/replay, authority
+startup and replay-export support for the directory namespace, deadline-driven
+recovery and retirement fencing remain to be wired. The 1000-room cross-process
+migration, latency and phase-crash gates have not been run.
 
 ## Unified startup and offline replay
 

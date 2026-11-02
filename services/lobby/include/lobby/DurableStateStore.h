@@ -41,7 +41,9 @@ public:
         /// Explicit directory containing authority.wal and its
         /// exclusive lock.
         std::filesystem::path directory;
-        /// Maximum complete journal size, including its file header.
+        /// Maximum canonical journal size, including checkpoint
+        /// frames. Overwritten history is compacted before this bound
+        /// is reached.
         std::size_t maxBytes{256 * 1024 * 1024};
         /// Maximum encoded mutation payload; never greater than four
         /// MiB.
@@ -96,6 +98,9 @@ public:
     {
         /// Fully synced and published batches.
         std::uint64_t committed{0};
+        /// Complete checkpoint replacements; logical revision is
+        /// unchanged.
+        std::uint64_t compactions{0};
         /// Expected-revision failures, with no disk mutation.
         std::uint64_t conflicts{0};
         /// Immediate invalid, full or closed admission rejections.

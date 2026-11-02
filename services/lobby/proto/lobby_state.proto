@@ -323,6 +323,14 @@ message RoomMetrics
     uint64 pending_settlements = 16;
     uint64 blocked_settlements = 17;
 }
+// Version-one coverage; missing fields retain the original partition-only format.
+message RoomCounterCheckpoint
+{
+    uint64 room_id = 1;
+    uint64 known_since_tick = 2;
+    bool complete_history = 3;
+    RoomMetrics counters = 4;
+}
 message RoomCheckpoint
 {
     RoomPolicy policy = 1;
@@ -334,6 +342,9 @@ message RoomCheckpoint
     bool started = 7;
     bool accepting = 8;
     uint64 incarnation_high_water = 9;
+    uint32 counter_version = 10;
+    repeated RoomCounterCheckpoint room_counters = 11;
+    RoomMetrics unattributed_counters = 12;
 }
 message CoreCheckpoint
 {
@@ -341,4 +352,77 @@ message CoreCheckpoint
     RegistryCheckpoint registry = 2;
     QueueCheckpoint queue = 3;
     RoomCheckpoint rooms = 4;
+}
+
+// Day34 coordinator records contain opaque worker values, not live RoomActor state.
+message DirectoryMeta
+{
+    uint32 version = 1;
+    string boot_id = 2;
+}
+message DirectoryImage
+{
+    uint64 tick = 1;
+    uint64 checksum = 2;
+    uint64 cursor = 3;
+    bytes checkpoint = 4;
+}
+message DirectoryOperation
+{
+    string id = 1;
+    uint32 kind = 2;
+    uint64 tick = 3;
+    bytes payload = 4;
+}
+message DirectoryInput
+{
+    uint64 sequence = 1;
+    DirectoryOperation operation = 2;
+}
+message DirectoryReceipt
+{
+    string id = 1;
+    uint64 sequence = 2;
+    bytes fingerprint = 3;
+    sint64 expires_at = 4;
+    bool applied = 5;
+    bytes response = 6;
+}
+message DirectoryHandoff
+{
+    uint64 id = 1;
+    string source = 2;
+    string target = 3;
+    uint64 source_epoch = 4;
+    uint64 target_epoch = 5;
+    uint64 abort_epoch = 6;
+    uint64 cutoff = 7;
+    sint64 deadline = 8;
+    uint32 phase = 9;
+    bytes frozen_fingerprint = 10;
+}
+message DirectoryRoom
+{
+    uint32 version = 1;
+    uint64 room_id = 2;
+    uint64 incarnation = 3;
+    string owner = 4;
+    uint64 owner_epoch = 5;
+    DirectoryImage image = 6;
+    uint64 next_sequence = 7;
+    uint64 admitted_tick = 8;
+    uint64 initial_tick = 9;
+    repeated DirectoryInput inbox = 10;
+    repeated DirectoryReceipt receipts = 11;
+    uint64 migration_watermark = 12;
+    DirectoryHandoff handoff = 13;
+}
+message DirectoryReplay
+{
+    uint32 version = 1;
+    uint64 room_id = 2;
+    uint64 incarnation = 3;
+    uint64 first_tick = 4;
+    uint64 last_tick = 5;
+    bytes payload = 6;
 }

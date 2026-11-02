@@ -82,3 +82,12 @@ target_compile_options(arena_replay_export PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 target_link_options(arena_replay_export PRIVATE
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+
+find_package(OpenSSL REQUIRED)
+add_library(arena_lobby_migration src/RoomDirectory.cpp src/RoomMigration.cpp)
+
+target_link_libraries(arena_lobby_migration PUBLIC arena_lobby_codec arena_lobby_state
+    PRIVATE OpenSSL::Crypto)
+
+target_compile_options(arena_lobby_migration PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
