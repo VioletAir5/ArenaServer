@@ -2,7 +2,7 @@
  * @brief Writes checksummed authority batches on one disk owner and
  * recovers CAS state.
  */
-#include "lobby/DurableStateStore.h"
+#include "persistence/AtomicJournal.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -31,8 +31,9 @@
 
 #include "os/FileDescriptor.h"
 
-namespace service::lobby
+namespace arena::persistence
 {
+using service::FileDescriptor;
 namespace
 {
 constexpr std::size_t fileHeaderBytes = 16;
@@ -144,9 +145,7 @@ bool syncDirectory(int descriptor)
 
 [[noreturn]] void invalidJournal()
 {
-    throw std::runtime_error(
-        "invalid or unavailable authority journal"
-    );
+    throw std::runtime_error("invalid or unavailable atomic journal");
 }
 
 /** @brief Rejects special, linked or externally writable files before
@@ -186,7 +185,7 @@ checkpointHeader(std::uint64_t revision, std::uint32_t frames)
 
 /** @brief Canonical payloads reject duplicate keys, ambiguous tags
  * and trailing data. */
-std::optional<std::vector<DurableStateStore::Mutation>>
+std::optional<std::vector<AtomicJournal::Mutation>>
 decode(std::string_view payload)
 {
     if (payload.size() < 4)
@@ -195,7 +194,7 @@ decode(std::string_view payload)
     payload.remove_prefix(4);
     if (!count || count > 65536 || count > payload.size() / 10)
         return std::nullopt;
-    std::vector<DurableStateStore::Mutation> result;
+    std::vector<AtomicJournal::Mutation> result;
     result.reserve(count);
     std::set<std::string> seen;
     for (std::uint32_t index = 0; index < count; ++index)
@@ -226,7 +225,7 @@ decode(std::string_view payload)
 }
 
 std::string
-encode(const std::vector<DurableStateStore::Mutation>& mutations)
+encode(const std::vector<AtomicJournal::Mutation>& mutations)
 {
     std::string result;
     put32(result, static_cast<std::uint32_t>(mutations.size()));
@@ -266,12 +265,12 @@ std::string frame(std::uint64_t revision, std::string_view payload)
  * disk.
  */
 std::optional<std::string> checkpoint(
-    const DurableStateStore::Snapshot& snapshot,
-    const DurableStateStore::Config& config,
+    const AtomicJournal::Snapshot& snapshot,
+    const AtomicJournal::Config& config,
     std::size_t appendBytes
 )
 {
-    std::vector<DurableStateStore::Mutation> chunk;
+    std::vector<AtomicJournal::Mutation> chunk;
     std::vector<std::string> frames;
     std::size_t encoded = 4, total = checkpointHeaderBytes;
     const auto flush = [&]() -> bool
@@ -314,9 +313,9 @@ std::optional<std::string> checkpoint(
 /** @brief Charges detached data and a conservative map-node overhead.
  */
 bool apply(
-    DurableStateStore::Snapshot& snapshot,
-    const std::vector<DurableStateStore::Mutation>& mutations,
-    const DurableStateStore::Config& config
+    AtomicJournal::Snapshot& snapshot,
+    const std::vector<AtomicJournal::Mutation>& mutations,
+    const AtomicJournal::Config& config
 )
 {
     for (const auto& mutation : mutations)
@@ -340,7 +339,7 @@ bool apply(
 }
 } // namespace
 
-struct DurableStateStore::State : std::enable_shared_from_this<State>
+struct AtomicJournal::State : std::enable_shared_from_this<State>
 {
     struct Job
     {
@@ -380,7 +379,7 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
             config.maxStateBytes > 256 * 1024 * 1024 ||
             !config.maxKeys || config.maxKeys > 1000000)
             throw std::invalid_argument(
-                "invalid durable authority limits"
+                "invalid atomic journal limits"
             );
         std::filesystem::create_directories(config.directory);
         directory = FileDescriptor(
@@ -619,7 +618,7 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
         return std::unexpected(Error::OutcomeUnknown);
     }
 
-    Result process(const Job& job)
+    Result process(Job& job)
     {
         {
             std::lock_guard gate(mutex);
@@ -638,12 +637,23 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
         if (current->revision ==
             std::numeric_limits<std::uint64_t>::max())
             return std::unexpected(Error::Capacity);
-        auto next = std::make_shared<Snapshot>(*current);
+        // Copy only values: a previous transition proof is not part
+        // of state.
+        auto next = std::make_shared<Snapshot>(
+            current->revision,
+            current->values
+        );
         if (!apply(*next, job.mutations, config))
             return std::unexpected(Error::Capacity);
         next->revision = current->revision + 1;
         const auto payload = encode(job.mutations);
         const auto bytes = frame(next->revision, payload);
+        // Own the exact admitted write set before any physical I/O.
+        // Publication after fdatasync performs no allocation and
+        // creates no strong history.
+        next->m_predecessor = current;
+        next->m_identity = next;
+        next->m_writes = std::move(job.mutations);
         std::size_t offset;
         {
             std::lock_guard gate(mutex);
@@ -787,7 +797,62 @@ struct DurableStateStore::State : std::enable_shared_from_this<State>
     std::thread writer;
 };
 
-DurableStateStore::DurableStateStore(
+bool AtomicJournal::Snapshot::verifiesNamespaceTransition(
+    const Snapshot& base,
+    std::string_view prefix,
+    std::span<const Mutation> expected
+) const noexcept
+{
+    if (prefix.empty())
+        return false;
+    if (this == &base)
+        return expected.empty();
+    if (base.revision == std::numeric_limits<std::uint64_t>::max() ||
+        revision != base.revision + 1 ||
+        m_predecessor.lock().get() != &base ||
+        m_identity.lock().get() != this)
+        return false;
+    for (std::size_t i = 0; i < expected.size(); ++i)
+    {
+        const auto& mutation = expected[i];
+        if (!mutation.key.starts_with(prefix) ||
+            (i && !(expected[i - 1].key < mutation.key)))
+            return false;
+        const auto value = values.find(mutation.key);
+        if (mutation.value ? value == values.end() ||
+                                 value->second != *mutation.value
+                           : value != values.end())
+            return false;
+    }
+    for (const auto& actual : m_writes)
+    {
+        if (!actual.key.starts_with(prefix))
+            continue;
+        const auto planned = std::lower_bound(
+            expected.begin(),
+            expected.end(),
+            actual.key,
+            [](const auto& mutation, const auto& key)
+            { return mutation.key < key; }
+        );
+        if (planned != expected.end() && planned->key == actual.key)
+        {
+            if (actual.value != planned->value)
+                return false;
+        }
+        else
+        {
+            const auto before = base.values.find(actual.key);
+            if (actual.value ? before == base.values.end() ||
+                                   before->second != *actual.value
+                             : before != base.values.end())
+                return false;
+        }
+    }
+    return true;
+}
+
+AtomicJournal::AtomicJournal(
     boost::asio::any_io_executor executor, Config config
 )
     : m_state(
@@ -800,7 +865,7 @@ DurableStateStore::DurableStateStore(
                                   { state->run(); });
 }
 
-DurableStateStore::~DurableStateStore() noexcept
+AtomicJournal::~AtomicJournal() noexcept
 {
     stop();
     std::lock_guard gate(m_state->joinMutex);
@@ -808,13 +873,13 @@ DurableStateStore::~DurableStateStore() noexcept
         m_state->writer.join();
 }
 
-std::shared_ptr<const DurableStateStore::Snapshot>
-DurableStateStore::snapshot() const noexcept
+std::shared_ptr<const AtomicJournal::Snapshot>
+AtomicJournal::snapshot() const noexcept
 {
     return m_state->published.load(std::memory_order_acquire);
 }
 
-bool DurableStateStore::commit(
+bool AtomicJournal::commit(
     std::uint64_t expectedRevision,
     std::vector<Mutation> mutations,
     Completion completion
@@ -903,7 +968,7 @@ bool DurableStateStore::commit(
     return true;
 }
 
-void DurableStateStore::stop() noexcept
+void AtomicJournal::stop() noexcept
 {
     const auto state = m_state;
     std::lock_guard gate(state->mutex);
@@ -912,7 +977,7 @@ void DurableStateStore::stop() noexcept
     state->wake.notify_one();
 }
 
-DurableStateStore::Stats DurableStateStore::stats() const noexcept
+AtomicJournal::Stats AtomicJournal::stats() const noexcept
 {
     std::lock_guard gate(m_state->mutex);
     auto result = m_state->counts;
@@ -920,4 +985,4 @@ DurableStateStore::Stats DurableStateStore::stats() const noexcept
                     !result.deliveryFailures;
     return result;
 }
-} // namespace service::lobby
+} // namespace arena::persistence

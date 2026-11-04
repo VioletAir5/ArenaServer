@@ -17,7 +17,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ROLES = ("storage", "auth", "lobby", "gateway")
+ROLES = ("storage", "auth", "room-a", "room-b", "lobby", "gateway")
 PORT_NAMES = (*ROLES, "gateway-ws", *(role + "-health" for role in ROLES))
 FIXTURE = r'''#!/usr/bin/env python3
 import json
@@ -29,6 +29,7 @@ import sys
 import time
 
 role = os.environ["ARENA_NODE_ID"]
+service = "room" if "ARENA_ROOM_PORT" in os.environ else role
 config = json.loads(Path(".supervisor-fixture.json").read_text())
 behavior = config.get(role, {})
 running = True
@@ -54,6 +55,8 @@ if role == "storage":
     ports = [int(sys.argv[sys.argv.index("--port") + 1])]
 elif role == "auth":
     ports = [int(os.environ["ARENA_AUTH_PORT"])]
+elif service == "room":
+    ports = [int(os.environ["ARENA_ROOM_PORT"])]
 elif role == "lobby":
     ports = [int(os.environ["ARENA_LOBBY_PORT"])]
 else:
@@ -86,7 +89,7 @@ try:
                 if not request.startswith(b"GET /health/ready HTTP/1.1\r\n"):
                     continue
                 ready = not behavior.get("never_ready") and not behavior.get("false_ack")
-                body = json.dumps(dict(service=role, alive=True, ready=ready)).encode()
+                body = json.dumps(dict(service=service, node_id="another-node" if behavior.get("wrong_node") else role, alive=True, ready=ready)).encode()
                 if behavior.get("large_body"):
                     body = b"x" * 20000
                 status = 200 if ready or behavior.get("false_ack") else 503
@@ -122,7 +125,7 @@ class ServiceSupervisorTest(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text(FIXTURE)
         for relative in ("services/auth/ArenaAuth", "services/lobby/ArenaLobby",
-                         "services/gateway/app/ArenaServer"):
+                         "services/gateway/app/ArenaServer", "services/room/worker/ArenaRoom"):
             path = self.build / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("#!" + sys.executable + "\n" + FIXTURE.split("\n", 1)[1])
@@ -134,10 +137,10 @@ class ServiceSupervisorTest(unittest.TestCase):
         self.behavior.write_text("{}")
         self.environment = {name: value for name, value in os.environ.items()
                             if not name.startswith(("ARENA_", "PG"))}
-        self.secret_values = [secrets.token_hex(32) for _ in range(7)]
+        self.secret_values = [secrets.token_hex(32) for _ in range(8)]
         names = ("ARENA_STORAGE_AUTH_TOKEN", "ARENA_STORAGE_LOBBY_TOKEN",
                  "ARENA_AUTH_TOKEN", "ARENA_LOBBY_TOKEN", "ARENA_JWT_KEY",
-                 "PGPASSWORD", "ARENA_INTERNAL_TOKEN")
+                 "PGPASSWORD", "ARENA_INTERNAL_TOKEN", "ARENA_ROOM_TOKEN")
         self.environment.update(zip(names, self.secret_values))
         self.environment.update(PGHOST="/explicit/unused/fixture/socket", PGPORT="5432",
                                 PGDATABASE="existing_fixture_db", PGUSER="fixture_owner",
@@ -164,7 +167,12 @@ class ServiceSupervisorTest(unittest.TestCase):
                    "--stop-timeout", ".3", "--kill-timeout", "1",
                    "--probe-timeout", ".1"]
         for name, port in self.ports.items():
-            command.extend(("--" + name + "-port", str(port)))
+            if name in ('room-a','room-b'):
+                command.extend(("--room-node", name+":"+str(port)))
+            elif name in ('room-a-health','room-b-health'):
+                command.extend(("--room-health-port", name.removesuffix('-health')+":"+str(port)))
+            else:
+                command.extend(("--" + name + "-port", str(port)))
         return [*command, *extra]
 
     def start(self, *, extra=(), environment=None):
@@ -219,6 +227,8 @@ class ServiceSupervisorTest(unittest.TestCase):
     def assert_private_and_redacted(self):
         self.assertEqual(stat.S_IMODE(self.logs.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
+        for role in ("room-a", "room-b"):
+            self.assertEqual(stat.S_IMODE((self.state/role).stat().st_mode), 0o700)
         paths = [*self.logs.iterdir(), *(path for _, path in self.launchers)]
         for path in paths:
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
@@ -254,10 +264,14 @@ class ServiceSupervisorTest(unittest.TestCase):
                      "ARENA_JWT_KEY"},
             "lobby": {"ARENA_NODE_ID", "ARENA_HEALTH_PORT", "ARENA_LOBBY_PORT",
                       "ARENA_AUTH_PORT", "ARENA_STORAGE_PORT", "ARENA_AUTH_TOKEN",
-                      "ARENA_LOBBY_TOKEN", "ARENA_STORAGE_LOBBY_TOKEN", "ARENA_LOBBY_STATE_DIR"},
+                      "ARENA_LOBBY_TOKEN", "ARENA_STORAGE_LOBBY_TOKEN", "ARENA_LOBBY_STATE_DIR",
+                      "ARENA_ROOM_TOKEN", "ARENA_ROOM_NODES"},
             "gateway": {"ARENA_NODE_ID", "ARENA_HEALTH_PORT", "ARENA_TCP_PORT",
                         "ARENA_WS_PORT", "ARENA_LOBBY_PORT", "ARENA_LOBBY_TOKEN"},
         }
+        for room in ('room-a','room-b'):
+            allowed[room] = {'ARENA_NODE_ID','ARENA_HEALTH_PORT','ARENA_ROOM_PORT',
+                             'ARENA_ROOM_TOKEN','ARENA_ROOM_STATE_DIR'}
         for role in ROLES:
             environment = next(row for row in self.fixture_rows(role)
                                if row["event"] == "environment")["names"]
@@ -277,9 +291,9 @@ class ServiceSupervisorTest(unittest.TestCase):
         process = self.start()
         self.assertEqual(process.wait(timeout=6), 1)
         self.assertEqual([row["role"] for row in self.rows() if row["event"] == "started"],
-                         ["storage", "auth", "lobby"])
+                         ["storage", "auth", "room-a", "room-b", "lobby"])
         self.assertEqual([row["role"] for row in self.rows() if row["event"] == "stopping"],
-                         ["lobby", "auth", "storage"])
+                         ["lobby", "room-b", "room-a", "auth", "storage"])
         self.assert_joined()
         self.assert_private_and_redacted()
 
@@ -325,7 +339,7 @@ class ServiceSupervisorTest(unittest.TestCase):
         self.assertEqual(len(schedules), 1)
         self.assertLessEqual(schedules[0]["backoff_ms"], schedules[0]["backoff_cap_ms"])
         self.stop(process)
-        self.assertEqual(sum(row["event"] == "started" for row in self.rows()), 5)
+        self.assertEqual(sum(row["event"] == "started" for row in self.rows()), len(ROLES)+1)
         self.assertEqual(len(list(self.logs.glob("auth-*.log"))), 2)
         self.assert_private_and_redacted()
 
@@ -358,7 +372,7 @@ class ServiceSupervisorTest(unittest.TestCase):
         self.until(lambda: any(row["event"] == "degraded" for row in self.rows()))
         self.assertIsNone(process.poll())
         self.assert_bystanders_alive(pids, {"auth"})
-        self.assertEqual(sum(row["event"] == "started" for row in self.rows()), 4)
+        self.assertEqual(sum(row["event"] == "started" for row in self.rows()), len(ROLES))
         self.stop(process, expected=1)
 
     def test_slow_recovery_probe_does_not_block_another_roles_recovery(self):
@@ -408,7 +422,7 @@ class ServiceSupervisorTest(unittest.TestCase):
         process.send_signal(signal.SIGHUP)
         self.until(lambda: all(any(row["event"] == "reload" for row in self.fixture_rows(role))
                                for role in ("lobby", "gateway")))
-        self.assertFalse(any(row["event"] == "reload" for role in ("storage", "auth")
+        self.assertFalse(any(row["event"] == "reload" for role in ("storage", "auth", "room-a", "room-b")
                              for row in self.fixture_rows(role)))
         self.assertEqual(before, [(row["role"], row["pid"]) for row in self.rows()
                                   if row["event"] == "started"])
@@ -422,7 +436,7 @@ class ServiceSupervisorTest(unittest.TestCase):
                  (("--stop-timeout", "0"), None),
                  (("--restart-attempts", "11"), None),
                  (("--restart-backoff-max", "nan"), None)]
-        for missing in ("ARENA_JWT_KEY", "ARENA_LOBBY_TOKEN", "PGHOST", "PGUSER"):
+        for missing in ("ARENA_JWT_KEY", "ARENA_LOBBY_TOKEN", "ARENA_ROOM_TOKEN", "PGHOST", "PGUSER"):
             environment = dict(self.environment)
             environment.pop(missing)
             cases.append(((), environment))
@@ -446,6 +460,9 @@ class ServiceSupervisorTest(unittest.TestCase):
             interpreter.symlink_to(sys.executable)
             argv = self.command(("--python", str(interpreter)))[2:]
             settings = module.configuration(module.arguments(argv), self.environment)
+            defaults, health = module.room_nodes(argparse.Namespace(room_node=[], room_health_port=[]))
+            self.assertEqual(defaults, {"room-a": 7103, "room-b": 7104})
+            self.assertEqual(health, {"room-a": 17103, "room-b": 17104})
             children = {child.role: child for child in settings.specs}
             self.assertEqual(children["storage"].command[0], str(interpreter))
             self.assertEqual(json.loads(children["storage"].environment[
@@ -458,11 +475,75 @@ class ServiceSupervisorTest(unittest.TestCase):
                              self.environment["ARENA_JWT_KEY"])
             self.assertEqual(children["lobby"].environment["ARENA_AUTH_TOKEN"],
                              self.environment["ARENA_AUTH_TOKEN"])
+            self.assertEqual(children["room-a"].service, "room")
+            self.assertEqual(children["room-b"].service, "room")
+            self.assertEqual(children["room-a"].node_id, "room-a")
+            self.assertEqual(children["room-a"].environment["ARENA_ROOM_TOKEN"],
+                             self.environment["ARENA_ROOM_TOKEN"])
+            self.assertEqual(json.loads(children["lobby"].environment["ARENA_ROOM_NODES"]),
+                             [dict(nodeId=node, host="127.0.0.1", port=self.ports[node])
+                              for node in ("room-a", "room-b")])
             signer = children["auth"].environment["ARENA_JWT_KEY"]
             self.environment["ARENA_JWT_KEY"] = secrets.token_hex(32)
             self.assertEqual(children["auth"].environment["ARENA_JWT_KEY"], signer)
         finally:
             sys.modules.pop(spec.name, None)
+    def test_room_health_cannot_acknowledge_another_node_identity(self):
+        self.behavior.write_text(json.dumps({"room-a": {"wrong_node": True}}))
+        process = self.start(extra=("--startup-timeout", ".35"))
+        self.assertEqual(process.wait(timeout=5), 1)
+        self.assertFalse(any(row.get("role") == "lobby" for row in self.rows()))
+        self.assertTrue(any(row["event"] == "readiness_timeout" and row.get("role") == "room-a"
+                            and row.get("service") == "room" for row in self.rows()))
+        self.assert_joined()
+
+    def test_shared_room_runtime_file_reloads_each_physical_node_without_restart(self):
+        path = self.root / "rooms.json"
+        path.write_text("{}")
+        process = self.start(extra=("--room-runtime-config", str(path)))
+        self.ready(process)
+        before = self.initial_pids()
+        process.send_signal(signal.SIGHUP)
+        self.until(lambda: all(any(row["event"] == "reload" for row in self.fixture_rows(role))
+                               for role in ("room-a", "room-b")))
+        self.assertFalse(any(row["event"] == "reload" for role in ("storage", "auth", "lobby", "gateway")
+                             for row in self.fixture_rows(role)))
+        self.assert_bystanders_alive(before, set())
+        self.stop(process)
+
+    def test_room_failure_has_its_own_lifetime_budget_and_bystanders(self):
+        process = self.start(extra=("--restart-attempts", "1"))
+        self.ready(process)
+        pids = self.initial_pids()
+        os.kill(pids["room-a"], signal.SIGKILL)
+        self.until(lambda: any(row["event"] == "recovered" and row["role"] == "room-a"
+                               and row.get("service") == "room" for row in self.rows()))
+        self.assert_bystanders_alive(pids, {"room-a"})
+        os.kill(self.current_pid("room-a"), signal.SIGKILL)
+        self.until(lambda: any(row["event"] == "degraded" and row["role"] == "room-a"
+                               for row in self.rows()))
+        self.assert_bystanders_alive(pids, {"room-a"})
+        self.stop(process, expected=1)
+
+    def test_room_nodes_validate_capacity_identity_ports_and_credentials(self):
+        cases = [("--room-node", "room-a:7103"),  # duplicate existing physical identity
+                 ("--room-node", "../bad:7103"),
+                 ("--room-node", "gateway:7103"),
+                 ("--room-node", "gateway-ws:7103"),
+                 ("--room-health-port", "unknown:17103"),
+                 ("--room-node", "room-c:"+str(self.ports["storage"]))]
+        cases.append(tuple(part for index in range(15) for part in
+                           ("--room-node", "room-extra-"+str(index)+":"+str(20000+index))))
+        for extra in cases:
+            with self.subTest(extra=extra):
+                process = self.start(extra=extra)
+                self.assertEqual(process.wait(timeout=4), 2)
+                self.assertFalse(any(row["event"] == "started" for row in self.rows()))
+        environment = dict(self.environment, ARENA_ROOM_TOKEN=self.environment["ARENA_LOBBY_TOKEN"])
+        process = self.start(environment=environment)
+        self.assertEqual(process.wait(timeout=4), 2)
+        self.assertFalse(any(row["event"] == "started" for row in self.rows()))
+
     def test_public_log_directory_is_rejected_without_chmod_or_children(self):
         self.logs.mkdir()
         self.logs.chmod(0o755)

@@ -1,4 +1,4 @@
-#include "lobby/DurableStateStore.h"
+#include "persistence/AtomicJournal.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -26,6 +27,8 @@
 namespace
 {
 std::atomic<bool> failNextWalSync{false};
+std::atomic<bool> holdNextWalSync{false}, walSyncHeld{false},
+    releaseWalSync{true};
 std::atomic<unsigned> injectedSyncFailures{0};
 std::atomic<bool> failNextCheckpointSync{false};
 std::atomic<bool> failNextDirectorySync{false};
@@ -77,7 +80,7 @@ extern "C" int __wrap_fdatasync(int descriptor)
             checkpointPause(1);
         return result;
     }
-    if (failNextWalSync.load())
+    if (failNextWalSync.load() || holdNextWalSync.load())
     {
         std::array<char, 4096> path{};
         const auto link = "/proc/self/fd/" +
@@ -87,17 +90,26 @@ extern "C" int __wrap_fdatasync(int descriptor)
             path.data(),
             path.size()
         );
-        if (length > 0 &&
-            std::string_view(
-                path.data(),
-                static_cast<std::size_t>(length)
-            )
-                .ends_with("/authority.wal") &&
-            failNextWalSync.exchange(false))
+        if (length > 0 && std::string_view(
+                              path.data(),
+                              static_cast<std::size_t>(length)
+                          )
+                              .ends_with("/authority.wal"))
         {
-            ++injectedSyncFailures;
-            errno = EIO;
-            return -1;
+            if (holdNextWalSync.exchange(false))
+            {
+                walSyncHeld = true;
+                while (!releaseWalSync.load())
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(1)
+                    );
+            }
+            if (failNextWalSync.exchange(false))
+            {
+                ++injectedSyncFailures;
+                errno = EIO;
+                return -1;
+            }
         }
     }
     return __real_fdatasync(descriptor);
@@ -128,12 +140,12 @@ __wrap_renameat(int a, const char* b, int c, const char* d)
     return result;
 }
 
-namespace service::lobby
+namespace arena::persistence
 {
 namespace
 {
 using namespace std::chrono_literals;
-using Store = DurableStateStore;
+using Store = AtomicJournal;
 
 struct Directory
 {
@@ -259,8 +271,361 @@ struct Harness
     std::thread runner;
 };
 
+struct HeldWalSync
+{
+    HeldWalSync()
+    {
+        releaseWalSync = false;
+        walSyncHeld = false;
+        holdNextWalSync = true;
+    }
+    ~HeldWalSync()
+    {
+        releaseWalSync = true;
+        holdNextWalSync = false;
+    }
+};
+
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
+    NamespaceProofWaitsForRealSyncAndDoesNotRetainItsBase
+)
+{
+    Directory directory;
+    Harness owner({directory.root});
+    ASSERT_TRUE(
+        owner.commit(0, {{"room/a", "old"}, {"core/a", "old"}})
+    );
+    auto base = owner.store->snapshot();
+    const std::weak_ptr<const Store::Snapshot> weak = base;
+    const std::vector<Store::Mutation> expected{
+        {"room/a", "new"},
+        {"room/b", "added"}
+    };
+    auto result = std::make_shared<std::promise<Store::Result>>();
+    auto delivered = result->get_future();
+    HeldWalSync held;
+    ASSERT_TRUE(owner.store->commit(
+        base->revision,
+        {{"core/a", "new"}, {"room/a", "new"}, {"room/b", "added"}},
+        [result](auto value) { result->set_value(value); }
+    ));
+    ASSERT_TRUE(until([] { return walSyncHeld.load(); }));
+    EXPECT_EQ(owner.store->snapshot(), base);
+    EXPECT_EQ(delivered.wait_for(0ms), std::future_status::timeout);
+    EXPECT_FALSE(
+        base->verifiesNamespaceTransition(*base, "room/", expected)
+    );
+    EXPECT_TRUE(
+        base->verifiesNamespaceTransition(*base, "room/", {})
+    );
+    releaseWalSync = true;
+    ASSERT_EQ(delivered.wait_for(3s), std::future_status::ready);
+    ASSERT_TRUE(delivered.get());
+    const auto current = owner.store->snapshot();
+    ASSERT_EQ(current->revision, base->revision + 1);
+    EXPECT_TRUE(
+        current->verifiesNamespaceTransition(*base, "room/", expected)
+    );
+    const Store::Snapshot detached{base->revision, base->values};
+    EXPECT_FALSE(current->verifiesNamespaceTransition(
+        detached,
+        "room/",
+        expected
+    ));
+    base.reset();
+    EXPECT_TRUE(until([&] { return weak.expired(); }));
+    EXPECT_EQ(current->values.at("room/b"), "added");
+}
+
+TEST(
+    AtomicJournalTest,
+    NamespaceProofRejectsCopiedTargetWithUnmentionedValueChanges
+)
+{
+    Directory directory;
+    Harness owner({directory.root});
+    ASSERT_TRUE(
+        owner.commit(0, {{"room/a", "old"}, {"room/b", "preserved"}})
+    );
+    const auto base = owner.store->snapshot();
+    const std::vector<Store::Mutation> expected{{"room/a", "new"}};
+    ASSERT_TRUE(owner.commit(base->revision, expected));
+    const auto acknowledged = owner.store->snapshot();
+    ASSERT_TRUE(acknowledged->verifiesNamespaceTransition(
+        *base,
+        "room/",
+        expected
+    ));
+    auto detached = *acknowledged;
+    detached.values.at("room/b") = "not-acknowledged";
+    EXPECT_FALSE(
+        detached.verifiesNamespaceTransition(*base, "room/", expected)
+    );
+    EXPECT_EQ(acknowledged->values.at("room/b"), "preserved");
+    EXPECT_TRUE(acknowledged->verifiesNamespaceTransition(
+        *base,
+        "room/",
+        expected
+    ));
+}
+
+TEST(
+    AtomicJournalTest,
+    NamespaceProofRejectsCopiedCoreOnlyTargetWithOwnedAddsOrDeletes
+)
+{
+    Directory directory;
+    Harness owner({directory.root});
+    ASSERT_TRUE(owner.commit(0, {{"room/existing", "preserved"}}));
+    const auto base = owner.store->snapshot();
+    ASSERT_TRUE(
+        owner.commit(base->revision, {{"core/revision", "new"}})
+    );
+    const auto acknowledged = owner.store->snapshot();
+    ASSERT_TRUE(
+        acknowledged->verifiesNamespaceTransition(*base, "room/", {})
+    );
+    auto added = *acknowledged;
+    added.values.emplace("room/forged", "not-acknowledged");
+    EXPECT_FALSE(
+        added.verifiesNamespaceTransition(*base, "room/", {})
+    );
+    auto deleted = *acknowledged;
+    deleted.values.erase("room/existing");
+    EXPECT_FALSE(
+        deleted.verifiesNamespaceTransition(*base, "room/", {})
+    );
+    EXPECT_EQ(acknowledged->values.at("room/existing"), "preserved");
+    EXPECT_FALSE(acknowledged->values.contains("room/forged"));
+    EXPECT_TRUE(
+        acknowledged->verifiesNamespaceTransition(*base, "room/", {})
+    );
+}
+
+TEST(
+    AtomicJournalTest,
+    NamespaceProofChecksEffectiveChangesAndRejectsMalformedCandidates
+)
+{
+    Directory directory;
+    Harness owner({directory.root});
+    ASSERT_TRUE(
+        owner.commit(0, {{"room/a", "one"}, {"room/b", "two"}})
+    );
+    const auto base = owner.store->snapshot();
+    ASSERT_TRUE(owner.commit(
+        1,
+        {{"core/a", "other"},
+         {"room/a", "one"},
+         {"room/missing", std::nullopt},
+         {"roomish/a", "outside"}}
+    ));
+    const auto same = owner.store->snapshot();
+    EXPECT_TRUE(
+        same->verifiesNamespaceTransition(*base, "room/", {})
+    );
+    const std::vector<Store::Mutation> noop{
+        {"room/a", "one"},
+        {"room/missing", std::nullopt}
+    };
+    EXPECT_TRUE(
+        same->verifiesNamespaceTransition(*base, "room/", noop)
+    );
+    EXPECT_FALSE(
+        same->verifiesNamespaceTransition(*same, "room/", noop)
+    );
+    const std::vector<Store::Mutation> foreign{{"core/a", "other"}};
+    const std::vector<Store::Mutation> duplicates{
+        {"room/a", "one"},
+        {"room/a", "one"}
+    };
+    const std::vector<Store::Mutation> unsorted{
+        {"room/b", "two"},
+        {"room/a", "one"}
+    };
+    EXPECT_FALSE(
+        same->verifiesNamespaceTransition(*base, "room/", foreign)
+    );
+    EXPECT_FALSE(
+        same->verifiesNamespaceTransition(*base, "room/", duplicates)
+    );
+    EXPECT_FALSE(
+        same->verifiesNamespaceTransition(*base, "room/", unsorted)
+    );
+    ASSERT_TRUE(owner.commit(
+        2,
+        {{"room/a", "changed"},
+         {"room/b", std::nullopt},
+         {"room/c", "new"}}
+    ));
+    const auto changed = owner.store->snapshot();
+    const std::vector<Store::Mutation> complete{
+        {"room/a", "changed"},
+        {"room/b", std::nullopt},
+        {"room/c", "new"}
+    };
+    EXPECT_TRUE(
+        changed->verifiesNamespaceTransition(*same, "room/", complete)
+    );
+    const std::vector<Store::Mutation> onlyChanged{
+        {"room/a", "changed"}
+    };
+    const std::vector<Store::Mutation> missingDelete{
+        {"room/a", "changed"},
+        {"room/c", "new"}
+    };
+    const std::vector<Store::Mutation> missingAdd{
+        {"room/a", "changed"},
+        {"room/b", std::nullopt}
+    };
+    const std::vector<Store::Mutation> wrongValue{
+        {"room/a", "wrong"},
+        {"room/b", std::nullopt},
+        {"room/c", "new"}
+    };
+    EXPECT_FALSE(changed->verifiesNamespaceTransition(
+        *same,
+        "room/",
+        onlyChanged
+    ));
+    EXPECT_FALSE(changed->verifiesNamespaceTransition(
+        *same,
+        "room/",
+        missingDelete
+    ));
+    EXPECT_FALSE(changed->verifiesNamespaceTransition(
+        *same,
+        "room/",
+        missingAdd
+    ));
+    EXPECT_FALSE(changed->verifiesNamespaceTransition(
+        *same,
+        "room/",
+        wrongValue
+    ));
+    EXPECT_FALSE(
+        changed->verifiesNamespaceTransition(*same, "room/", {})
+    );
+}
+
+TEST(
+    AtomicJournalTest,
+    NamespaceProofRejectsOtherStoresSkippedRevisionsAndRecovery
+)
+{
+    Directory first, second;
+    std::shared_ptr<const Store::Snapshot> oldBase;
+    const std::vector<Store::Mutation> two{{"room/a", "two"}};
+    {
+        Harness owner({first.root}), other({second.root});
+        ASSERT_TRUE(owner.commit(0, {{"room/a", "one"}}));
+        ASSERT_TRUE(other.commit(0, {{"room/a", "one"}}));
+        oldBase = owner.store->snapshot();
+        const auto unrelated = other.store->snapshot();
+        ASSERT_TRUE(owner.commit(1, two));
+        const auto middle = owner.store->snapshot();
+        EXPECT_TRUE(middle->verifiesNamespaceTransition(
+            *oldBase,
+            "room/",
+            two
+        ));
+        EXPECT_FALSE(middle->verifiesNamespaceTransition(
+            *unrelated,
+            "room/",
+            two
+        ));
+        const std::vector<Store::Mutation> three{{"room/a", "three"}};
+        ASSERT_TRUE(owner.commit(2, three));
+        const auto latest = owner.store->snapshot();
+        EXPECT_TRUE(latest->verifiesNamespaceTransition(
+            *middle,
+            "room/",
+            three
+        ));
+        EXPECT_FALSE(latest->verifiesNamespaceTransition(
+            *oldBase,
+            "room/",
+            three
+        ));
+    }
+    Harness reopened({first.root});
+    const auto recovered = reopened.store->snapshot();
+    EXPECT_EQ(recovered->revision, 3u);
+    const std::vector<Store::Mutation> three{{"room/a", "three"}};
+    EXPECT_FALSE(recovered->verifiesNamespaceTransition(
+        *oldBase,
+        "room/",
+        three
+    ));
+    EXPECT_FALSE(
+        recovered->verifiesNamespaceTransition(*oldBase, "room/", {})
+    );
+    EXPECT_TRUE(recovered->verifiesNamespaceTransition(
+        *recovered,
+        "room/",
+        {}
+    ));
+    const std::vector<Store::Mutation> four{{"room/a", "four"}};
+    ASSERT_TRUE(reopened.commit(recovered->revision, four));
+    EXPECT_TRUE(
+        reopened.store->snapshot()
+            ->verifiesNamespaceTransition(*recovered, "room/", four)
+    );
+}
+
+TEST(
+    AtomicJournalTest,
+    NamespaceProofIsNotPublishedOnCapacityOrSyncFailure
+)
+{
+    {
+        Directory directory;
+        Store::Config config{directory.root};
+        config.maxKeys = 1;
+        Harness owner(config);
+        ASSERT_TRUE(owner.commit(0, {{"room/a", "one"}}));
+        const auto base = owner.store->snapshot();
+        const std::vector<Store::Mutation> extra{{"room/b", "two"}};
+        const auto rejected = owner.commit(base->revision, extra);
+        ASSERT_FALSE(rejected);
+        EXPECT_EQ(rejected.error(), Store::Error::Capacity);
+        EXPECT_EQ(owner.store->snapshot(), base);
+        EXPECT_FALSE(
+            base->verifiesNamespaceTransition(*base, "room/", extra)
+        );
+        EXPECT_EQ(owner.store->stats().committed, 1u);
+    }
+    Directory directory;
+    std::shared_ptr<const Store::Snapshot> base;
+    const std::vector<Store::Mutation> uncertain{
+        {"room/a", "uncertain"}
+    };
+    {
+        Harness owner({directory.root});
+        ASSERT_TRUE(owner.commit(0, {{"room/a", "one"}}));
+        base = owner.store->snapshot();
+        failNextWalSync = true;
+        const auto failed = owner.commit(base->revision, uncertain);
+        ASSERT_FALSE(failed);
+        EXPECT_EQ(failed.error(), Store::Error::OutcomeUnknown);
+        EXPECT_EQ(owner.store->snapshot(), base);
+        EXPECT_FALSE(base->verifiesNamespaceTransition(
+            *base,
+            "room/",
+            uncertain
+        ));
+        EXPECT_TRUE(owner.store->stats().poisoned);
+    }
+    Harness recovered({directory.root});
+    EXPECT_FALSE(
+        recovered.store->snapshot()
+            ->verifiesNamespaceTransition(*base, "room/", uncertain)
+    );
+}
+
+TEST(
+    AtomicJournalTest,
     DirectorySyncLossAfterRenameQuarantinesAndRecoversCheckpoint
 )
 {
@@ -333,7 +698,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     CheckpointSyncLossLeavesAcknowledgedPrefixAndReusesStaleTemp
 )
 {
@@ -387,7 +752,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     KillBeforeAndAfterRenameRecoversSamePrefixAndNewWriter
 )
 {
@@ -463,7 +828,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     CompactedEmptyStateRetainsRevisionAndRejectsIncompleteCheckpoint
 )
 {
@@ -523,7 +888,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     RewritesCompactBoundedMultiFrameStateAndPreserveCas
 )
 {
@@ -581,7 +946,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     AtomicBatchesRetainSnapshotsAndReopenCompleteState
 )
 {
@@ -624,9 +989,7 @@ TEST(
     EXPECT_EQ(descriptors(), baseline);
 }
 
-TEST(
-    DurableStateStoreTest, ConcurrentCompareAndSwapHasExactlyOneWinner
-)
+TEST(AtomicJournalTest, ConcurrentCompareAndSwapHasExactlyOneWinner)
 {
     Directory directory;
     Harness owner({directory.root});
@@ -681,7 +1044,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     UnpumpedOwnerKeepsPendingAdmissionBoundedAndStopDrains
 )
 {
@@ -719,7 +1082,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     InvalidCapacityAndStateLimitsNeverPartiallyWrite
 )
 {
@@ -779,7 +1142,7 @@ TEST(
     );
 }
 
-TEST(DurableStateStoreTest, RecoveryTruncatesOnlyIncompleteFinalFrame)
+TEST(AtomicJournalTest, RecoveryTruncatesOnlyIncompleteFinalFrame)
 {
     Directory directory;
     std::uintmax_t prefix;
@@ -817,7 +1180,7 @@ TEST(DurableStateStoreTest, RecoveryTruncatesOnlyIncompleteFinalFrame)
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     CompleteCorruptionAndUnsupportedHeaderFailClosedWithoutFdLeaks
 )
 {
@@ -861,8 +1224,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
-    ExclusiveLockSymlinkAndSpecialFilesAreRejected
+    AtomicJournalTest, ExclusiveLockSymlinkAndSpecialFilesAreRejected
 )
 {
     Directory directory;
@@ -912,7 +1274,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     SyncFailureQuarantinesWriterAndReopenResolvesUnknownOutcome
 )
 {
@@ -951,7 +1313,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     CallbackFailureCannotUndoCommitAndClosedWaitsForDelivery
 )
 {
@@ -994,10 +1356,7 @@ TEST(
 
 /** Runs before this test starts any parent thread. The child owns
  * every writer. */
-TEST(
-    DurableStateStoreTest,
-    AbruptWriterDeathPreservesAcknowledgedPrefix
-)
+TEST(AtomicJournalTest, AbruptWriterDeathPreservesAcknowledgedPrefix)
 {
     Directory directory;
     std::array<int, 2> acknowledgements{}, commands{};
@@ -1085,7 +1444,7 @@ TEST(
 }
 
 TEST(
-    DurableStateStoreTest,
+    AtomicJournalTest,
     RealPartialWriteFailureReturnsUnknownAndRecoversPreviousPrefix
 )
 {
@@ -1137,4 +1496,4 @@ TEST(
     EXPECT_FALSE(owner.store->snapshot()->values.contains("next"));
 }
 } // namespace
-} // namespace service::lobby
+} // namespace arena::persistence

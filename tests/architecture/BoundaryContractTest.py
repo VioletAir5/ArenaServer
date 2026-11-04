@@ -49,21 +49,27 @@ def main():
     check(baseline['passed'], str(baseline['issues']))
     check(set(baseline['contracts']['declared']) == {
         'account.find','player.get','auth.authenticate','health.ready','match.allocate_ids',
-        'match.save_result','match.get','settlement.get','lobby.execute','lobby.detach','lobby.heartbeat'},
+        'match.save_result','match.get','settlement.get','lobby.execute','lobby.detach','lobby.heartbeat',
+        'room.migration.start','room.migration.status','room.create','room.stage','room.activate',
+        'room.execute','room.freeze','room.retire'},
         'actual Gateway/Auth/Lobby/Storage method contract set changed')
     check(baseline['contracts']['declared'] == baseline['contracts']['registered'],
           'a declared method is missing an actual dispatch registration')
     check(all(not cycles for cycles in baseline['cycles'].values()), 'baseline dependency cycle')
     check({entry['method'] for entry in baseline['contracts']['native_and_python_calls']} ==
           {'account.find','player.get','auth.authenticate','match.allocate_ids','match.save_result',
-           'match.get','settlement.get','health.ready','lobby.execute','lobby.detach','lobby.heartbeat'},
+           'match.get','settlement.get','health.ready','lobby.execute','lobby.detach','lobby.heartbeat',
+           'room.create','room.stage','room.activate','room.execute','room.freeze','room.retire'},
           'current native method coverage must follow real source calls')
     check(baseline['contracts']['qualified_declared'] == baseline['contracts']['qualified_registered']
           and set(baseline['contracts']['qualified_declared']) == {
               'storage/health.ready','storage/account.find','storage/player.get','storage/match.allocate_ids',
               'storage/match.save_result','storage/match.get','storage/settlement.get',
               'auth/health.ready','auth/auth.authenticate',
-              'lobby/health.ready','lobby/lobby.execute','lobby/lobby.detach','lobby/lobby.heartbeat'},
+              'lobby/health.ready','lobby/lobby.execute','lobby/lobby.detach','lobby/lobby.heartbeat',
+              'lobby/room.migration.start','lobby/room.migration.status',
+              'room/health.ready','room/room.create','room/room.stage','room/room.activate',
+              'room/room.execute','room/room.freeze','room/room.retire'},
           'service-qualified registrations must include every real service health and business handler')
     check({'auth/auth.authenticate','auth/health.ready','storage/health.ready','lobby/health.ready'} <=
           set(baseline['contracts']['qualified_declared']), 'native listener coverage missing')
@@ -71,7 +77,7 @@ def main():
     check(messages['AuthenticateRequest']['proposed_epoch'] == ('uint64', 1)
           and messages['AuthenticateRequest']['credential_kind'] == ('CredentialKind', 2),
           'nested enum must not hide its enclosing message fields')
-    cases.append(dict(name='current_production_sources_and_thirteen_qualified_rpc_contracts', passed=True))
+    cases.append(dict(name='current_production_sources_and_twenty_two_qualified_rpc_contracts', passed=True))
 
     def mutation(name, mutate, code):
         with tempfile.TemporaryDirectory(prefix='arena-boundary-') as directory:
@@ -309,6 +315,112 @@ def main():
         auth_contract_change(tree, lambda value: value['methods'][1].update(response_implementation=path))
     mutation('reply_serialization_inside_a_string_is_not_a_handler',
              serialized_reply_decoy, 'contract_response')
+
+    def native_room_change(tree, old, new, file='services/room/worker/src/RoomWorker.cpp'):
+        path = tree/file
+        value = path.read_text()
+        check(old in value, f'native Room fixture no longer matches actual source: {old}')
+        path.write_text(value.replace(old, new, 1))
+
+    def room_contract_change(tree, method, **changes):
+        path = tree/'services/room/contract.json'
+        value = json.loads(path.read_text())
+        row = next(item for item in value['methods'] if item['name'] == method)
+        row.update(changes)
+        text(path, json.dumps(value))
+
+    mutation('native_shared_handler_cannot_parse_into_a_different_output_type',
+        lambda tree: native_room_change(tree, 'Message value;', 'pb::StageRequest value;'),
+        'contract_registration_dynamic')
+    mutation('native_shared_handler_cannot_return_an_unparsed_output',
+        lambda tree: native_room_change(tree,
+            'job.request.payload(),\n            value', 'job.request.payload(),\n            other'),
+        'contract_registration_dynamic')
+    mutation('native_shared_handler_fake_parse_helper_is_not_trusted_by_name',
+        lambda tree: native_room_change(tree,
+            'auto parsed = wire::parseMessage(\n            job.request.payload(),',
+            'auto parsed = wire::fakeParseMessage(\n            job.request.payload(),'),
+        'contract_registration_dynamic')
+    mutation('native_strict_parser_canonical_check_cannot_be_removed',
+        lambda tree: native_room_change(tree, 'temporary->SerializeAsString() == bytes', 'true',
+            'services/room/worker/src/RoomWire.cpp'), 'contract_registration_dynamic')
+    mutation('native_strict_parser_cannot_ignore_unknown_fields',
+        lambda tree: native_room_change(tree, 'input.ConsumedEntireMessage() && known(*temporary)',
+            'input.ConsumedEntireMessage()', 'services/room/worker/src/RoomWire.cpp'),
+        'contract_registration_dynamic')
+    mutation('native_shared_handler_binding_cannot_be_mutated',
+        lambda tree: native_room_change(tree, 'handlers.emplace("room.create", roomHandler);',
+            'roomHandler = [](auto, auto, auto) { return Server::Cancellation{}; };\n'
+            '        handlers.emplace("room.create", roomHandler);'),
+        'contract_registration_dynamic')
+    mutation('native_shared_handler_alias_cannot_escape_the_closed_map',
+        lambda tree: native_room_change(tree, 'handlers.emplace("room.create", roomHandler);',
+            'auto escapedHandler = roomHandler;\n        handlers.emplace("room.create", roomHandler);'),
+        'contract_registration_dynamic')
+    mutation('native_shared_handler_requires_a_known_finite_method',
+        lambda tree: native_room_change(tree, 'handlers.emplace("room.create", roomHandler);',
+            'handlers.emplace("room.unknown", roomHandler);\n        handlers.emplace("room.create", roomHandler);'),
+        'contract_registration_dynamic')
+    mutation('native_shared_handler_cannot_modify_the_forwarded_request',
+        lambda tree: native_room_change(tree, 'return self->admit(',
+            'request.set_method("room.create");\n                return self->admit('),
+        'contract_registration_dynamic')
+    mutation('native_pump_dynamic_method_branch_fails_closed',
+        lambda tree: native_room_change(tree, 'method == "room.create"', 'method == dynamicMethod'),
+        'contract_registration_dynamic')
+    mutation('native_pump_branch_wrong_payload_is_not_hidden_by_other_handlers',
+        lambda tree: native_room_change(tree, 'parse<pb::CreateRequest>(*job)', 'parse<pb::StageRequest>(*job)'),
+        'contract_registration')
+    mutation('native_room_contract_payload_matches_its_specific_dispatch_branch',
+        lambda tree: room_contract_change(tree, 'room.create', request='arena.room.StageRequest'),
+        'contract_registration')
+    mutation('native_room_contract_reply_cannot_use_another_branch_reply',
+        lambda tree: room_contract_change(tree, 'room.create', response='arena.room.ExecuteReply'),
+        'contract_response')
+    mutation('native_worker_response_serializer_must_use_its_message_parameter',
+        lambda tree: native_room_change(tree, 'wire::serializeMessage(message)',
+            'wire::serializeMessage(pb::HealthReply{})'), 'contract_registration_dynamic')
+    mutation('native_worker_receipt_return_type_must_match_returned_value',
+        lambda tree: native_room_change(tree, 'pb::CacheReceipt receipt(', 'pb::HealthReply receipt('),
+        'contract_registration_dynamic')
+    mutation('native_make_unique_listener_must_consume_the_actual_map',
+        lambda tree: native_room_change(tree, 'std::move(handlers)', 'Server::Handlers{}'),
+        'contract_registration_dynamic')
+
+    def named_handler_decoy(tree):
+        path = tree/'services/room/worker/src/RoomWorker.cpp'
+        value = path.read_text()
+        begin = value.index('        auto roomHandler =')
+        brace = value.index('{', begin)
+        end = module._balanced_end(module._cpp(value), brace, '{', '}') + 2
+        path.write_text(value[:begin] + 'const char* decoy = R"ROOM(' + value[begin:end] + ')ROOM";\n' + value[end:])
+    mutation('native_named_handler_inside_a_raw_string_is_not_a_real_binding',
+             named_handler_decoy, 'contract_registration_dynamic')
+    mutation('native_lobby_strict_parser_must_parse_its_declared_output',
+        lambda tree: native_room_change(tree, 'arena::lobby::MigrationRequest typed;',
+            'arena::lobby::MigrationStatusRequest typed;', 'services/lobby/app/main.cpp'),
+        'contract_registration')
+    mutation('native_lobby_fake_strict_parser_is_not_attributed_to_real_helper',
+        lambda tree: native_room_change(tree, 'service::room::wire::parseMessage(',
+            'service::room::wire::fakeParseMessage(', 'services/lobby/app/main.cpp'),
+        'contract_registration')
+    mutation('native_make_unique_service_cannot_omit_its_contract',
+        lambda tree: text(tree/'services/lobby/app/Uncatalogued.cpp',
+            'void bind() { Server::Handlers handlers; '
+            'handlers.emplace("lobby.extra", [](auto, auto, auto) {}); '
+            'auto server = std::make_unique<Server>(executor, config, std::move(handlers)); }\n'),
+        'contract_native_undeclared')
+
+    mutation('native_strict_helper_early_return_cannot_bypass_a_string_decoy_guard',
+        lambda tree: native_room_change(tree, 'const auto parsed = guarded(', 'return {};\n    const auto parsed = guarded(',
+            'services/room/worker/src/RoomWire.cpp'), 'contract_registration_dynamic')
+    mutation('native_handler_map_alias_cannot_hide_a_dynamic_registration',
+        lambda tree: native_room_change(tree, 'handlers.emplace("room.create", roomHandler);',
+            'auto& hiddenMap = handlers;\n        handlers.emplace("room.create", roomHandler);'),
+        'contract_registration_dynamic')
+    mutation('native_make_unique_in_another_scope_is_not_a_real_map_consumer',
+        lambda tree: native_room_change(tree, 'std::move(handlers)',
+            '([&] { return std::move(handlers); })()'), 'contract_registration_dynamic')
 
     report = dict(passed=True, scope='normal source boundary and executable contract acceptance',
         cases=cases, elapsed_seconds=time.monotonic()-started,

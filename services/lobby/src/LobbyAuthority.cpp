@@ -5,6 +5,7 @@
 #include "lobby/LobbyAuthority.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <deque>
 #include <limits>
@@ -12,6 +13,7 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -20,8 +22,11 @@
 #include <boost/asio/strand.hpp>
 #include <google/protobuf/message.h>
 #include <google/protobuf/unknown_field_set.h>
+#include <spdlog/spdlog.h>
 
+#include "lobby/LegacyRoomImport.h"
 #include "lobby/ReplayArchive.h"
+#include "room/RoomWire.h"
 #include "storage.pb.h"
 
 namespace service::lobby
@@ -69,9 +74,35 @@ bool elapsed(
            static_cast<std::uint64_t>(duration.count());
 }
 
+bool pendingSettlementAck(
+    const RoomDirectory& directory,
+    RoomIdentity id,
+    std::uint64_t matchId
+)
+{
+    const auto* route = directory.find(id);
+    if (!route)
+        return false;
+    for (const auto& input : route->inbox)
+    {
+        if (input.operation.kind != RoomIngressKind::Settlement)
+            continue;
+        const auto command = service::room::wire::decodeCommand(
+            input.operation.payload
+        );
+        if (command &&
+            command->kind ==
+                service::room::RuntimeCommandKind::SettlementAck &&
+            !command->caller && command->matchId == matchId &&
+            command->committed)
+            return true;
+    }
+    return false;
+}
 bool validMetadata(
     const LobbyAuthority::Snapshot& saved,
-    const LobbyAuthority::Config& config
+    const LobbyAuthority::Config& config,
+    const RoomDirectory* prepared = nullptr
 )
 {
     const auto& meta = saved.meta;
@@ -85,7 +116,8 @@ bool validMetadata(
         meta.receipts_size() >
             static_cast<std::int64_t>(config.maxReceipts) ||
         static_cast<std::size_t>(meta.transports_size()) +
-                meta.receipts_size() + meta.settlements_size() >
+                meta.receipts_size() + meta.settlements_size() +
+                meta.pending_rooms_size() >
             authorityCodecMaxItems ||
         static_cast<std::size_t>(meta.settlements_size()) >
             std::min(
@@ -104,6 +136,175 @@ bool validMetadata(
     std::map<std::uint64_t, const RegistryEntryCheckpoint*> entries;
     for (const auto& entry : saved.core.registry.entries)
         entries.emplace(entry.snapshot.playerId.value(), &entry);
+    if (saved.core.distributedRooms &&
+        (!saved.core.rooms.actors.empty() ||
+         !saved.core.rooms.matches.empty() ||
+         !saved.core.rooms.roomCounters.empty()))
+        return false;
+    std::set<std::uint64_t> roomIds, incarnations, matchIds;
+    for (const auto& actor : saved.core.rooms.actors)
+        if (!roomIds.insert(actor.roomId.value()).second ||
+            !actor.incarnation ||
+            actor.incarnation > meta.incarnation_high_water() ||
+            !incarnations.insert(actor.incarnation).second)
+            return false;
+    for (const auto& match : saved.core.rooms.matches)
+    {
+        if (!matchIds.insert(match.allocation.matchId).second)
+            return false;
+        const auto allocation = std::find_if(
+            saved.core.registry.rooms.begin(),
+            saved.core.registry.rooms.end(),
+            [&](const auto& room)
+            { return room.roomId == match.allocation.roomId; }
+        );
+        if (match.phase == RoomPhase::Finished)
+        {
+            if (allocation != saved.core.registry.rooms.end())
+                return false;
+        }
+        else if (
+            allocation == saved.core.registry.rooms.end() ||
+            !allocation->managed ||
+            allocation->managed->matchId !=
+                match.allocation.matchId ||
+            allocation->managed->members != match.allocation.members
+        )
+            return false;
+    }
+    const auto* directory = prepared ? prepared
+                                     : saved.directory.get();
+    if (!directory)
+        return false;
+    for (const auto id : directory->ids())
+    {
+        if (roomIds.contains(id.room) || !id.incarnation ||
+            id.incarnation > meta.incarnation_high_water() ||
+            !incarnations.insert(id.incarnation).second)
+            return false;
+        const auto* route = directory->find(id);
+        if (!route)
+            return false;
+        const auto view = saved.roomImages.find(id);
+        if ((route->lifecycle != RoomRouteLifecycle::Retired) !=
+            (view != saved.roomImages.end()))
+            return false;
+    }
+    for (const auto& [id, image] : saved.roomImages)
+    {
+        if (!image || image->actor.roomId.value() != id.room ||
+            image->actor.incarnation != id.incarnation ||
+            !roomIds.insert(id.room).second)
+            return false;
+        if (!image->managed)
+            continue;
+        const auto& managed = *image->managed;
+        if (!matchIds.insert(managed.allocation.matchId).second)
+            return false;
+        const auto allocation = std::find_if(
+            saved.core.registry.rooms.begin(),
+            saved.core.registry.rooms.end(),
+            [&](const auto& room)
+            { return room.roomId.value() == id.room; }
+        );
+        if (managed.phase == service::room::RuntimePhase::Finished)
+        {
+            if (allocation != saved.core.registry.rooms.end())
+                return false;
+        }
+        else
+        {
+            if (allocation == saved.core.registry.rooms.end() ||
+                !allocation->managed ||
+                allocation->managed->matchId !=
+                    managed.allocation.matchId)
+                return false;
+            for (std::size_t i = 0; i != 2; ++i)
+            {
+                const auto& member = allocation->managed->members[i];
+                if (service::room::Member{
+                        member.playerId,
+                        member.sessionId,
+                        member.roomEpoch
+                    } != managed.allocation.members[i] ||
+                    member.initialMmr !=
+                        managed.allocation.initialMmr[i])
+                    return false;
+            }
+        }
+    }
+    std::set<std::uint64_t> pendingRooms;
+    std::size_t pendingWithoutImage = 0;
+    for (const auto& pending : meta.pending_rooms())
+    {
+        const RoomIdentity id{
+            pending.room_id(),
+            pending.incarnation()
+        };
+        const auto live = saved.roomImages.find(id);
+        const bool stagedManual = !pending.match_id() &&
+                                  live != saved.roomImages.end() &&
+                                  !live->second->managed;
+        if (stagedManual &&
+            std::any_of(
+                saved.core.registry.entries.begin(),
+                saved.core.registry.entries.end(),
+                [&](const auto& entry)
+                {
+                    return entry.snapshot.roomId &&
+                           entry.snapshot.roomId->value() == id.room;
+                }
+            ))
+            return false;
+        if (!known(pending) || !pending.room_id() ||
+            !pending.incarnation() || !pending.created_unix_ms() ||
+            pending.deadline_nanos() <= 0 ||
+            pending.incarnation() > meta.incarnation_high_water() ||
+            !pendingRooms.insert(pending.room_id()).second ||
+            (roomIds.contains(pending.room_id()) && !stagedManual) ||
+            (!stagedManual &&
+             !incarnations.insert(pending.incarnation()).second))
+            return false;
+        pendingWithoutImage += !stagedManual;
+        if (pending.match_id())
+        {
+            if (pending.match_id() >= idCeiling ||
+                pending.room_id() !=
+                    (idCeiling | pending.match_id()) ||
+                !matchIds.insert(pending.match_id()).second)
+                return false;
+            const auto allocation = std::find_if(
+                saved.core.registry.rooms.begin(),
+                saved.core.registry.rooms.end(),
+                [&](const auto& room)
+                { return room.roomId.value() == pending.room_id(); }
+            );
+            if (allocation == saved.core.registry.rooms.end() ||
+                !allocation->managed ||
+                allocation->managed->matchId != pending.match_id())
+                return false;
+            const auto pins = std::count_if(
+                saved.core.queue.entries.begin(),
+                saved.core.queue.entries.end(),
+                [&](const auto& ticket)
+                {
+                    return ticket.matchId == pending.match_id() &&
+                           ticket.active && !ticket.reclaimFrom &&
+                           !ticket.roomId;
+                }
+            );
+            if (pins != 2)
+                return false;
+        }
+        else if (pending.room_id() >= idCeiling)
+            return false;
+    }
+    if (roomIds.size() + pendingWithoutImage > config.rooms.maxRooms)
+        return false;
+    for (const auto& allocation : saved.core.registry.rooms)
+        if (allocation.managed &&
+            !matchIds.contains(allocation.managed->matchId))
+            return false;
     std::set<std::uint64_t> handles, players;
     std::set<std::pair<std::string, std::uint64_t>> external;
     for (const auto& transport : meta.transports())
@@ -257,9 +458,64 @@ bool validMetadata(
         );
         if (match == saved.core.rooms.matches.end())
         {
-            if (delivery.phase() !=
-                arena::lobby_meta::SettlementDelivery::ACKNOWLEDGED)
-                return false;
+            const service::room::RuntimeManaged* managed = nullptr;
+            RoomIdentity managedId;
+            for (const auto& [id, image] : saved.roomImages)
+            {
+                if (image->managed &&
+                    image->managed->allocation.matchId ==
+                        delivery.match_id())
+                {
+                    managed = &*image->managed;
+                    managedId = id;
+                }
+            }
+            if (!managed)
+            {
+                if (delivery.phase() !=
+                    arena::lobby_meta::SettlementDelivery::
+                        ACKNOWLEDGED)
+                    return false;
+            }
+            else
+            {
+                if (!managed->result ||
+                    managed->result->finalTick !=
+                        record.final_tick() ||
+                    managed->result->finalChecksum !=
+                        record.final_checksum() ||
+                    managed->result->roomId.value() !=
+                        record.room_id() ||
+                    (delivery.phase() ==
+                         arena::lobby_meta::SettlementDelivery::
+                             ACKNOWLEDGED &&
+                     managed->phase !=
+                         service::room::RuntimePhase::Finished &&
+                     !(managed->phase ==
+                           service::room::RuntimePhase::Settling &&
+                       pendingSettlementAck(
+                           *directory,
+                           managedId,
+                           delivery.match_id()
+                       ))))
+                    return false;
+                for (std::size_t i = 0; i != 2; ++i)
+                {
+                    const auto& member = managed->allocation
+                                             .members[i];
+                    const auto& stored = record.participants(
+                        static_cast<int>(i)
+                    );
+                    if (member.playerId.value() !=
+                            stored.player_id() ||
+                        member.sessionId.value() !=
+                            stored.session_id() ||
+                        member.epoch != stored.membership_epoch() ||
+                        managed->allocation.initialMmr[i] !=
+                            stored.initial_mmr())
+                        return false;
+                }
+            }
         }
         else
         {
@@ -292,26 +548,382 @@ bool validMetadata(
     }
     return true;
 }
-Error mapError(DurableStateStore::Error error) noexcept
+Error mapError(AtomicJournal::Error error) noexcept
 {
     switch (error)
     {
-    case DurableStateStore::Error::Capacity:
+    case AtomicJournal::Error::Capacity:
         return Error::Capacity;
-    case DurableStateStore::Error::OutcomeUnknown:
+    case AtomicJournal::Error::OutcomeUnknown:
         return Error::OutcomeUnknown;
-    case DurableStateStore::Error::Conflict:
+    case AtomicJournal::Error::Conflict:
         return Error::InvalidState;
-    case DurableStateStore::Error::Unavailable:
+    case AtomicJournal::Error::Unavailable:
         return Error::Unavailable;
     }
     return Error::Unavailable;
 }
-std::string replayKey(const service::room::ReplayLog& log)
+using Images = std::map<
+    RoomIdentity,
+    std::shared_ptr<const service::room::RuntimeImage>>;
+constexpr std::array<std::uint64_t RoomMetrics::*, 11> roomCounters{
+    &RoomMetrics::ticks,
+    &RoomMetrics::applied,
+    &RoomMetrics::rejected,
+    &RoomMetrics::duplicates,
+    &RoomMetrics::battlesStarted,
+    &RoomMetrics::battlesCompleted,
+    &RoomMetrics::battlesAborted,
+    &RoomMetrics::persistenceSubmitted,
+    &RoomMetrics::persistenceRejected,
+    &RoomMetrics::persistenceFailed,
+    &RoomMetrics::persistenceCommitted
+};
+void stripGauges(RoomMetrics& metrics)
 {
-    return "replay/" + std::to_string(log.checkpoint.roomId.value()) +
-           "/" + std::to_string(log.checkpoint.incarnation) + "/" +
-           std::to_string(log.ticks.front().tick);
+    metrics.actors = metrics
+                         .managedMatches = metrics
+                                               .retainedResults = 0;
+    metrics.pendingSettlements = metrics.blockedSettlements = 0;
+}
+RoomCheckpoint
+emptyLegacy(const RoomServiceConfig& config, Clock::time_point now)
+{
+    RoomPolicy policy{
+        config.maxRooms,
+        config.maxPending,
+        config.maxPendingPerRoom,
+        config.maxCatchUp,
+        config.actor,
+        config.battleDurationTicks,
+        config.readyTimeoutTicks,
+        config.resultRetention,
+        config.persistenceAdmissionAttempts,
+        config.persistenceRetryBase,
+        config.persistenceRetryMax,
+        true,
+        true,
+        false,
+        false
+    };
+    RoomCheckpoint
+        saved{policy, {}, {}, {}, now, true, true, true, 0};
+    saved.counterVersion = 1;
+    return saved;
+}
+bool samePolicy(const RoomPolicy& a, const RoomPolicy& b)
+{
+    const auto fields = [](const RoomPolicy& p)
+    {
+        return std::tie(
+            p.maxRooms,
+            p.maxPending,
+            p.maxPendingPerRoom,
+            p.maxCatchUp,
+            p.actor.maxMembers,
+            p.actor.maxInputsPerTick,
+            p.actor.historyTicks,
+            p.actor.positionLimit,
+            p.battleDurationTicks,
+            p.readyTimeoutTicks,
+            p.resultRetention,
+            p.persistenceAdmissionAttempts,
+            p.persistenceRetryBase,
+            p.persistenceRetryMax,
+            p.externalTicks,
+            p.externalSettlement,
+            p.callbackSettlement,
+            p.archives
+        );
+    };
+    return fields(a) == fields(b);
+}
+void normalizeLegacy(RoomCheckpoint& saved)
+{
+    if (!saved.counterVersion)
+    {
+        if (!saved.roomCounters.empty())
+            throw std::invalid_argument(
+                "legacy v0 has explicit contributions"
+            );
+        saved.unattributedCounters = saved.metrics;
+        stripGauges(saved.unattributedCounters);
+        for (const auto& actor : saved.actors)
+            saved.roomCounters.push_back(
+                {actor.roomId, actor.tick, false, {}}
+            );
+        saved.counterVersion = 1;
+    }
+    if (saved.counterVersion != 1)
+        throw std::invalid_argument("unknown room counter schema");
+    saved.metrics = saved.unattributedCounters;
+    stripGauges(saved.metrics);
+    saved.metrics.actors = saved.actors.size();
+    for (const auto& contribution : saved.roomCounters)
+        for (const auto member : roomCounters)
+        {
+            if (contribution.counters.*member >
+                UINT64_MAX - saved.metrics.*member)
+                throw std::invalid_argument(
+                    "room counter ledger overflow"
+                );
+            saved.metrics.*member += contribution.counters.*member;
+        }
+    for (const auto& match : saved.matches)
+    {
+        if (match.phase == RoomPhase::Finished)
+            ++saved.metrics.retainedResults;
+        else
+            ++saved.metrics.managedMatches;
+        if (match.phase == RoomPhase::Settling)
+        {
+            ++saved.metrics.pendingSettlements;
+            saved.metrics
+                .blockedSettlements += match.persistenceBlocked;
+        }
+    }
+}
+bool hasDistributedMatch(const Images& images, std::uint64_t match)
+{
+    return std::any_of(
+        images.begin(),
+        images.end(),
+        [&](const auto& pair)
+        {
+            return pair.second->managed &&
+                   pair.second->managed->allocation.matchId == match;
+        }
+    );
+}
+std::shared_ptr<const service::room::RuntimeImage>
+decodeProjection(RoomIdentity id, const RoomWorkerImage& value)
+{
+    auto image = service::room::wire::decodeImage(value.checkpoint);
+    if (!image || image->actor.roomId.value() != id.room ||
+        image->actor.incarnation != id.incarnation ||
+        image->actor.tick != value.tick ||
+        image->actor.checksum != value.checksum ||
+        image->logicalCutoff != value.logicalTick)
+        throw std::invalid_argument(
+            "worker image differs from committed route metadata"
+        );
+    return std::make_shared<const service::room::RuntimeImage>(
+        std::move(*image)
+    );
+}
+void addRetiredCounters(
+    RoomMetrics& target, const service::room::RuntimeCounters& c
+)
+{
+    RoomMetrics values;
+    values.ticks = c.ticks;
+    values.applied = c.applied;
+    values.rejected = c.rejected;
+    values.duplicates = c.duplicates;
+    values.battlesStarted = c.battlesStarted;
+    values.battlesCompleted = c.battlesCompleted;
+    values.battlesAborted = c.battlesAborted;
+    values.persistenceSubmitted = c.settlementIntents;
+    values.persistenceCommitted = c.settlementsCommitted;
+    values.persistenceFailed = c.settlementsFailed;
+    for (const auto member : roomCounters)
+        if (values.*member > UINT64_MAX - target.*member)
+            throw std::invalid_argument(
+                "retired room ledger overflow"
+            );
+    for (const auto member : roomCounters)
+        target.*member += values.*member;
+}
+Images projectImages(
+    const RoomDirectory& directory,
+    const LobbyAuthority::Snapshot* previous
+)
+{
+    Images images;
+    for (const auto id : directory.ids())
+    {
+        const auto* route = directory.find(id);
+        if (!route || route->lifecycle == RoomRouteLifecycle::Retired)
+            continue;
+        if (previous && previous->directory)
+        {
+            const auto* old = previous->directory->find(id);
+            const auto image = previous->roomImages.find(id);
+            if (old && old->image == route->image &&
+                image != previous->roomImages.end())
+            {
+                images.emplace(id, image->second);
+                continue;
+            }
+        }
+        auto image = service::room::wire::decodeImage(
+            route->image.checkpoint
+        );
+        if (!image || image->actor.roomId.value() != id.room ||
+            image->actor.incarnation != id.incarnation ||
+            image->actor.tick != route->image.tick ||
+            image->actor.checksum != route->image.checksum ||
+            image->logicalCutoff != route->image.logicalTick)
+            throw std::invalid_argument(
+                "worker image metadata differs from directory"
+            );
+        images.emplace(
+            id,
+            std::make_shared<const service::room::RuntimeImage>(
+                std::move(*image)
+            )
+        );
+    }
+    return images;
+}
+/** @brief Retains diagnostic values prepared before journal
+ * admission. */
+struct RoomPublicationEvent
+{
+    std::shared_ptr<const service::room::RuntimeImage> image;
+    bool tick{false}, phase{false}, result{false};
+};
+std::string_view phaseName(service::room::RuntimePhase phase) noexcept
+{
+    using Phase = service::room::RuntimePhase;
+    switch (phase)
+    {
+    case Phase::Forming:
+        return "Forming";
+    case Phase::Ready:
+        return "Ready";
+    case Phase::Playing:
+        return "Playing";
+    case Phase::Settling:
+        return "Settling";
+    case Phase::Finished:
+        return "Finished";
+    }
+    return "Unknown";
+}
+std::string_view
+reasonName(service::room::RuntimeReason reason) noexcept
+{
+    using Reason = service::room::RuntimeReason;
+    switch (reason)
+    {
+    case Reason::Completed:
+        return "Completed";
+    case Reason::MemberUnavailable:
+        return "MemberUnavailable";
+    case Reason::ReadyTimeout:
+        return "ReadyTimeout";
+    }
+    return "Unknown";
+}
+std::vector<RoomPublicationEvent> roomPublicationEvents(
+    const LobbyAuthority::Snapshot& before,
+    const LobbyAuthority::Snapshot& after
+)
+{
+    std::vector<RoomPublicationEvent> events;
+    for (const auto& [id, image] : after.roomImages)
+    {
+        const auto old = before.roomImages.find(id);
+        const bool tick = old != before.roomImages.end() &&
+                          old->second->actor.tick < image->actor.tick;
+        if (!image->managed)
+        {
+            if (tick)
+                events.push_back({image, true, false, false});
+            continue;
+        }
+        const auto* previous = old != before.roomImages.end() &&
+                                       old->second->managed
+                                   ? &*old->second->managed
+                                   : nullptr;
+        // Adopting an existing legacy value does not replay its
+        // history.
+        if (!previous &&
+            std::any_of(
+                before.core.rooms.matches.begin(),
+                before.core.rooms.matches.end(),
+                [&](const auto& match)
+                {
+                    return match.allocation.matchId ==
+                           image->managed->allocation.matchId;
+                }
+            ))
+            continue;
+        const auto& managed = *image->managed;
+        const bool phase = !previous ||
+                           previous->phase != managed.phase;
+        const bool result = managed.result &&
+                            (!previous || !previous->result);
+        if (tick || phase || result)
+            events.push_back({image, tick, phase, result});
+    }
+    return events;
+}
+/** @brief Emits only acknowledged transitions; diagnostics cannot
+ * undo publication. */
+void logRoomPublications(
+    const std::vector<RoomPublicationEvent>& events
+) noexcept
+{
+    for (const auto& event : events)
+    {
+        const auto& image = *event.image;
+        if (event.tick)
+            try
+            {
+                spdlog::info(
+                    "event=room_tick room_id={} incarnation={} "
+                    "tick={} checksum={}",
+                    image.actor.roomId.value(),
+                    image.actor.incarnation,
+                    image.actor.tick,
+                    image.actor.checksum
+                );
+            }
+            catch (...)
+            {
+            }
+        if (!image.managed)
+            continue;
+        const auto& managed = *image.managed;
+        if (event.phase)
+            try
+            {
+                spdlog::info(
+                    "event=room_phase match_id={} room_id={} "
+                    "phase={} "
+                    "tick={} played_ticks={} checksum={}",
+                    managed.allocation.matchId,
+                    image.actor.roomId.value(),
+                    phaseName(managed.phase),
+                    image.actor.tick,
+                    managed.playedTicks,
+                    image.actor.checksum
+                );
+            }
+            catch (...)
+            {
+            }
+        if (event.result)
+            try
+            {
+                const auto& result = *managed.result;
+                spdlog::info(
+                    "event=room_result result_id={} match_id={} "
+                    "room_id={} reason={} final_tick={} checksum={}",
+                    result.resultId,
+                    managed.allocation.matchId,
+                    image.actor.roomId.value(),
+                    reasonName(result.reason),
+                    result.finalTick,
+                    result.finalChecksum
+                );
+            }
+            catch (...)
+            {
+            }
+    }
 }
 } // namespace
 
@@ -322,11 +934,14 @@ struct LobbyAuthority::WorkingState::Auxiliary
     std::int64_t wall;
     bool collect{true};
     std::vector<SessionBinding> revoked;
+    std::optional<RoomMigration::Candidate> directoryCandidate;
 };
 LobbyAuthority::WorkingState::WorkingState(
-    std::shared_ptr<Auxiliary> auxiliary
+    std::shared_ptr<Auxiliary> auxiliary,
+    std::shared_ptr<const Snapshot> source
 )
     : m_aux(std::move(auxiliary))
+    , base(std::move(source))
     , meta(m_aux->meta)
     , now(m_aux->now)
     , wallNow(m_aux->wall)
@@ -335,7 +950,6 @@ LobbyAuthority::WorkingState::WorkingState(
 LobbyAuthority::WorkingState::~WorkingState()
 {
     m_aux->collect = false;
-    rooms.reset();
     queue.reset();
     online.reset();
 }
@@ -380,22 +994,25 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
     };
     struct Batch
     {
-        std::shared_ptr<const Snapshot> snapshot;
+        std::shared_ptr<Snapshot> snapshot;
+        std::optional<RoomMigration::Candidate> directoryCandidate;
         std::vector<std::shared_ptr<Job>> jobs;
         std::vector<CommitReply> replies;
         std::vector<SessionBinding> revoked;
+        std::vector<RoomPublicationEvent> roomEvents;
         bool bootstrap{false};
     };
     State(boost::asio::any_io_executor executor, Config configured)
         : owner(boost::asio::make_strand(executor))
         , config(std::move(configured))
+        , migration(config.directoryLimits, config.bootId)
         , tickTimer(owner)
         , closeTimer(owner)
     {
     }
 
     std::unique_ptr<WorkingState> working(
-        const Snapshot* source,
+        std::shared_ptr<const Snapshot> source,
         const WorkingState::Auxiliary* frozen = nullptr
     )
     {
@@ -419,7 +1036,7 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
             aux->meta.set_boot_id(config.bootId);
         }
         auto candidate = std::unique_ptr<WorkingState>(
-            new WorkingState(aux)
+            new WorkingState(aux, source)
         );
         auto registryConfig = config.registry;
         registryConfig.now = [aux] { return aux->now; };
@@ -484,49 +1101,27 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
         else
             candidate->queue = std::make_unique<
                 service::match::MatchQueue>(queueConfig, eligibility);
-        auto roomConfig = config.rooms;
-        roomConfig.externalTicks = true;
-        roomConfig.externalSettlement = true;
-        roomConfig.persistSettlement = {};
-        roomConfig.replays.reset();
-        roomConfig.now = [aux] { return aux->now; };
-        roomConfig.wallNow = [aux]
-        {
-            return std::chrono::system_clock::time_point{
-                std::chrono::seconds(aux->wall)
-            };
-        };
-        roomConfig.incarnationSource = [aux]
-        {
-            const auto high = aux->meta.incarnation_high_water();
-            if (high == UINT64_MAX)
-                throw std::overflow_error(
-                    "actor incarnation exhausted"
-                );
-            aux->meta.set_incarnation_high_water(high + 1);
-            return high + 1;
-        };
-        if (source)
-        {
-            auto rooms = RoomService::restore(
-                candidate->online,
-                source->core.rooms,
-                roomConfig
+        candidate->legacyRooms = source ? source->core.rooms
+                                        : emptyLegacy(
+                                              config.rooms,
+                                              candidate->now
+                                          );
+        if (!samePolicy(
+                candidate->legacyRooms.policy,
+                emptyLegacy(config.rooms, candidate->now).policy
+            ))
+            throw std::invalid_argument(
+                "passive legacy room policy changed"
             );
-            if (!rooms)
-                throw std::invalid_argument(
-                    "invalid room checkpoint"
-                );
-            candidate->rooms = std::move(*rooms);
-        }
-        else
-        {
-            candidate->rooms = std::make_unique<RoomService>(
-                candidate->online,
-                roomConfig
+        if (source && !splitLegacyRooms(candidate->legacyRooms))
+            throw std::invalid_argument(
+                "invalid stored legacy room ledger"
             );
-            candidate->rooms->start({});
-        }
+        normalizeLegacy(candidate->legacyRooms);
+        if (!splitLegacyRooms(candidate->legacyRooms))
+            throw std::invalid_argument(
+                "invalid passive legacy room checkpoint"
+            );
         return candidate;
     }
     void closeSlots(
@@ -612,7 +1207,7 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
     {
         if (!config.autoTicks || stopping.load())
             return;
-        tickTimer.expires_after(RoomService::tickInterval);
+        tickTimer.expires_after(std::chrono::milliseconds(50));
         tickTimer.async_wait(
             [self = shared_from_this()](auto error)
             {
@@ -637,8 +1232,8 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
         std::int64_t wall
     ) const
     {
-        if (!current.core.rooms.actors.empty() ||
-            current.core.queue.metrics.queued)
+        if (current.core.queue.metrics.queued ||
+            !current.roomImages.empty())
             return true;
         for (const auto& entry : current.core.registry.entries)
             if (entry.expiresAt <= wall ||
@@ -671,6 +1266,10 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                         return match.allocation.matchId ==
                                delivery.match_id();
                     }
+                ) &&
+                !hasDistributedMatch(
+                    current.roomImages,
+                    delivery.match_id()
                 ))
                 return true;
         return false;
@@ -718,11 +1317,6 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 found->second->snapshot.epoch != transport.epoch())
                 transports->DeleteSubrange(index, 1);
         }
-        const auto rooms = candidate.rooms->checkpoint();
-        if (!rooms)
-            throw std::invalid_argument(
-                "room metadata cutoff is busy"
-            );
         auto* settlements = candidate.meta.mutable_settlements();
         for (int index = settlements->size(); index-- > 0;)
         {
@@ -733,16 +1327,195 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 delivery.retention_deadline_nanos() <=
                     nanos(candidate.now) &&
                 std::none_of(
-                    rooms->matches.begin(),
-                    rooms->matches.end(),
+                    candidate.legacyRooms.matches.begin(),
+                    candidate.legacyRooms.matches.end(),
                     [&](const auto& match)
                     {
                         return match.allocation.matchId ==
                                delivery.match_id();
                     }
+                ) &&
+                !hasDistributedMatch(
+                    candidate.base->roomImages,
+                    delivery.match_id()
                 ))
                 settlements->DeleteSubrange(index, 1);
         }
+    }
+    void appendRoomCutoffs(WorkingState& candidate)
+    {
+        if (!candidate.base || candidate.base->roomImages.empty() ||
+            candidate.roomChanges.size() >=
+                config.directoryLimits.maxCommands)
+            return;
+        const auto registry = candidate.online->checkpoint();
+        std::map<std::uint64_t, const OnlineSnapshot*> current;
+        std::map<std::uint64_t, std::vector<const OnlineSnapshot*>>
+            rosters;
+        for (const auto& entry : registry.entries)
+        {
+            current.emplace(
+                entry.snapshot.playerId.value(),
+                &entry.snapshot
+            );
+            if (entry.snapshot.roomId)
+                rosters[entry.snapshot.roomId->value()].push_back(
+                    &entry.snapshot
+                );
+        }
+        const auto authorization = [](const OnlineSnapshot& value)
+        {
+            return service::room::RuntimeAuthorization{
+                {value.playerId, value.sessionId, value.roomEpoch},
+                value.epoch,
+                value.connectionId,
+                value.presence == Presence::Online
+            };
+        };
+        const auto& views = candidate.base->roomImages;
+        auto first = cutoffAfter ? views.upper_bound(*cutoffAfter)
+                                 : views.begin();
+        if (first == views.end())
+            first = views.begin();
+        auto position = first;
+        do
+        {
+            const auto id = position->first;
+            if (++position == views.end())
+                position = views.begin();
+            const bool manualPending = std::any_of(
+                candidate.meta.pending_rooms().begin(),
+                candidate.meta.pending_rooms().end(),
+                [&](const auto& pending)
+                {
+                    return !pending.match_id() &&
+                           pending.room_id() == id.room &&
+                           pending.incarnation() == id.incarnation;
+                }
+            );
+            if (manualPending)
+                continue;
+            const auto* route = candidate.base->directory->find(id);
+            if (!route ||
+                route->lifecycle == RoomRouteLifecycle::Retired ||
+                route->admittedTick == UINT64_MAX ||
+                route->nextSequence == UINT64_MAX ||
+                route->inbox.size() >=
+                    config.directoryLimits.maxInbox ||
+                route->receipts.size() >=
+                    config.directoryLimits.maxReceipts)
+                continue;
+            if (route->handoff &&
+                route->handoff->phase !=
+                    RoomMigrationPhase::Preparing &&
+                route->handoff->phase !=
+                    RoomMigrationPhase::Committed &&
+                route->handoff->phase != RoomMigrationPhase::Aborted)
+                continue;
+            bool hasTick = false, changed = false;
+            std::vector<const RoomOperation*> pending;
+            for (const auto& ingress : route->inbox)
+                pending.push_back(&ingress.operation);
+            for (const auto& change : candidate.roomChanges)
+            {
+                if (const auto* accepted = std::get_if<RoomAccept>(
+                        &change
+                    ))
+                {
+                    if (accepted->room == id)
+                        pending.push_back(&accepted->operation);
+                }
+                else
+                    std::visit(
+                        [&](const auto& value)
+                        { changed = changed || value.room == id; },
+                        change
+                    );
+            }
+            // A same-batch owner/lifecycle/image transition gets its
+            // next cutoff from the following owner turn, after its
+            // actual route is committed.
+            if (changed ||
+                pending.size() >= config.directoryLimits.maxInbox ||
+                route->receipts.size() + pending.size() -
+                        route->inbox.size() >=
+                    config.directoryLimits.maxReceipts)
+                continue;
+            std::set<std::uint64_t> callers;
+            for (const auto* operation : pending)
+            {
+                if (operation->kind == RoomIngressKind::Tick)
+                {
+                    hasTick = true;
+                    break;
+                }
+                const auto
+                    command = service::room::wire::decodeCommand(
+                        operation->payload
+                    );
+                if (!command)
+                    throw std::invalid_argument(
+                        "invalid committed room command payload"
+                    );
+                if (command->caller)
+                    callers.insert(
+                        command->caller->member.playerId.value()
+                    );
+            }
+            if (hasTick ||
+                (route->lifecycle == RoomRouteLifecycle::Closing &&
+                 pending.empty()))
+                continue;
+            service::room::RuntimeCutoff cutoff;
+            cutoff.nowNanos = nanos(candidate.now);
+            cutoff.wallMillis = static_cast<std::uint64_t>(
+                                    candidate.wallNow
+                                ) *
+                                1000;
+            if (const auto roster = rosters.find(id.room);
+                roster != rosters.end())
+                for (const auto* member : roster->second)
+                {
+                    cutoff.roster.push_back(authorization(*member));
+                    callers.insert(member->playerId.value());
+                }
+            for (const auto player : callers)
+                if (const auto entry = current.find(player);
+                    entry != current.end())
+                    cutoff.currentAuthorizations.push_back(
+                        authorization(*entry->second)
+                    );
+            const auto encoded = service::room::wire::encodeCutoff(
+                cutoff
+            );
+            if (!encoded)
+            {
+                if (encoded.error() ==
+                    service::room::wire::CodecError::Capacity)
+                    continue;
+                throw std::invalid_argument(
+                    "invalid room cutoff values"
+                );
+            }
+            if (encoded->size() >
+                config.directoryLimits.maxOperationBytes)
+                continue;
+            const auto logical = route->admittedTick + 1;
+            candidate.roomChanges.push_back(
+                RoomAccept{
+                    id,
+                    route->ownerEpoch,
+                    {"tick/" + std::to_string(logical),
+                     RoomIngressKind::Tick,
+                     logical,
+                     *encoded}
+                }
+            );
+            cutoffAfter = id;
+            if (candidate.roomChanges.size() ==
+                config.directoryLimits.maxCommands)
+                break;
+        } while (position != first);
     }
     void advance(WorkingState& candidate)
     {
@@ -760,26 +1533,50 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                    pair.second.sessionId,
                    pair.second.mmr}}}
             );
-            bool hosted = false;
-            if (room)
+            const auto used = candidate.legacyRooms.actors.size() +
+                              candidate.base->roomImages.size() +
+                              candidate.meta.pending_rooms_size();
+            const auto now = nanos(candidate.now);
+            if (!room || used >= config.rooms.maxRooms ||
+                candidate.meta.incarnation_high_water() ==
+                    UINT64_MAX ||
+                now < 0 ||
+                now > std::numeric_limits<std::int64_t>::max() -
+                          10'000'000'000LL)
             {
-                hosted = candidate.rooms->openMatch(*room);
-                if (!hosted)
+                if (room)
                     candidate.online->finishMatch(
                         room->roomId,
                         room->matchId
                     );
+                candidate.queue->release(
+                    pair.first.matchId,
+                    candidate.now
+                );
+                continue;
             }
-            candidate.queue->release(
-                pair.first.matchId,
-                candidate.now,
-                hosted ? std::optional(room->roomId) : std::nullopt
+            auto* pending = candidate.meta.add_pending_rooms();
+            pending->set_room_id(room->roomId.value());
+            pending->set_incarnation(
+                candidate.meta.incarnation_high_water() + 1
             );
+            candidate.meta.set_incarnation_high_water(
+                pending->incarnation()
+            );
+            pending->set_match_id(room->matchId);
+            pending->set_created_unix_ms(
+                std::max<std::uint64_t>(
+                    1,
+                    static_cast<std::uint64_t>(candidate.wallNow) *
+                        1000
+                )
+            );
+            pending->set_deadline_nanos(now + 10'000'000'000LL);
+            // The existing active assignment is its durable pin. Only
+            // the remote create result or bounded abort may call
+            // queue.release().
         }
-        if (!candidate.rooms->advance())
-            throw std::invalid_argument(
-                "room cutoff could not complete"
-            );
+        appendRoomCutoffs(candidate);
     }
     std::shared_ptr<Snapshot> freeze(
         WorkingState& candidate,
@@ -791,14 +1588,199 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
         result->revision = revision;
         result->core.registry = candidate.online->checkpoint();
         result->core.queue = candidate.queue->checkpoint();
-        auto rooms = candidate.rooms->checkpoint();
-        if (!rooms)
+        candidate.legacyRooms
+            .incarnationHighWater = candidate.meta
+                                        .incarnation_high_water();
+        normalizeLegacy(candidate.legacyRooms);
+        if (!splitLegacyRooms(candidate.legacyRooms))
             throw std::invalid_argument(
-                "room mailbox is not quiescent"
+                "invalid remaining legacy values"
             );
-        result->core.rooms = std::move(*rooms);
+        result->core.rooms = candidate.legacyRooms;
+        result->core.distributedRooms = result->core.rooms.actors
+                                            .empty();
+        const auto baseDirectory = candidate.base
+                                       ? candidate.base->directory
+                                       : initialDirectory;
+        auto planned = migration.plan(
+            *baseDirectory,
+            candidate.roomChanges,
+            nanos(candidate.now)
+        );
+        if (!planned)
+            throw std::invalid_argument(
+                "room directory candidate rejected"
+            );
+        for (const auto id : planned->planned().ids())
+        {
+            const auto* final = planned->planned().find(id);
+            const auto* before = baseDirectory->find(id);
+            if (final->lifecycle == RoomRouteLifecycle::Retired &&
+                (!before ||
+                 before->lifecycle != RoomRouteLifecycle::Retired))
+            {
+                const auto image = decodeProjection(id, final->image);
+                if (image->managed)
+                {
+                    if (image->managed->phase !=
+                            service::room::RuntimePhase::Finished ||
+                        std::any_of(
+                            result->core.registry.rooms.begin(),
+                            result->core.registry.rooms.end(),
+                            [&](const auto& room)
+                            { return room.roomId.value() == id.room; }
+                        ))
+                        throw std::invalid_argument(
+                            "managed room retired before membership "
+                            "release"
+                        );
+                }
+                else if (
+                    std::any_of(
+                        result->core.registry.entries.begin(),
+                        result->core.registry.entries.end(),
+                        [&](const auto& entry)
+                        {
+                            return entry.snapshot.roomId &&
+                                   entry.snapshot.roomId->value() ==
+                                       id.room;
+                        }
+                    )
+                )
+                    throw std::invalid_argument(
+                        "manual room retired with bound players"
+                    );
+                addRetiredCounters(
+                    candidate.legacyRooms.unattributedCounters,
+                    image->counters
+                );
+            }
+        }
+        normalizeLegacy(candidate.legacyRooms);
+        result->core.rooms = candidate.legacyRooms;
+        result
+            ->directory = baseDirectory; // Bound to the actual synced
+                                         // directory after ACK.
+        result->roomImages = projectImages(
+            planned->planned(),
+            candidate.base.get()
+        );
+        if (previous)
+        {
+            for (const auto id : planned->planned().ids())
+            {
+                if (baseDirectory->find(id))
+                    continue;
+                const auto live = result->roomImages.find(id);
+                const auto image = live != result->roomImages.end()
+                                       ? live->second
+                                       : decodeProjection(
+                                             id,
+                                             planned->planned()
+                                                 .find(id)
+                                                 ->image
+                                         );
+                const auto legacy = std::find_if(
+                    previous->core.rooms.actors.begin(),
+                    previous->core.rooms.actors.end(),
+                    [&](const auto& actor)
+                    {
+                        return actor.roomId.value() == id.room &&
+                               actor.incarnation == id.incarnation;
+                    }
+                );
+                if (legacy != previous->core.rooms.actors.end())
+                {
+                    auto values = previous->core.rooms;
+                    normalizeLegacy(values);
+                    auto imported = splitLegacyRooms(values);
+                    if (!imported)
+                        throw std::invalid_argument(
+                            "legacy adoption source is invalid"
+                        );
+                    const auto expected = std::find_if(
+                        imported->images.begin(),
+                        imported->images.end(),
+                        [&](const auto& value)
+                        {
+                            return value.actor.roomId.value() ==
+                                       id.room &&
+                                   value.actor.incarnation ==
+                                       id.incarnation;
+                        }
+                    );
+                    const auto bytes =
+                        expected == imported->images.end()
+                            ? std::expected<
+                                  std::string,
+                                  service::room::wire::CodecError>(
+                                  std::unexpected(
+                                      service::room::wire::
+                                          CodecError::Invalid
+                                  )
+                              )
+                            : service::room::wire::encodeImage(
+                                  *expected
+                              );
+                    if (!bytes || *bytes != planned->planned()
+                                                .find(id)
+                                                ->image.checkpoint)
+                        throw std::invalid_argument(
+                            "worker adoption changed a committed "
+                            "legacy value"
+                        );
+                }
+                else
+                {
+                    const auto reservation = std::find_if(
+                        previous->meta.pending_rooms().begin(),
+                        previous->meta.pending_rooms().end(),
+                        [&](const auto& pending)
+                        {
+                            return pending.room_id() == id.room &&
+                                   pending.incarnation() ==
+                                       id.incarnation;
+                        }
+                    );
+                    if (reservation ==
+                            previous->meta.pending_rooms().end() ||
+                        reservation->deadline_nanos() <=
+                            nanos(candidate.now) ||
+                        (image->managed
+                             ? image->managed->allocation.matchId !=
+                                       reservation->match_id() ||
+                                   image->managed->createdUnixMs !=
+                                       reservation->created_unix_ms()
+                             : reservation->match_id() != 0))
+                        throw std::invalid_argument(
+                            "worker create has no live durable "
+                            "reservation"
+                        );
+                }
+            }
+            for (const auto& actor : previous->core.rooms.actors)
+                if (std::none_of(
+                        result->core.rooms.actors.begin(),
+                        result->core.rooms.actors.end(),
+                        [&](const auto& retained)
+                        { return retained.roomId == actor.roomId; }
+                    ) &&
+                    !planned->planned().find(
+                        {actor.roomId.value(), actor.incarnation}
+                    ))
+                    throw std::invalid_argument(
+                        "legacy room removed before worker adoption"
+                    );
+        }
+        candidate.m_aux->directoryCandidate.emplace(
+            std::move(*planned)
+        );
         result->meta = candidate.meta;
-        if (!validMetadata(*result, config))
+        if (!validMetadata(
+                *result,
+                config,
+                &candidate.m_aux->directoryCandidate->planned()
+            ))
             throw std::invalid_argument("invalid authority metadata");
         if (previous)
         {
@@ -824,6 +1806,43 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 throw std::invalid_argument(
                     "authority watermarks cannot decrease"
                 );
+            for (const auto& pending : result->meta.pending_rooms())
+            {
+                const auto prior = std::find_if(
+                    old.pending_rooms().begin(),
+                    old.pending_rooms().end(),
+                    [&](const auto& value)
+                    { return value.room_id() == pending.room_id(); }
+                );
+                if (prior != old.pending_rooms().end() &&
+                    prior->incarnation() == pending.incarnation())
+                {
+                    if (prior->SerializeAsString() !=
+                        pending.SerializeAsString())
+                        throw std::invalid_argument(
+                            "pending room budget or identity was "
+                            "renewed"
+                        );
+                }
+                else if (
+                    pending.incarnation() <=
+                        old.incarnation_high_water() ||
+                    pending.deadline_nanos() <=
+                        nanos(candidate.now) ||
+                    static_cast<std::uint64_t>(
+                        pending.deadline_nanos()
+                    ) -
+                            static_cast<std::uint64_t>(
+                                nanos(candidate.now)
+                            ) >
+                        10'000'000'000ULL ||
+                    (prior != old.pending_rooms().end() &&
+                     prior->deadline_nanos() > nanos(candidate.now))
+                )
+                    throw std::invalid_argument(
+                        "invalid new room reservation"
+                    );
+            }
             for (const auto& receipt : old.receipts())
             {
                 const auto found = std::find_if(
@@ -864,6 +1883,10 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                                 return match.allocation.matchId ==
                                        delivery.match_id();
                             }
+                        ) ||
+                        hasDistributedMatch(
+                            result->roomImages,
+                            delivery.match_id()
                         ))
                         throw std::invalid_argument(
                             "unacknowledged settlement intent cannot "
@@ -898,10 +1921,10 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                     );
             }
         }
-        auto validated = working(result.get(), candidate.m_aux.get());
+        auto validated = working(result, candidate.m_aux.get());
         return result;
     }
-    std::vector<DurableStateStore::Mutation>
+    std::vector<AtomicJournal::Mutation>
     encode(const Snapshot& next, WorkingState* candidate)
     {
         auto core = encodeCoreCheckpoint(next.core);
@@ -909,40 +1932,22 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
         if (!core || !next.meta.SerializeToString(&metadata) ||
             metadata.size() > authorityCodecMaxBytes)
             throw std::invalid_argument("authority encoding failed");
-        std::vector<DurableStateStore::Mutation> mutations;
-        mutations.reserve(next.core.rooms.actors.size() + 2);
+        std::vector<AtomicJournal::Mutation> mutations;
+        const auto& changes = candidate->m_aux->directoryCandidate
+                                  ->mutations();
+        mutations.reserve(changes.size() + 2);
         mutations.push_back({std::string(coreKey), std::move(*core)});
         mutations.push_back(
             {std::string(metadataKey), std::move(metadata)}
         );
-        if (candidate)
-        {
-            const auto previous = store->snapshot();
-            for (const auto& actor : next.core.rooms.actors)
-            {
-                const auto log = candidate->rooms->replayLog(
-                    actor.roomId
-                );
-                if (!log || log->ticks.empty())
-                    continue;
-                auto value = encodeReplayLog(*log);
-                auto key = replayKey(*log);
-                if (!value || previous->values.contains(key))
-                    throw std::invalid_argument(
-                        "replay segment would overwrite committed "
-                        "history"
-                    );
-                mutations.push_back(
-                    {std::move(key), std::move(*value)}
-                );
-            }
-        }
+        mutations
+            .insert(mutations.end(), changes.begin(), changes.end());
         return mutations;
     }
 
     void admit(
         std::shared_ptr<Batch> batch,
-        std::vector<DurableStateStore::Mutation> mutations
+        std::vector<AtomicJournal::Mutation> mutations
     )
     try
     {
@@ -951,11 +1956,14 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
             std::lock_guard lock(mutex);
             counts.writeInFlight = true;
         }
+        if (batch->bootstrap && !stopping.load())
+            armTick(); // Allocate the initial timer before journal
+                       // admission.
         const auto accepted = store->commit(
             batch->snapshot->revision - 1,
             std::move(mutations),
             [self = shared_from_this(),
-             batch](DurableStateStore::Result result)
+             batch](AtomicJournal::Result result)
             {
                 self->writing = false;
                 {
@@ -964,18 +1972,23 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 }
                 if (result && *result == batch->snapshot->revision)
                 {
-                    if (batch->bootstrap && !self->stopping.load())
+                    auto directory = self->migration.publish(
+                        std::move(*batch->directoryCandidate),
+                        *self->store,
+                        *result
+                    );
+                    if (!directory)
                     {
-                        try
-                        {
-                            self->armTick();
-                        }
-                        catch (...)
-                        {
-                            self->fail();
-                            return;
-                        }
+                        self->failJobs(
+                            batch->jobs,
+                            Error::OutcomeUnknown
+                        );
+                        self->fail();
+                        return;
                     }
+                    batch->snapshot->directory = std::move(
+                        *directory
+                    );
                     self->published.store(
                         batch->snapshot,
                         std::memory_order_release
@@ -990,6 +2003,7 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                                                       .load();
                         }
                     }
+                    logRoomPublications(batch->roomEvents);
                     for (const auto binding : batch->revoked)
                         if (self->config.onRevoked)
                             try
@@ -1075,7 +2089,7 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 resume();
                 return;
             }
-            auto candidate = working(source.get(), &frozen);
+            auto candidate = working(source, &frozen);
             slots.reserve(jobs.size());
             for (const auto& job : jobs)
             {
@@ -1114,6 +2128,10 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
             auto mutations = encode(*next, candidate.get());
             auto batch = std::make_shared<Batch>();
             batch->snapshot = next;
+            batch->roomEvents = roomPublicationEvents(*source, *next);
+            batch->directoryCandidate = std::move(
+                candidate->m_aux->directoryCandidate
+            );
             batch->jobs = jobs;
             batch->replies.reserve(jobs.size());
             for (auto& slot : slots)
@@ -1194,9 +2212,22 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 return;
             if (tickDue && (controlJobs.empty() || !lastWasTick))
             {
-                jobs.reserve(roomJobs.size());
-                jobs.assign(roomJobs.begin(), roomJobs.end());
-                roomJobs.clear();
+                const auto batchLimit = std::max<std::size_t>(
+                    1,
+                    std::min(
+                        config.maxRoomPending,
+                        config.directoryLimits.maxCommands / 2
+                    )
+                );
+                const auto count = std::min(
+                    roomJobs.size(),
+                    batchLimit
+                );
+                jobs.reserve(count);
+                const auto end = roomJobs.begin() +
+                                 static_cast<std::ptrdiff_t>(count);
+                jobs.assign(roomJobs.begin(), end);
+                roomJobs.erase(roomJobs.begin(), end);
                 tick = true;
                 tickDue = false;
             }
@@ -1243,7 +2274,7 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
     }
 
     void validateReplays(
-        const DurableStateStore::Snapshot& durable,
+        const AtomicJournal::Snapshot& durable,
         const Snapshot& current
     )
     {
@@ -1251,7 +2282,8 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
         {
             (void)value;
             if (key != coreKey && key != metadataKey &&
-                !key.starts_with("replay/"))
+                !key.starts_with("replay/") &&
+                !key.starts_with("room-directory/"))
                 throw std::invalid_argument(
                     "unknown authority journal key"
                 );
@@ -1285,7 +2317,7 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
             config.journal.maxStateBytes,
             multiply(config.journal.maxKeys, authorityCodecMaxItems)
         );
-        auto archives = assembleReplayArchives(
+        auto archives = inspectReplayArchives(
             durable,
             limits,
             config.journal.maxKeys
@@ -1304,29 +2336,40 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
         std::set<Identity> histories;
         for (const auto& archive : *archives)
         {
-            const auto& initial = archive.log.checkpoint;
-            if (initial.incarnation >
+            if (archive.incarnation >
                 current.meta.incarnation_high_water())
                 throw std::invalid_argument(
                     "committed replay exceeds incarnation watermark"
                 );
             const Identity identity{
-                initial.roomId.value(),
-                initial.incarnation
+                archive.roomId,
+                archive.incarnation
             };
             histories.insert(identity);
             const auto actor = actors.find(identity);
             if (actor != actors.end() &&
-                *actor->second != archive.finalSnapshot)
+                (actor->second->tick != archive.lastTick ||
+                 actor->second->checksum != archive.checksum))
                 throw std::invalid_argument(
-                    "replay tail differs from committed actor"
+                    "legacy replay tail differs from committed actor "
+                    "metadata"
                 );
         }
         for (const auto& [identity, actor] : actors)
             if (actor->tick && !histories.contains(identity))
                 throw std::invalid_argument(
-                    "committed actor has no input history"
+                    "committed legacy actor has no input history"
                 );
+        for (const auto id : current.directory->ids())
+        {
+            const auto* route = current.directory->find(id);
+            if (route && route->image.tick &&
+                !histories.contains({id.room, id.incarnation}))
+                throw std::invalid_argument(
+                    "committed worker image has no physical replay "
+                    "history"
+                );
+        }
     }
     void bootstrap()
     {
@@ -1337,7 +2380,7 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 close();
                 return;
             }
-            auto opened = std::make_shared<DurableStateStore>(
+            auto opened = std::make_shared<AtomicJournal>(
                 owner,
                 config.journal
             );
@@ -1351,6 +2394,12 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 return;
             }
             const auto durable = store->snapshot();
+            auto directory = migration.load(*store);
+            if (!directory)
+                throw std::invalid_argument(
+                    "room directory recovery failed"
+                );
+            initialDirectory = *directory;
             if (durable->values.empty())
             {
                 if (durable->revision)
@@ -1362,6 +2411,9 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                 auto mutations = encode(*snapshot, candidate.get());
                 auto batch = std::make_shared<Batch>();
                 batch->snapshot = snapshot;
+                batch->directoryCandidate = std::move(
+                    candidate->m_aux->directoryCandidate
+                );
                 batch->bootstrap = true;
                 candidate.reset();
                 admit(std::move(batch), std::move(mutations));
@@ -1389,11 +2441,16 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
                     "authority decoding failed"
                 );
             snapshot->core = std::move(*decoded);
+            snapshot->directory = *directory;
+            snapshot->roomImages = projectImages(
+                **directory,
+                nullptr
+            );
             if (!validMetadata(*snapshot, config))
                 throw std::invalid_argument(
                     "authority metadata or boot identity mismatch"
                 );
-            auto validated = working(snapshot.get());
+            auto validated = working(snapshot);
             validateReplays(*durable, *snapshot);
             validated.reset();
             if (!stopping.load())
@@ -1492,11 +2549,16 @@ struct LobbyAuthority::State : std::enable_shared_from_this<State>
     /// publication order.
     boost::asio::strand<boost::asio::any_io_executor> owner;
     const Config config;
+    RoomMigration migration;
+    /// Owner-local round robin prevents one bounded cutoff batch
+    /// starving later rooms.
+    std::optional<RoomIdentity> cutoffAfter;
+    std::shared_ptr<const RoomDirectory> initialDirectory;
     /// External admission and accounting; never held over client
     /// callbacks.
     mutable std::mutex mutex;
     Stats counts;
-    std::shared_ptr<DurableStateStore> store;
+    std::shared_ptr<AtomicJournal> store;
     std::atomic<std::shared_ptr<const Snapshot>> published;
     std::deque<std::shared_ptr<Job>> controlJobs, roomJobs;
     std::atomic<bool> stopping{false}, tickRequested{false};

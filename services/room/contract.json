@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "service": "room",
+  "implementation": "services/room/worker/src/RoomWorker.cpp",
+  "registration_kind": "native_server",
+  "transport": {
+    "request": "arena.rpc.Request",
+    "response": "arena.rpc.Response",
+    "max_timeout_ms": 1000,
+    "max_frame_bytes": 262144,
+    "compatibility": "strict-v1-role-bound-profile",
+    "automatic_transport_retries": 0
+  },
+  "common_errors": [
+    "CANCELLED",
+    "DEADLINE_EXCEEDED",
+    "INTERNAL",
+    "INVALID_ARGUMENT",
+    "OUTCOME_UNKNOWN",
+    "OVERLOADED",
+    "UNAUTHENTICATED",
+    "UNAVAILABLE",
+    "INCOMPATIBLE_VERSION",
+    "CALL_CYCLE",
+    "CONFLICT",
+    "NOT_FOUND"
+  ],
+  "methods": [
+    {
+      "name": "health.ready",
+      "owner": "room",
+      "logical_owner": "room",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "health.ready",
+      "request": null,
+      "response": "arena.room.HealthReply",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-real-cache-WAL-completion; isolated-proposal-never-publishes-Lobby-authority",
+      "result_semantics": "create/execute are isolated proposals; Stage and first/new-epoch activation wait for private fdatasync; same-instance forward cache installation is volatile; only Lobby WAL publishes canonical state"
+    },
+    {
+      "name": "room.create",
+      "owner": "room",
+      "logical_owner": "room",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "room.create",
+      "request": "arena.room.CreateRequest",
+      "response": "arena.room.CreateReply",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-real-cache-WAL-completion; isolated-proposal-never-publishes-Lobby-authority",
+      "result_semantics": "create/execute are isolated proposals; Stage and first/new-epoch activation wait for private fdatasync; same-instance forward cache installation is volatile; only Lobby WAL publishes canonical state"
+    },
+    {
+      "name": "room.stage",
+      "owner": "room",
+      "logical_owner": "room",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "room.stage",
+      "request": "arena.room.StageRequest",
+      "response": "arena.room.StageReceipt",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "worker_id/room/incarnation/owner_epoch/transfer_id/image_fingerprint",
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-real-cache-WAL-completion; isolated-proposal-never-publishes-Lobby-authority",
+      "result_semantics": "create/execute are isolated proposals; Stage and first/new-epoch activation wait for private fdatasync; same-instance forward cache installation is volatile; only Lobby WAL publishes canonical state"
+    },
+    {
+      "name": "room.activate",
+      "owner": "room",
+      "logical_owner": "room",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "room.activate",
+      "request": "arena.room.ActivateRequest",
+      "response": "arena.room.CacheReceipt",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "worker_id/room/incarnation/owner_epoch/directory_revision/image_fingerprint",
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-real-cache-WAL-completion; isolated-proposal-never-publishes-Lobby-authority",
+      "result_semantics": "create/execute are isolated proposals; Stage and first/new-epoch activation wait for private fdatasync; same-instance forward cache installation is volatile; only Lobby WAL publishes canonical state"
+    },
+    {
+      "name": "room.execute",
+      "owner": "room",
+      "logical_owner": "room",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "room.execute",
+      "request": "arena.room.ExecuteRequest",
+      "response": "arena.room.ExecuteReply",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-real-cache-WAL-completion; isolated-proposal-never-publishes-Lobby-authority",
+      "result_semantics": "create/execute are isolated proposals; Stage and first/new-epoch activation wait for private fdatasync; same-instance forward cache installation is volatile; only Lobby WAL publishes canonical state"
+    },
+    {
+      "name": "room.freeze",
+      "owner": "room",
+      "logical_owner": "room",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "room.freeze",
+      "request": "arena.room.HintRequest",
+      "response": "arena.room.CacheReceipt",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "worker_id/room/incarnation/owner_epoch/directory_revision",
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-real-cache-WAL-completion; isolated-proposal-never-publishes-Lobby-authority",
+      "result_semantics": "create/execute are isolated proposals; Stage and first/new-epoch activation wait for private fdatasync; same-instance forward cache installation is volatile; only Lobby WAL publishes canonical state"
+    },
+    {
+      "name": "room.retire",
+      "owner": "room",
+      "logical_owner": "room",
+      "callers": [
+        "lobby"
+      ],
+      "handler": "room.retire",
+      "request": "arena.room.HintRequest",
+      "response": "arena.room.CacheReceipt",
+      "deadline_ms": 1000,
+      "errors": [],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "worker_id/room/incarnation/owner_epoch/directory_revision",
+        "automatic_retries": 0
+      },
+      "cancellation": "retain-physical-job-until-real-cache-WAL-completion; isolated-proposal-never-publishes-Lobby-authority",
+      "result_semantics": "create/execute are isolated proposals; Stage and first/new-epoch activation wait for private fdatasync; same-instance forward cache installation is volatile; only Lobby WAL publishes canonical state"
+    }
+  ]
+}

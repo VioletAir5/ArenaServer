@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real four-process TCP/WS, durable Lobby recovery and PostgreSQL settlement acceptance."""
+"""Real six-process TCP/WS, durable Lobby recovery and PostgreSQL settlement acceptance."""
 import argparse
 import hashlib
 import json
@@ -23,6 +23,74 @@ from StorageMigrationTest import require
 from ServiceStackFixture import ServiceStack
 from AuthProcessIntegrationTest import health_http
 from OnlinePresenceIntegrationTest import scalar
+
+
+def read_journal_records(data):
+    """Observe complete CRC records; visibility is never an fdatasync ACK.
+
+    Version two starts with an indivisible compacted checkpoint at revision R;
+    ordinary CAS frames after its mandatory chunks resume at R+1.
+    """
+    require(16 <= len(data) <= 256*1024*1024, 'authority WAL bounds')
+    records, offset, revision, checkpoint_frames = {}, 16, 0, 0
+    checkpoint_keys = set()
+    if data[:8] == b'ARLOBBY1':
+        require(struct.unpack('!I', data[8:12])[0] == 1 and
+                zlib.crc32(data[:12]) == struct.unpack('!I', data[12:16])[0],
+                'authority version-one header CRC/version')
+    else:
+        require(data[:8] == b'ARLOBBY2' and len(data) >= 28, 'authority checkpoint header absent')
+        version, revision, checkpoint_frames, crc = struct.unpack('!IQII', data[8:28])
+        require(version == 2 and revision > 0 and checkpoint_frames <= 1000000 and
+                zlib.crc32(data[:24]) == crc, 'authority checkpoint header CRC/version')
+        offset = 28
+    while offset < len(data):
+        remaining = len(data)-offset
+        require(data[offset:offset+min(4,remaining)] == b'KVTX'[:min(4,remaining)],
+                'authority frame magic')
+        if remaining < 24:
+            require(checkpoint_frames == 0, 'incomplete mandatory checkpoint frame')
+            break
+        header = data[offset:offset+24]
+        size, sequence, crc, header_crc = struct.unpack('!IQII', header[4:])
+        require(zlib.crc32(header[:20]) == header_crc and 0 < size <= 4*1024*1024,
+                'authority frame header CRC/bounds')
+        require(sequence == (revision if checkpoint_frames else revision+1),
+                'authority frame revision')
+        if size > remaining-24:
+            require(checkpoint_frames == 0, 'incomplete mandatory checkpoint payload')
+            break
+        payload = data[offset+24:offset+24+size]
+        require(zlib.crc32(payload) == crc and len(payload) >= 4, 'authority frame CRC')
+        count, = struct.unpack('!I', payload[:4])
+        require(0 < count <= 65536 and count <= (len(payload)-4)//10, 'authority mutation count')
+        cursor, seen = 4, set()
+        for _ in range(count):
+            require(len(payload)-cursor >= 9, 'authority mutation header bounds')
+            tag, key_size, value_size = struct.unpack('!BII', payload[cursor:cursor+9])
+            cursor += 9
+            require(tag in (0,1) and 0 < key_size <= 256 and (tag or value_size == 0) and
+                    key_size+value_size <= len(payload)-cursor, 'authority mutation bounds')
+            key = payload[cursor:cursor+key_size].decode()
+            cursor += key_size
+            value = payload[cursor:cursor+value_size]
+            cursor += value_size
+            require(key not in seen, 'authority duplicate mutation key')
+            seen.add(key)
+            if checkpoint_frames:
+                require(tag == 1 and key not in checkpoint_keys, 'authority invalid checkpoint mutation')
+                checkpoint_keys.add(key)
+            if tag:
+                records[key] = value
+            else:
+                records.pop(key, None)
+        require(cursor == len(payload), 'authority frame trailing data')
+        if checkpoint_frames:
+            checkpoint_frames -= 1
+        revision = sequence
+        offset += 24+size
+    require(checkpoint_frames == 0, 'incomplete authority checkpoint')
+    return records, revision
 
 
 class StorageAckProxy:
@@ -143,7 +211,7 @@ class Acceptance(ServiceStack):
             pool.AddSerializedFile(descriptor.SerializeToString())
         self.Metadata = message_factory.GetMessageClass(pool.FindMessageTypeByName('arena.lobby_meta.Metadata'))
         self.matches, self.identities = set(), set()
-        self.report['scope'] = 'real Gateway/Auth/Lobby/Storage, durable authority and PostgreSQL ACK boundaries'
+        self.report['scope'] = 'real Gateway/Auth/Lobby/Storage/two-Room, durable authority and PostgreSQL ACK boundaries'
 
     @property
     def gateway(self):
@@ -236,37 +304,7 @@ class Acceptance(ServiceStack):
         # Inspect complete checksummed records only. Recovery, not this observer,
         # proves that a record survives SIGKILL; visibility alone is not an fsync ACK.
         path = self.cluster.root/'lobby-state'/'authority.wal'
-        data = path.read_bytes()
-        require(data[:8] == b'ARLOBBY1' and len(data) >= 16, 'authority WAL header absent')
-        require(zlib.crc32(data[:12]) == struct.unpack('!I', data[12:16])[0], 'authority header CRC')
-        records, offset, revision = {}, 16, 0
-        while offset+24 <= len(data):
-            header = data[offset:offset+24]
-            require(header[:4] == b'KVTX', 'authority frame magic')
-            size, sequence, crc, header_crc = struct.unpack('!IQII', header[4:])
-            require(zlib.crc32(header[:20]) == header_crc, 'authority frame header CRC')
-            if offset+24+size > len(data):
-                break
-            payload = data[offset+24:offset+24+size]
-            require(zlib.crc32(payload) == crc and sequence == revision+1, 'authority frame CRC/revision')
-            count, = struct.unpack('!I', payload[:4])
-            cursor, seen = 4, set()
-            for _ in range(count):
-                tag, key_size, value_size = struct.unpack('!BII', payload[cursor:cursor+9])
-                cursor += 9
-                key = payload[cursor:cursor+key_size].decode()
-                cursor += key_size
-                value = payload[cursor:cursor+value_size]
-                cursor += value_size
-                require(tag in (0, 1) and key not in seen and cursor <= len(payload), 'authority mutation bounds')
-                seen.add(key)
-                if tag:
-                    records[key] = value
-                else:
-                    records.pop(key, None)
-            require(cursor == len(payload), 'authority frame trailing data')
-            revision = sequence
-            offset += 24+size
+        records, revision = read_journal_records(path.read_bytes())
         require('authority/meta' in records, 'committed metadata missing')
         meta = self.Metadata.FromString(records['authority/meta'])
         return meta, revision
@@ -320,8 +358,14 @@ class Acceptance(ServiceStack):
         return alice, bob, grant, match
 
     def finished(self, peer):
-        latest = {}
+        latest, next_status_at = {}, 0.0
         def done():
+            nonlocal next_status_at
+            now = time.monotonic()
+            # Fast health-poll overrides must not flood the business packet budget.
+            if now < next_status_at:
+                return False
+            next_status_at = now + .05
             latest.update(peer.status())
             return latest['phase'] == 5
         self.until(done, 'PostgreSQL acknowledged settlement', 30)
@@ -418,12 +462,18 @@ class Acceptance(ServiceStack):
         original = self.intent(match)
         require(0 < original.attempts < original.max_attempts <= 64, 'invalid durable attempt claim')
         original_budget = self.budget(original)
-        attempts = [original.attempts]
+        attempts, recovery_elapsed = [original.attempts], []
         expected = frozen['snapshot']
         for restart in range(2):
             previous = self.intent(match)
+            recovery_started = time.monotonic()
+            recovery_deadline = recovery_started + 8
             self.stop_lobby(crash=True)
             self.children['lobby'].start()
+            # Share the original recovery budget with Gateway readiness propagation.
+            self.until(lambda: health_http(self.ports['gateway-health'], '/health/ready')[0] == 200,
+                       'Gateway observes recovered Lobby readiness',
+                       max(0.0, recovery_deadline-time.monotonic()))
             alice.close(reset=True)
             alice = self.connect(restart == 0)
             resumed = alice.login(token=grant['token'])
@@ -436,7 +486,11 @@ class Acceptance(ServiceStack):
                     and state['snapshot']['tick'] == expected['tick'],
                     'recovery replaced or advanced a frozen unacknowledged room')
             self.until(lambda: self.intent(match).attempts > previous.attempts,
-                       'durable recovery reserves a bounded reconciliation attempt', 8)
+                       'durable recovery reserves a bounded reconciliation attempt',
+                       max(0.0, recovery_deadline-time.monotonic()))
+            elapsed = time.monotonic()-recovery_started
+            require(elapsed <= 8, 'Lobby/Gateway recovery exceeded its shared eight-second budget')
+            recovery_elapsed.append(elapsed)
             current = self.intent(match)
             require(self.budget(current) == original_budget and
                     previous.attempts < current.attempts <= current.max_attempts,
@@ -455,7 +509,8 @@ class Acceptance(ServiceStack):
         self.close_peers()
         return dict(**details, actual_lobby_sigkills=2, session_and_room_preserved=True,
                     uncertain_ack_reconciled=True, durable_attempts=attempts,
-                    max_attempts=acknowledged.max_attempts, budget_never_reset=True)
+                    max_attempts=acknowledged.max_attempts, budget_never_reset=True,
+                    recovery_elapsed_seconds=recovery_elapsed, recovery_limit_seconds=8)
 
     def ready_abort(self):
         alice, _, _, match = self.open_match(ready=False)
@@ -510,6 +565,8 @@ class Acceptance(ServiceStack):
             self.report['cases'].append(dict(name=name, passed=True,
                 elapsed=time.monotonic()-started, **details))
         self.export_replays()
+        for role in reversed(self.room_roles):
+            self.children[role].stop()
         self.children['auth'].stop()
         self.children['storage'].stop()
         final = self.query('SELECT player_id,quantity FROM arena.inventory WHERE item_id=1 AND player_id IN(42,43) ORDER BY player_id')
@@ -551,6 +608,7 @@ def add_arguments(parser):
     for name in ('pg-bin', 'descriptor', 'lobby-descriptor', 'auth', 'lobby', 'gateway',
                  'replay-export', 'replay', 'report'):
         parser.add_argument('--'+name, type=Path, required=True)
+    parser.add_argument('--room', type=Path)
     parser.add_argument('--pg-share', type=Path)
     parser.add_argument('--pg-lib', type=Path)
 
@@ -561,11 +619,13 @@ def source_hashes(root):
         'services/gateway/app/main.cpp', 'services/gateway/src/net/RemoteLobbyRoutes.cpp', 'services/gateway/src/net/LobbyClient.cpp',
         'services/auth/app/main.cpp', 'services/auth/src/AuthService.cpp',
         'services/lobby/app/main.cpp', 'services/lobby/src/LobbyAuthority.cpp',
-        'services/lobby/src/LobbyService.cpp', 'services/lobby/src/DurableStateStore.cpp',
+        'services/lobby/src/LobbyService.cpp', 'shared/src/persistence/AtomicJournal.cpp',
+        'services/room/worker/app/main.cpp', 'services/room/worker/src/RoomWorker.cpp',
+        'services/room/worker/src/RoomWire.cpp', 'services/room/src/RoomRuntime.cpp',
         'services/lobby/proto/authority_meta.proto', 'services/storage/server.py',
         'services/storage/database.py', 'shared/runtime/rpc.py')
     return {name: hashlib.sha256((root/name).read_bytes()).hexdigest()
-            for name in names if (root/name).exists()}
+            for name in names}
 
 
 def main():

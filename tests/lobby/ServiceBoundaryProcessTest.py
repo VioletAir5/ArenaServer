@@ -154,7 +154,7 @@ class Acceptance(ServiceStack):
         self.sequence = 1000
         self.identities = {}
         self.version = 1
-        self.report.update(scope='actual four-process listener and TCP connect-delay boundaries',
+        self.report.update(scope='actual six-process listener and TCP connect-delay boundaries',
             exclusions=['DNS is not involved: runtime routes accept loopback IP literals only',
                         'No reverse RPC handlers or three-service circular execution are invented',
                         'Persistent lost-ACK coverage belongs to tests/storage/PersistentGatewayTest.py, not this file',
@@ -189,7 +189,8 @@ class Acceptance(ServiceStack):
                     role + ' unexpectedly exited')
             pid = child.process.pid
             values[role] = dict(pid=pid, fd=len(list(Path(f'/proc/{pid}/fd').iterdir())),
-                                sockets=len(socket_inodes(pid)))
+                                sockets=len(socket_inodes(pid)),
+                                rss_bytes=int(Path(f'/proc/{pid}/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE'))
         self.report['resource_samples'].append(dict(label=label, at=time.monotonic(), roles=values))
         return values
 
@@ -268,7 +269,7 @@ class Acceptance(ServiceStack):
 
     def public_login(self):
         pids = self.live_pids()
-        require(len(set(pids.values())) == 4, 'roles do not own distinct processes')
+        require(len(pids) == 6 and len(set(pids.values())) == 6, 'six roles do not own distinct processes')
         self.alice = self.connect()
         self.bob = self.connect(True)
         require(isinstance(self.alice, Bot) and isinstance(self.bob, Bot), 'unexpected public bot adapter')
@@ -410,7 +411,7 @@ class Acceptance(ServiceStack):
         self.idle()
         for peer in self.peers:
             peer.close()
-        for role in ('gateway', 'lobby', 'auth', 'storage'):
+        for role in ('gateway', 'lobby', *reversed(self.room_roles), 'auth', 'storage'):
             self.children[role].stop()
         require(self.query("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
             "AND application_name='arena-storage'")[0][0] == 0, 'Storage physical PostgreSQL sessions leaked')
@@ -441,6 +442,7 @@ def main():
     parser.add_argument('--repository-root', type=Path, default=ROOT)
     for name in ('descriptor', 'auth', 'lobby', 'gateway', 'pg-bin', 'report'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--room', type=Path)
     parser.add_argument('--pg-share', type=Path)
     parser.add_argument('--pg-lib', type=Path)
     args = parser.parse_args()
@@ -478,9 +480,11 @@ def main():
         'services/storage/server.py', 'shared/runtime/rpc.py', 'shared/runtime/protocol.py',
         'shared/src/rpc/Server.cpp', 'shared/src/rpc/Client.cpp', 'shared/src/runtime/RuntimeConfig.cpp',
         'shared/proto/rpc.proto', 'tests/lobby/ServiceStackFixture.py',
+        'services/room/worker/app/main.cpp', 'services/room/worker/src/RoomWorker.cpp',
+        'services/room/worker/src/RoomWire.cpp', 'services/room/src/RoomRuntime.cpp',
         'tests/room/JourneyProtocol.py', 'tests/lobby/ServiceBoundaryProcessTest.py')
     test.report['source_hashes'] = {name: digest(args.repository_root / name) for name in sources}
-    test.report['binary_hashes'] = {name: digest(getattr(args, name)) for name in ('auth', 'lobby', 'gateway')}
+    test.report['binary_hashes'] = {name: digest(getattr(args, name)) for name in ('auth', 'lobby', 'gateway', 'room')}
     test.report['descriptor_sha256'] = digest(args.descriptor)
     test.report['package_hashes'] = {'storage_python_sources': {
         str(path.relative_to(args.repository_root)): digest(path)

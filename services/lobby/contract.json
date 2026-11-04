@@ -29,7 +29,8 @@
       "owner": "lobby",
       "logical_owner": "lobby",
       "callers": [
-        "gateway"
+        "gateway",
+        "operations"
       ],
       "handler": "health.ready",
       "request": null,
@@ -109,6 +110,52 @@
       },
       "cancellation": "exclude-before-WAL-admission; after-admission-retain-physical-write-and-conditional-publication",
       "result_semantics": "complete-authority-and-replay-journal-synced-before-success; no-remote-effects-inside-candidate"
+    },
+    {
+      "name": "room.migration.start",
+      "owner": "lobby",
+      "logical_owner": "lobby",
+      "callers": [
+        "operations"
+      ],
+      "handler": "room.migration.start",
+      "request": "arena.lobby.MigrationRequest",
+      "response": "arena.lobby.MigrationReply",
+      "deadline_ms": 1000,
+      "errors": [
+        "CONFLICT",
+        "NOT_FOUND"
+      ],
+      "idempotency": {
+        "kind": "semantic_key",
+        "key": "room_id/incarnation/migration_id/source_epoch/target_node",
+        "automatic_retries": 0
+      },
+      "cancellation": "exclude-before-WAL-admission; durable-Prepare-continues-in-background-after-caller-disconnect",
+      "result_semantics": "start-acknowledges-Prepare-only; status-observes-canonical-WAL; target-first-committed-tick-defines-handoff-latency"
+    },
+    {
+      "name": "room.migration.status",
+      "owner": "lobby",
+      "logical_owner": "lobby",
+      "callers": [
+        "operations"
+      ],
+      "handler": "room.migration.status",
+      "request": "arena.lobby.MigrationStatusRequest",
+      "response": "arena.lobby.MigrationReply",
+      "deadline_ms": 1000,
+      "errors": [
+        "CONFLICT",
+        "NOT_FOUND"
+      ],
+      "idempotency": {
+        "kind": "read_only",
+        "key": null,
+        "automatic_retries": 0
+      },
+      "cancellation": "exclude-before-WAL-admission; durable-Prepare-continues-in-background-after-caller-disconnect",
+      "result_semantics": "start-acknowledges-Prepare-only; status-observes-canonical-WAL; target-first-committed-tick-defines-handoff-latency"
     }
   ]
 }

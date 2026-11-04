@@ -11,15 +11,20 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <google/protobuf/struct.pb.h>
+#include <google/protobuf/util/json_util.h>
 
 #include "lobby/LobbyService.h"
+#include "room/RoomWire.h"
 #include "rpc/Server.h"
 #include "runtime/RuntimeControl.h"
 #include "security/SecureErase.h"
@@ -63,6 +68,54 @@ std::string required(const char* name, bool secret = false)
         (secret && value.size() < 32))
         throw std::invalid_argument("invalid Lobby setting");
     return value;
+}
+
+/** @brief Parses exact bounded Room routes before admitting any
+ * business work. */
+std::vector<service::lobby::RoomClient::Node> roomNodes()
+{
+    const auto text = required("ARENA_ROOM_NODES");
+    google::protobuf::ListValue values;
+    if (text.size() > 4096 ||
+        !google::protobuf::util::JsonStringToMessage(text, &values)
+             .ok() ||
+        values.values_size() < 1 || values.values_size() > 16)
+        throw std::invalid_argument("invalid Room node list");
+    std::vector<service::lobby::RoomClient::Node> result;
+    std::set<std::string> names;
+    std::set<unsigned> ports;
+    for (const auto& value : values.values())
+    {
+        if (value.kind_case() !=
+            google::protobuf::Value::kStructValue)
+            throw std::invalid_argument("invalid Room node");
+        const auto& fields = value.struct_value().fields();
+        if (fields.size() != 3 || !fields.contains("nodeId") ||
+            !fields.contains("host") || !fields.contains("port") ||
+            fields.at("nodeId").kind_case() !=
+                google::protobuf::Value::kStringValue ||
+            fields.at("host").kind_case() !=
+                google::protobuf::Value::kStringValue ||
+            fields.at("port").kind_case() !=
+                google::protobuf::Value::kNumberValue)
+            throw std::invalid_argument("invalid Room node fields");
+        const auto& id = fields.at("nodeId").string_value();
+        const auto number = fields.at("port").number_value();
+        if (id.empty() || id.size() > 64 ||
+            !names.insert(id).second ||
+            fields.at("host").string_value() != "127.0.0.1" ||
+            !(number >= 1 && number <= 65535))
+            throw std::invalid_argument("invalid Room route");
+        const auto port = static_cast<unsigned>(number);
+        if (number != port || !ports.insert(port).second)
+            throw std::invalid_argument("duplicate Room route");
+        result.push_back(
+            {id,
+             {boost::asio::ip::address_v4::loopback(),
+              static_cast<std::uint16_t>(port)}}
+        );
+    }
+    return result;
 }
 
 /** @brief Fences absolute steady deadlines to the Linux boot that
@@ -182,6 +235,29 @@ try
         true
     );
     config.storage.runtime = store;
+    config.rooms.nodes = roomNodes();
+    config.rooms.token = required("ARENA_ROOM_TOKEN", true);
+    config.rooms.runtime = store;
+    auto gatewayToken = required("ARENA_LOBBY_TOKEN", true);
+    std::string operationsToken;
+    if (std::getenv("ARENA_OPERATIONS_TOKEN"))
+        operationsToken = required("ARENA_OPERATIONS_TOKEN", true);
+    std::set<std::string> distinct{
+        config.auth.token,
+        config.storage.token,
+        config.rooms.token,
+        gatewayToken
+    };
+    if (distinct.size() != 4 || (!operationsToken.empty() &&
+                                 distinct.contains(operationsToken)))
+        throw std::invalid_argument(
+            "service credentials must be role-specific"
+        );
+    while (!distinct.empty())
+    {
+        auto node = distinct.extract(distinct.begin());
+        arena::security::eraseSecret(node.value());
+    }
     auto service = std::make_shared<Service>(
         io.get_executor(),
         std::move(config)
@@ -229,17 +305,28 @@ try
     };
     rpcConfig.callerTokens.emplace(
         "gateway",
-        required("ARENA_LOBBY_TOKEN", true)
+        std::move(gatewayToken)
     );
+    if (!operationsToken.empty())
+        rpcConfig.callerTokens.emplace(
+            "operations",
+            std::move(operationsToken)
+        );
     rpcConfig
         .maxActive = setting("ARENA_LOBBY_MAX_INFLIGHT", 128, 1024) +
                      1;
-    rpcConfig.admission = [weakControl](const auto& request)
+    rpcConfig.admission =
+        [weakControl, weakService](const auto& request)
     {
         auto owner = weakControl.lock();
+        const auto serviceOwner = weakService.lock();
         return owner &&
                (request.method() == "health.ready" ||
-                (!owner->draining() && owner->configuredReady()));
+                (!owner->draining() &&
+                 (request.method().starts_with("room.migration.")
+                      ? (serviceOwner &&
+                         serviceOwner->stats().initialized)
+                      : owner->configuredReady())));
     };
     Server::Handlers handlers;
     handlers.emplace(
@@ -259,6 +346,16 @@ try
         "lobby.execute",
         [weakService](auto request, auto context, auto complete)
         {
+            if (request.caller_service() != "gateway")
+            {
+                arena::security::eraseSecret(
+                    *request.mutable_payload()
+                );
+                arena::rpc::Response denied;
+                denied.set_status(arena::rpc::UNAUTHENTICATED);
+                complete(std::move(denied));
+                return Server::Cancellation{};
+            }
             arena::lobby::ExecuteRequest typed;
             const bool decoded = typed.ParseFromString(
                 request.payload()
@@ -323,6 +420,16 @@ try
         "lobby.detach",
         [weakService](auto request, auto context, auto complete)
         {
+            if (request.caller_service() != "gateway")
+            {
+                arena::security::eraseSecret(
+                    *request.mutable_payload()
+                );
+                arena::rpc::Response denied;
+                denied.set_status(arena::rpc::UNAUTHENTICATED);
+                complete(std::move(denied));
+                return Server::Cancellation{};
+            }
             arena::lobby::DetachRequest typed;
             const bool decoded = typed.ParseFromString(
                 request.payload()
@@ -381,6 +488,16 @@ try
         "lobby.heartbeat",
         [weakService](auto request, auto context, auto complete)
         {
+            if (request.caller_service() != "gateway")
+            {
+                arena::security::eraseSecret(
+                    *request.mutable_payload()
+                );
+                arena::rpc::Response denied;
+                denied.set_status(arena::rpc::UNAUTHENTICATED);
+                complete(std::move(denied));
+                return Server::Cancellation{};
+            }
             arena::lobby::HeartbeatRequest typed;
             const bool decoded = typed.ParseFromString(
                 request.payload()
@@ -431,6 +548,110 @@ try
             arena::rpc::Response result;
             result.set_status(accepted.error());
             complete(std::move(result));
+            return Server::Cancellation{};
+        }
+    );
+
+    handlers.emplace(
+        "room.migration.start",
+        [weakService](auto request, auto context, auto complete)
+        {
+            arena::rpc::Response denied;
+            if (request.caller_service() != "operations")
+            {
+                denied.set_status(arena::rpc::UNAUTHENTICATED);
+                complete(std::move(denied));
+                return Server::Cancellation{};
+            }
+            arena::lobby::MigrationRequest typed;
+            auto owner = weakService.lock();
+            if (!service::room::wire::parseMessage(
+                    request.payload(),
+                    typed,
+                    4096
+                ) ||
+                !owner)
+            {
+                denied.set_status(
+                    owner ? arena::rpc::INVALID_ARGUMENT
+                          : arena::rpc::UNAVAILABLE
+                );
+                complete(std::move(denied));
+                return Server::Cancellation{};
+            }
+            auto accepted = owner->migrate(
+                std::move(typed),
+                std::move(context),
+                [complete](auto result)
+                {
+                    arena::rpc::Response response;
+                    if (!result)
+                        response.set_status(result.error());
+                    else
+                    {
+                        arena::lobby::MigrationReply reply;
+                        reply = std::move(*result);
+                        if (reply.ByteSizeLong() > 4096 ||
+                            !reply.SerializeToString(
+                                response.mutable_payload()
+                            ))
+                        {
+                            response.clear_payload();
+                            response.set_status(arena::rpc::INTERNAL);
+                        }
+                    }
+                    complete(std::move(response));
+                }
+            );
+            if (accepted)
+                return std::move(*accepted);
+            denied.set_status(accepted.error());
+            complete(std::move(denied));
+            return Server::Cancellation{};
+        }
+    );
+    handlers.emplace(
+        "room.migration.status",
+        [weakService](auto request, auto, auto complete)
+        {
+            arena::rpc::Response response;
+            if (request.caller_service() != "operations")
+                response.set_status(arena::rpc::UNAUTHENTICATED);
+            else
+            {
+                arena::lobby::MigrationStatusRequest typed;
+                auto owner = weakService.lock();
+                if (!service::room::wire::parseMessage(
+                        request.payload(),
+                        typed,
+                        4096
+                    ))
+                    response.set_status(arena::rpc::INVALID_ARGUMENT);
+                else if (!owner)
+                    response.set_status(arena::rpc::UNAVAILABLE);
+                else
+                {
+                    auto result = owner->migrationStatus(
+                        std::move(typed)
+                    );
+                    if (!result)
+                        response.set_status(result.error());
+                    else
+                    {
+                        arena::lobby::MigrationReply reply;
+                        reply = std::move(*result);
+                        if (reply.ByteSizeLong() > 4096 ||
+                            !reply.SerializeToString(
+                                response.mutable_payload()
+                            ))
+                        {
+                            response.clear_payload();
+                            response.set_status(arena::rpc::INTERNAL);
+                        }
+                    }
+                }
+            }
+            complete(std::move(response));
             return Server::Cancellation{};
         }
     );
@@ -508,6 +729,9 @@ try
         << "{\"service\":\"lobby\",\"state\":\"stopped\",\"active\":"
         << stats.active << ",\"auth_inflight\":" << stats.authInflight
         << ",\"storage_inflight\":" << stats.storageInflight
+        << ",\"room_inflight\":" << stats.roomInflight
+        << ",\"coordinator_pending\":" << stats.coordinatorPending
+        << ",\"local_room_actors\":0"
         << ",\"journal_closed\":"
         << (stats.authority.journal.closed ? "true" : "false")
         << ",\"journal_pending\":" << stats.authority.journal.pending

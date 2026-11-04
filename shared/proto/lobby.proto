@@ -36,3 +36,40 @@ message HeartbeatReply {
   repeated uint64 revoked_connection_ids = 1;
   uint64 committed_revision = 2;
 }
+
+// Operations-only control: start acknowledges durable Prepare; status observes WAL facts.
+message MigrationRequest {
+  uint32 version = 1;
+  uint64 room_id = 2;
+  uint64 incarnation = 3;
+  uint64 owner_epoch = 4;
+  uint64 migration_id = 5;
+  string target_node = 6;
+}
+message MigrationStatusRequest {
+  uint32 version = 1;
+  uint64 room_id = 2;
+  uint64 incarnation = 3;
+  uint64 migration_id = 4;
+}
+message MigrationReply {
+  enum Phase { NONE = 0; PREPARING = 1; FREEZING = 2; FROZEN = 3; TRANSFERRED = 4; COMMITTED = 5; ABORTED = 6; }
+  uint32 version = 1;
+  uint64 room_id = 2;
+  uint64 incarnation = 3;
+  uint64 migration_id = 4;
+  string owner = 5;
+  uint64 owner_epoch = 6;
+  Phase phase = 7;
+  string source = 8;
+  string target = 9;
+  uint64 source_epoch = 10;
+  uint64 target_epoch = 11;
+  uint64 cutoff = 12;
+  sint64 deadline_nanos = 13;
+  uint64 physical_tick = 14;
+  uint64 logical_tick = 15;
+  uint64 checksum = 16;
+  uint64 cursor = 17;
+  uint64 committed_revision = 18;
+}

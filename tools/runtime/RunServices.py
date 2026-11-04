@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the real four-service stack against an explicitly configured existing PG.
+"""Run the real service stack with two default Room worker processes against an explicitly configured existing PG.
 
 No database, migration, account, credential, or runtime manifest is generated.
 Only the supervisor lifecycle is written to stdout; child output stays private.
@@ -25,7 +25,7 @@ import time
 
 ROLES = ("storage", "auth", "lobby", "gateway")
 TOKENS = ("ARENA_STORAGE_AUTH_TOKEN", "ARENA_STORAGE_LOBBY_TOKEN",
-          "ARENA_AUTH_TOKEN", "ARENA_LOBBY_TOKEN")
+          "ARENA_AUTH_TOKEN", "ARENA_LOBBY_TOKEN", "ARENA_ROOM_TOKEN")
 MAX_HEALTH_HEADER = 4096
 MAX_HEALTH_BODY = 16384
 MAX_PATH = 4096
@@ -43,6 +43,8 @@ NUMERIC_ENV = {
               "ARENA_LOBBY_MAX_INFLIGHT": 1024,
               "ARENA_TRANSPORT_LEASE_MS": 30000},
     "storage": {},
+    "room": {"ARENA_ROOM_MAX_INFLIGHT": 256, "ARENA_ROOM_MAX_ROOMS": 16384,
+             "ARENA_ROOM_MAX_STAGES": 16384, "ARENA_ROOM_MAX_CACHE_BYTES": 16 * 1024 * 1024},
 }
 
 
@@ -119,7 +121,9 @@ def secret(environment, name, maximum=256):
 
 @dataclass(frozen=True)
 class ChildSpec:
-    role: str
+    role: str  # Physical process name and lifetime restart-budget key.
+    service: str  # Logical RPC/health target service.
+    node_id: str
     command: tuple
     environment: dict = field(repr=False)
     health_port: int
@@ -155,6 +159,13 @@ def arguments(argv=None):
     for role, port in zip(ROLES, (17105, 17101, 17102, 18888)):
         parser.add_argument("--" + role + "-health-port", default=str(port))
         parser.add_argument("--" + role + "-runtime-config", type=Path)
+    parser.add_argument("--room-bin", type=Path,
+                        help="defaults to BUILD/services/room/worker/ArenaRoom")
+    parser.add_argument("--room-node", action="append", default=[], metavar="NODE_ID:PORT",
+                        help="1..16 Room nodes; default room-a:7103 and room-b:7104")
+    parser.add_argument("--room-health-port", action="append", default=[], metavar="NODE_ID:PORT",
+                        help="per-node health port; defaults to its RPC port plus 10000")
+    parser.add_argument("--room-runtime-config", type=Path)
     parser.add_argument("--storage-workers", default="4")
     parser.add_argument("--startup-timeout", type=float, default=15.0,
                         help="per-service readiness budget, at most 120 seconds")
@@ -170,6 +181,37 @@ def arguments(argv=None):
     parser.add_argument("--restart-backoff-max", type=float, default=2.0,
                         help="full-jitter exponential backoff ceiling, at most 30 seconds")
     return parser.parse_args(argv)
+
+
+def room_nodes(args):
+    """Parse bounded physical node identities independently of logical Room."""
+    requested = args.room_node or ["room-a:7103", "room-b:7104"]
+    if not 1 <= len(requested) <= 16 or len(args.room_health_port) > 16:
+        raise ConfigurationError("Room node count must be between one and sixteen")
+    def pair(text):
+        name, separator, port = text.rpartition(":")
+        if not separator or not name or len(name) > 64 or name in (*ROLES, "gateway-ws", "supervisor", ".", "..") or \
+                not all(c.isascii() and (c.isalnum() or c in "-_.") for c in name):
+            raise ConfigurationError("invalid Room node identity")
+        return name, bounded_int(port, 65535, "Room node port")
+    nodes = dict()
+    for text in requested:
+        name, port = pair(text)
+        if name in nodes:
+            raise ConfigurationError("duplicate Room node identity")
+        nodes[name] = port
+    health = dict()
+    for text in args.room_health_port:
+        name, port = pair(text)
+        if name not in nodes or name in health:
+            raise ConfigurationError("unknown or duplicate Room health identity")
+        health[name] = port
+    for name, port in nodes.items():
+        if name not in health:
+            if port > 55535:
+                raise ConfigurationError("high Room RPC ports require explicit health ports")
+            health[name] = port + 10000
+    return nodes, health
 
 
 def configuration(args, environment):
@@ -202,7 +244,8 @@ def configuration(args, environment):
         raise ConfigurationError("invalid RPC descriptor size")
     binaries = {"auth": build / "services/auth/ArenaAuth",
                 "lobby": build / "services/lobby/ArenaLobby",
-                "gateway": build / "services/gateway/app/ArenaServer"}
+                "gateway": build / "services/gateway/app/ArenaServer",
+                "room": args.room_bin or build / "services/room/worker/ArenaRoom"}
     binaries = {role: absolute_path(path, role + " executable", file=True, executable=True)
                 for role, path in binaries.items()}
     state = absolute_path(args.state_dir, "state directory")
@@ -214,6 +257,9 @@ def configuration(args, environment):
              for role in (*ROLES, "gateway-ws")}
     health = {role: bounded_int(getattr(args, role + "_health_port"),
                                 65535, role + " health port") for role in ROLES}
+    nodes, room_health = room_nodes(args)
+    ports.update(nodes)
+    health.update(room_health)
     all_ports = (*ports.values(), *health.values())
     if len(set(all_ports)) != len(all_ports):
         raise ConfigurationError("listener ports must not overlap")
@@ -251,12 +297,13 @@ def configuration(args, environment):
             if name in environment}
     base.update(PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1")
     specs = []
-    for role in ROLES:
-        runtime = runtime_file(getattr(args, role + "_runtime_config"), role)
+    for role in ("storage", "auth", *nodes, "lobby", "gateway"):
+        service = "room" if role in nodes else role
+        runtime = runtime_file(getattr(args, service + "_runtime_config"), role)
         child = dict(base, ARENA_NODE_ID=role, ARENA_HEALTH_PORT=str(health[role]))
         if runtime is not None:
             child["ARENA_RUNTIME_CONFIG"] = str(runtime)
-        for name, maximum in NUMERIC_ENV[role].items():
+        for name, maximum in NUMERIC_ENV[service].items():
             if name in environment:
                 bounded_int(environment[name], maximum, name)
                 child[name] = environment[name]
@@ -274,6 +321,11 @@ def configuration(args, environment):
                          ARENA_STORAGE_AUTH_TOKEN=credentials["ARENA_STORAGE_AUTH_TOKEN"],
                          ARENA_JWT_KEY=credentials["ARENA_JWT_KEY"])
             command = (str(binaries[role]),)
+        elif service == "room":
+            child.update(ARENA_ROOM_PORT=str(ports[role]),
+                         ARENA_ROOM_STATE_DIR=str(state / role),
+                         ARENA_ROOM_TOKEN=credentials["ARENA_ROOM_TOKEN"])
+            command = (str(binaries["room"]),)
         elif role == "lobby":
             child.update(ARENA_LOBBY_PORT=str(ports[role]),
                          ARENA_AUTH_PORT=str(ports["auth"]),
@@ -281,7 +333,11 @@ def configuration(args, environment):
                          ARENA_AUTH_TOKEN=credentials["ARENA_AUTH_TOKEN"],
                          ARENA_LOBBY_TOKEN=credentials["ARENA_LOBBY_TOKEN"],
                          ARENA_STORAGE_LOBBY_TOKEN=credentials["ARENA_STORAGE_LOBBY_TOKEN"],
-                         ARENA_LOBBY_STATE_DIR=str(state / "lobby"))
+                         ARENA_LOBBY_STATE_DIR=str(state / "lobby"),
+                         ARENA_ROOM_TOKEN=credentials["ARENA_ROOM_TOKEN"],
+                         ARENA_ROOM_NODES=json.dumps([
+                             {"nodeId": node, "host": "127.0.0.1", "port": port}
+                             for node, port in nodes.items()], separators=(",", ":")))
             command = (str(binaries[role]),)
         else:
             child.update(ARENA_TCP_PORT=str(ports[role]),
@@ -289,7 +345,7 @@ def configuration(args, environment):
                          ARENA_LOBBY_PORT=str(ports["lobby"]),
                          ARENA_LOBBY_TOKEN=credentials["ARENA_LOBBY_TOKEN"])
             command = (str(binaries[role]), "asio", "handshake")
-        specs.append(ChildSpec(role, command, child, health[role], runtime is not None))
+        specs.append(ChildSpec(role, service, role, command, child, health[role], runtime is not None))
     return Settings(repo, state, logs, tuple(specs), all_ports, args.startup_timeout,
                     args.stop_timeout, args.probe_timeout, args.kill_timeout,
                     attempts, args.restart_backoff_base, args.restart_backoff_max)
@@ -339,9 +395,10 @@ def health_length(header):
     return int(length)
 
 
-def health_body(body, role):
+def health_body(body, service, node_id=None):
     state = json.loads(body, object_pairs_hook=unique_object)
-    return isinstance(state, dict) and state.get("service") == role and \
+    return isinstance(state, dict) and state.get("service") == service and \
+        (node_id is None or state.get("node_id") == node_id) and \
         state.get("alive") is True and state.get("ready") is True
 
 
@@ -349,7 +406,7 @@ HEALTH_REQUEST = (b"GET /health/ready HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                   b"Connection: close\r\n\r\n")
 
 
-def health_ready(port, role, timeout):
+def health_ready(port, service, timeout, node_id=None):
     """Read one startup HTTP message under a bounded whole-request deadline."""
     deadline = time.monotonic() + timeout
     try:
@@ -376,7 +433,7 @@ def health_ready(port, role, timeout):
                 return False
             while len(body) < length:
                 body += receive(length - len(body))
-            return health_body(body, role)
+            return health_body(body, service, node_id)
     except (OSError, ValueError, UnicodeError, RecursionError):
         return False
 
@@ -384,7 +441,7 @@ def health_ready(port, role, timeout):
 class HealthProbe:
     """One finite nonblocking recovery probe, polled by the supervisor owner."""
     def __init__(self, spec, deadline):
-        self.role, self.deadline = spec.role, deadline
+        self.service, self.node_id, self.deadline = spec.service, spec.node_id, deadline
         self.socket = socket.socket()
         self.stage, self.sent, self.message = "connect", 0, b""
         self.length = None
@@ -440,7 +497,7 @@ class HealthProbe:
                     return self.finish(False)
                 if self.length is not None and len(self.message) >= self.length:
                     self.finish(len(self.message) == self.length and
-                                health_body(self.message, self.role))
+                                health_body(self.message, self.service, self.node_id))
         except BlockingIOError:
             pass
         except (OSError, ValueError, UnicodeError, RecursionError):
@@ -492,6 +549,9 @@ class Supervisor:
         self.run_id = str(os.getpid()) + "-" + str(time.time_ns())
 
     def emit(self, event, **fields):
+        if fields.get("role") in self.roles:
+            spec = self.roles[fields["role"]].spec
+            fields.update(service=spec.service, node_id=spec.node_id)
         row = json.dumps(dict(component="supervisor", event=event, **fields),
                          separators=(",", ":"), allow_nan=False)
         if self.events is not None:
@@ -552,8 +612,8 @@ class Supervisor:
             if remaining <= 0:
                 self.emit("readiness_timeout", role=spec.role, pid=child.process.pid)
                 raise StackFailure()
-            if health_ready(spec.health_port, spec.role,
-                            min(remaining, self.settings.probe_timeout)):
+            if health_ready(spec.health_port, spec.service,
+                            min(remaining, self.settings.probe_timeout), spec.node_id):
                 child.ready = True
                 self.roles[spec.role].phase = "healthy"
                 self.inspect()
@@ -664,8 +724,8 @@ class Supervisor:
         clean = True
         for role in self.roles.values():
             role.close_probe()
-        ordered = [child for role in reversed(ROLES) for child in reversed(self.children)
-                   if child.spec.role == role]
+        ordered = [child for spec in reversed(self.settings.specs) for child in reversed(self.children)
+                   if child.spec.role == spec.role]
         for child in ordered:
             process, role = child.process, child.spec.role
             try:
@@ -712,6 +772,9 @@ class Supervisor:
             private_directory(self.settings.state)
             private_directory(self.settings.logs)
             private_directory(self.settings.state / "lobby")
+            for spec in self.settings.specs:
+                if spec.service == "room":
+                    private_directory(self.settings.state / spec.node_id)
             lock_fd = os.open(self.settings.state / "supervisor.lock",
                               os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             lock = resources.enter_context(os.fdopen(lock_fd, "r+"))

@@ -527,7 +527,7 @@ TEST_F(
         EXPECT_EQ(result.error(), expected);
     };
     rejects(
-        [](auto& w) { w.set_version(2); },
+        [](auto& w) { w.set_version(3); },
         CodecError::UnsupportedVersion
     );
     rejects(
@@ -621,6 +621,81 @@ TEST_F(
     EXPECT_FALSE(decodeCoreCheckpoint(
         std::string("\x08\x81\x00", 3) + canonical.substr(2)
     ));
+}
+
+TEST_F(
+    AuthorityCodecTest,
+    ReadsLegacyV1ButRequiresExplicitV2RoomOwnership
+)
+{
+    auto legacy = wireImage();
+    ASSERT_EQ(legacy.version(), 2U);
+    ASSERT_TRUE(legacy.has_distributed_rooms());
+    EXPECT_FALSE(legacy.distributed_rooms());
+    legacy.set_version(1);
+    legacy.clear_distributed_rooms();
+    auto decoded = decodeCoreCheckpoint(legacy.SerializeAsString());
+    ASSERT_TRUE(decoded);
+    EXPECT_FALSE(decoded->distributedRooms);
+    EXPECT_EQ(decoded->rooms.actors, image().rooms.actors);
+    auto upgraded = encodeCoreCheckpoint(*decoded);
+    ASSERT_TRUE(upgraded);
+    wire::CoreCheckpoint v2;
+    ASSERT_TRUE(v2.ParseFromString(*upgraded));
+    EXPECT_EQ(v2.version(), 2U);
+    EXPECT_TRUE(v2.has_distributed_rooms());
+    EXPECT_FALSE(v2.distributed_rooms());
+    v2.clear_distributed_rooms();
+    EXPECT_FALSE(decodeCoreCheckpoint(v2.SerializeAsString()));
+    legacy.set_distributed_rooms(false);
+    EXPECT_FALSE(decodeCoreCheckpoint(legacy.SerializeAsString()));
+    v2.set_distributed_rooms(true);
+    EXPECT_FALSE(decodeCoreCheckpoint(v2.SerializeAsString()));
+}
+TEST_F(
+    AuthorityCodecTest,
+    DistributedCoreKeepsPolicyAndLedgerWithoutDuplicateActors
+)
+{
+    auto value = image();
+    const auto policy = value.rooms.policy;
+    const auto ledger = value.rooms.metrics;
+    value.distributedRooms = true;
+    value.rooms.actors.clear();
+    value.rooms.matches.clear();
+    value.rooms.roomCounters.clear();
+    value.rooms.unattributedCounters = ledger;
+    auto encoded = encodeCoreCheckpoint(value);
+    ASSERT_TRUE(encoded);
+    auto decoded = decodeCoreCheckpoint(*encoded);
+    ASSERT_TRUE(decoded);
+    EXPECT_TRUE(decoded->distributedRooms);
+    EXPECT_TRUE(decoded->rooms.actors.empty());
+    EXPECT_TRUE(decoded->rooms.matches.empty());
+    EXPECT_TRUE(decoded->rooms.roomCounters.empty());
+    EXPECT_EQ(
+        decoded->rooms.unattributedCounters.ticks,
+        ledger.ticks
+    );
+    EXPECT_EQ(
+        decoded->rooms.policy.actor.maxMembers,
+        policy.actor.maxMembers
+    );
+    EXPECT_EQ(
+        decoded->rooms.policy.actor.maxInputsPerTick,
+        policy.actor.maxInputsPerTick
+    );
+    EXPECT_EQ(
+        decoded->rooms.policy.actor.historyTicks,
+        policy.actor.historyTicks
+    );
+    EXPECT_EQ(
+        decoded->rooms.policy.actor.positionLimit,
+        policy.actor.positionLimit
+    );
+    EXPECT_EQ(encodeCoreCheckpoint(*decoded), encoded);
+    value.rooms.actors.push_back(image().rooms.actors[0]);
+    EXPECT_FALSE(encodeCoreCheckpoint(value));
 }
 
 TEST_F(

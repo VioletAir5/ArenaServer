@@ -187,26 +187,271 @@ def _proto(text):
     return result, statuses
 
 
-def _native_registrations(text):
-    """Inspect actual native Server handler maps; unsupported mutation fails closed."""
-    clean = _cpp(text)
+def _cpp_arguments(text):
+    """Split one closed argument list; nested calls/lambdas stay intact."""
+    result, start, at = [], 0, 0
+    while at < len(text):
+        token = CPP_TOKEN.match(text, at)
+        if token:
+            at = token.end()
+            continue
+        if text[at] in '([{':
+            opening = text[at]
+            at = _balanced_end(text, at, opening, {'(': ')', '[': ']', '{': '}'}[opening]) + 1
+        elif text[at] == ',':
+            result.append(text[start:at].strip())
+            at += 1
+            start = at
+        else:
+            at += 1
+    result.append(text[start:].strip())
+    return result
+
+
+def _cpp_function(text, name):
+    """Find one actual definition, not a declaration, call or string decoy."""
     code = _cpp_code(text)
+    found = []
+    for candidate in re.finditer(r'\b' + re.escape(name) + r'\s*\(', code):
+        begin = candidate.end() - 1
+        end = _balanced_end(text, begin, '(', ')')
+        suffix = re.match(r'\s*(?:const\s*)?(?:noexcept\s*)?\{', code[end + 1:])
+        if suffix:
+            brace = end + 1 + suffix.end() - 1
+            finish = _balanced_end(text, brace, '{', '}')
+            prefix = text[max(0, text.rfind('}', 0, candidate.start()) + 1):candidate.start()]
+            found.append((text[brace + 1:finish], prefix, candidate.start()))
+    return found[0] if len(found) == 1 else None
+
+
+def _compact(text):
+    return re.sub(r'\s+', '', _cpp(text))
+
+
+def _cpp_scope(code, position):
+    """Identify the lexical brace scope of a literal registration or consumer."""
+    stack = []
+    for at, char in enumerate(code[:position]):
+        if char == '{':
+            stack.append(at)
+        elif char == '}' and stack:
+            stack.pop()
+    return tuple(stack)
+
+
+def _cpp_aliases(text):
+    return {m.group(1): m.group(2) for m in re.finditer(
+        r'\bnamespace\s+(\w+)\s*=\s*((?:\w+::)*\w+)\s*;', _cpp_code(text))}
+
+
+def _cpp_type(name, aliases):
+    bits = name.split('::')
+    if bits[0] in aliases:
+        bits = aliases[bits[0]].split('::') + bits[1:]
+    return '.'.join(bits)
+
+
+def _strict_room_wire(sources):
+    """Recognize only the current bounded, temporary-then-swap strict codec.
+
+    This checks the finite source shape used below; it is not a claim that arbitrary
+    C++ functions with similar names are secure parsers.
+    """
+    text = _cpp(sources.get('services/room/worker/src/RoomWire.cpp', ''))
+    if not re.search(r'namespace\s+service::room::wire\s*\{', _cpp_code(text)):
+        return False
+    parse = _cpp_function(text, 'parseMessage')
+    serializer = _cpp_function(text, 'serializeMessage')
+    known = _cpp_function(text, 'known')
+    if not parse or not serializer or not known:
+        return False
+    body = _compact(parse[0])
+    required = (
+        'require(!bytes.empty());', 'maximum<=kMaxPayloadBytes&&bytes.size()<=maximum',
+        'google::protobuf::Message>(output.New())',
+        'input.SetTotalBytesLimit(static_cast<int>(maximum));', 'input.SetRecursionLimit(16);',
+        'temporary->ParseFromCodedStream(&input)&&input.ConsumedEntireMessage()&&known(*temporary)',
+        'temporary->SerializeAsString()==bytes',
+        'output.GetReflection()->Swap(&output,temporary.get());')
+    known_body = _compact(known[0])
+    serialized = _compact(serializer[0])
+    expected_parse = _compact('''
+        const auto parsed = guarded([&] {
+            require(!bytes.empty());
+            require(maximum <= kMaxPayloadBytes && bytes.size() <= maximum, CodecError::Capacity);
+            auto temporary = std::unique_ptr<google::protobuf::Message>(output.New());
+            google::protobuf::io::CodedInputStream input(reinterpret_cast<const std::uint8_t*>(bytes.data()), static_cast<int>(bytes.size()));
+            input.SetTotalBytesLimit(static_cast<int>(maximum));
+            input.SetRecursionLimit(16);
+            require(temporary->ParseFromCodedStream(&input) && input.ConsumedEntireMessage() && known(*temporary));
+            require(temporary->SerializeAsString() == bytes, CodecError::NonCanonical);
+            output.GetReflection()->Swap(&output, temporary.get());
+            return true;
+        });
+        if (!parsed) return std::unexpected(parsed.error());
+        return {};
+    ''')
+    expected_serializer = _compact('''
+        return guarded([&] {
+            require(known(message));
+            require(maximum <= kMaxPayloadBytes && message.ByteSizeLong() <= maximum, CodecError::Capacity);
+            std::string result;
+            require(message.SerializeToString(&result));
+            return result;
+        });
+    ''')
+    return (body == expected_parse and serialized == expected_serializer
+            and all(value in body for value in required)
+            and body.count('output.') == 2
+            and 'if(!parsed)returnstd::unexpected(parsed.error());return{};' in body
+            and 'if(depth>16)returnfalse;' in known_body
+            and 'if(reflection->GetUnknownFields(message).field_count())returnfalse;' in known_body
+            and 'if(!known(child,depth+1))returnfalse;' in known_body
+            and 'if(!field->enum_type()->FindValueByNumber(value))returnfalse;' in known_body
+            and known_body.count('returntrue;') == 1
+            and 'require(known(message));' in serialized
+            and 'message.ByteSizeLong()<=maximum' in serialized
+            and 'require(message.SerializeToString(&result));returnresult;' in serialized)
+
+
+def _native_worker_dispatch(text, sources):
+    """Prove the finite Room handler->Job->queue->pump->typed handler path."""
+    clean, code = _cpp(text), _cpp_code(text)
+    aliases = _cpp_aliases(text)
+    problem = 'unsupported native shared-handler dispatch or strict codec dataflow'
+    if aliases.get('pb') != 'arena::room' or 'wire' in aliases or not _strict_room_wire(sources):
+        return {}, problem
+    bodies = {name: _cpp_function(clean, name) for name in
+              ('admit', 'pump', 'parse', 'response', 'receipt', 'health')}
+    if not all(bodies.values()):
+        return {}, problem
+    admission = _compact(bodies['admit'][0])
+    pump = _compact(bodies['pump'][0])
+    parsed = _compact(bodies['parse'][0])
+    serialized = _compact(bodies['response'][0])
+    if (not re.search(r'\btemplate\s*<\s*class\s+Message\s*>\s*Message\s*$', bodies['parse'][1])
+            or not parsed.startswith('Messagevalue;autoparsed=wire::parseMessage(job.request.payload(),value);')
+            or 'if(!parsed)throwRejected{codecStatus(parsed.error())};' not in parsed
+            or not parsed.endswith('returnvalue;')
+            or 'r.set_payload(decoded(wire::serializeMessage(message)));' not in serialized
+            or not serialized.endswith('returnr;')
+            or 'autojob=std::make_shared<Job>(Job{std::move(request),std::move(context),std::move(completion),cancelled});' not in admission
+            or len(re.findall(r'\brequest\b', _cpp_code(bodies['admit'][0]))) != 1
+            or 'self->queue.push_back(job);' not in admission or 'self->pump();' not in admission
+            or 'autojob=std::move(queue.front());queue.pop_front();' not in pump
+            or len(re.findall(r'job\s*->\s*request\b', code)) != 1):
+        return {}, problem
+    for function, signature in (('parse', 'parse(constJob&job)const'),
+                                ('response', 'response(constJob&job,constMessage&message)const')):
+        at = bodies[function][2]
+        if _compact(clean[at:clean.find('{', at)]) != signature:
+            return {}, problem
+    job = re.search(r'\bstruct\s+Job\s*\{', code)
+    if not job:
+        return {}, problem
+    end = _balanced_end(clean, job.end() - 1, '{', '}')
+    if _compact(clean[job.end():end]) != ('arena::rpc::Requestrequest;'
+            'arena::internal_rpc::Contextcontext;Server::Completioncompletion;'
+            'std::shared_ptr<std::atomic<bool>>cancelled;boolfinished{false};'):
+        return {}, problem
+    binding = re.search(r'const\s+auto\s*&\s*(\w+)\s*=\s*job\s*->\s*request\s*\.\s*method\s*\(\s*\)\s*;', bodies['pump'][0])
+    if not binding:
+        return {}, problem
+    tail = bodies['pump'][0][binding.end():]
+    tail = tail[:tail.find('}')].strip()
+    selector = re.escape(binding.group(1))
+    branch = re.compile(r'(?:else\s+)?if\s*\(\s*' + selector +
+                        r'\s*==\s*"([a-z][a-z0-9_.]*)"\s*\)\s*'
+                        r'(\w+)\s*\(\s*job\s*(?:,\s*(true|false)\s*)?\)\s*;')
+    dispatch, spans = {}, []
+    for row in branch.finditer(tail):
+        method, function, flag = row.groups()
+        if method in dispatch:
+            return {}, problem
+        dispatch[method] = function
+        spans.append(row.span())
+    remainder = tail
+    for begin, end in reversed(spans):
+        remainder = remainder[:begin] + remainder[end:]
+    if _compact(remainder) != 'elsefinish(job,arena::rpc::NOT_FOUND);' or not dispatch:
+        return {}, problem
+    response_function = bodies['response']
+    if not re.search(r'const\s+Message\s*&\s*message', clean[response_function[2]:clean.find('{', response_function[2])]):
+        return {}, problem
+    receipt_type = re.search(r'((?:\w+::)+\w+)\s*$', bodies['receipt'][1])
+    if not receipt_type:
+        return {}, problem
+    reply_type = _cpp_type(receipt_type.group(1), aliases)
+    receipt_body = bodies['receipt'][0]
+    receipt_return = re.search(r'\breturn\s+(\w+)\s*;', _cpp_code(receipt_body))
+    if not receipt_return or not re.search(r'\b' + re.escape(receipt_type.group(1)) + r'\s+' + receipt_return.group(1) + r'\s*;', _cpp_code(receipt_body)):
+        return {}, problem
+
+    def response_types(body):
+        variables = {m.group(2): _cpp_type(m.group(1), aliases) for m in re.finditer(
+            r'\b((?:\w+::)+\w+)\s+(\w+)\s*;', _cpp_code(body))}
+        output = set()
+        for call in re.finditer(r'\bresponse\s*\(', _cpp_code(body)):
+            begin = call.end() - 1
+            end = _balanced_end(body, begin, '(', ')')
+            args = _cpp_arguments(body[begin + 1:end])
+            if len(args) != 2 or _compact(args[0]) not in ('*job', 'job'):
+                return None
+            value = args[1]
+            if re.fullmatch(r'\w+', value) and value in variables:
+                output.add(variables[value])
+            elif re.fullmatch(r'receipt\s*\(.*\)', value, re.S):
+                output.add(reply_type)
+            else:
+                return None
+        return output or None
+
+    result = {}
+    for method, function in dispatch.items():
+        body = _cpp_function(clean, function)
+        if not body:
+            return {}, problem
+        requests = re.findall(r'\bparse\s*<\s*((?:\w+::)+\w+)\s*>\s*\(\s*\*job\s*\)', _cpp_code(body[0]))
+        emitted = response_types(body[0])
+        if len(requests) != 1 or emitted is None:
+            return {}, problem
+        result[method] = (_cpp_type(requests[0], aliases), emitted, body[0])
+    health = bodies['health'][0]
+    emitted = response_types(health)
+    if emitted is None or 'Jobjob{request,{},{},{}};' not in _compact(health):
+        return {}, problem
+    result['health.ready'] = (None, emitted, health)
+    return result, None
+
+
+def _native_registrations(text, sources=None):
+    """Inspect literal native listener maps and narrowly proven shared dispatch."""
+    sources = sources or {}
+    clean, code = _cpp(text), _cpp_code(text)
     registered, handlers, problems = {}, {}, []
+    aliases = _cpp_aliases(text)
     maps = list(re.finditer(r'\b(?:arena::internal_rpc::)?Server::Handlers\s+(\w+)\s*;', code))
     constructors = []
-    for constructor in re.finditer(r'\b(?:arena::internal_rpc::)?Server\s+\w+\s*\(', code):
+    pattern = r'\b(?:arena::internal_rpc::)?Server\s+\w+\s*\(|\bstd::make_unique\s*<\s*(?:arena::internal_rpc::)?Server\s*>\s*\('
+    for constructor in re.finditer(pattern, code):
         begin = constructor.end() - 1
         try:
             end = _balanced_end(clean, begin, '(', ')')
-            constructors.append(code[begin:end + 1])
+            constructors.append((_cpp_arguments(clean[begin + 1:end]), constructor.start(), end + 1))
         except ValueError:
             problems.append((_line(clean, begin), 'unclosed native Server construction'))
+    shared, shared_problem = None, None
     for declaration in maps:
         registry = declaration.group(1)
-        if not any(re.search(r'\bstd::move\s*\(\s*' + re.escape(registry) + r'\s*\)', body)
-                   for body in constructors):
-            problems.append((_line(clean, declaration.start()), 'native handler registry is not consumed by a Server'))
+        scope = _cpp_scope(code, declaration.start())
+        consumers = [(begin, end) for args, begin, end in constructors
+                     if len(args) == 3 and _compact(args[2]) == 'std::move(' + registry + ')'
+                     and begin > declaration.end() and _cpp_scope(code, begin) == scope]
+        if len(consumers) != 1:
+            problems.append((_line(clean, declaration.start()), 'native handler registry requires one direct Server consumer in its own scope'))
+        registry_uses = [(declaration.start(), declaration.end()), *consumers]
         pattern = r'\b' + re.escape(registry) + r'\s*(?:\.\s*(\w+)\s*\(|(\[)|=)'
+        allowed_alias_uses = defaultdict(list)
         for mutation in re.finditer(pattern, code):
             line = _line(clean, mutation.start())
             if mutation.group(1) != 'emplace':
@@ -218,23 +463,71 @@ def _native_registrations(text):
             except ValueError:
                 problems.append((line, 'unclosed native handler registration'))
                 continue
-            body = clean[begin + 1:end]
-            body_code = code[begin + 1:end]
-            first = re.match(r'\s*"([a-z][a-z0-9_.]*)"\s*,\s*(\[)', body)
-            if not first:
-                problems.append((line, 'native registration requires a literal method and inline handler'))
+            registry_uses.append((mutation.start(), end + 1))
+            if _cpp_scope(code, mutation.start()) != scope:
+                problems.append((line, 'native handler map mutation outside its closed declaration scope'))
+            args = _cpp_arguments(clean[begin + 1:end])
+            if len(args) != 2 or not re.fullmatch(r'"([a-z][a-z0-9_.]*)"', args[0]):
+                problems.append((line, 'native registration requires a literal method'))
                 continue
-            name = first.group(1)
+            name, handler = args[0][1:-1], args[1]
+            emitted = None
+            if re.fullmatch(r'\w+', handler):
+                if shared is None:
+                    shared, shared_problem = _native_worker_dispatch(clean, sources)
+                bindings = list(re.finditer(r'\b(?:const\s+)?auto\s+' + re.escape(handler) + r'\s*=\s*\[', code))
+                if len(bindings) != 1 or name not in shared or shared_problem:
+                    problems.append((line, shared_problem or 'unsupported named native handler'))
+                    continue
+                binding = bindings[0]
+                if (not declaration.end() <= binding.start() < mutation.start()
+                        or _cpp_scope(code, binding.start()) != scope):
+                    problems.append((line, 'native shared handler binding is outside its listener scope'))
+                    continue
+                brace = code.find('{', binding.end())
+                finish = _balanced_end(clean, brace, '{', '}')
+                lambda_body = clean[brace + 1:finish]
+                compact = _compact(lambda_body)
+                if ('returnself->admit(std::move(request),std::move(context),std::move(complete));' not in compact
+                        or len(re.findall(r'\brequest\b', _cpp_code(lambda_body))) != 1):
+                    problems.append((line, 'named handler does not forward the original request to the verified queue'))
+                    continue
+                allowed_alias_uses[handler].extend([(binding.start(), finish + 1), (mutation.start(), end + 1)])
+                request, emitted, body = shared[name]
+            else:
+                if not handler.lstrip().startswith('['):
+                    problems.append((line, 'native handler requires an inline lambda or proven finite shared dispatch'))
+                    continue
+                body, request = handler, None
+                parsed = []
+                body_code = _cpp_code(body)
+                for candidate in re.finditer(r'\b((?:\w+::)+\w+)\s+(\w+)\s*;', body_code):
+                    variable = re.escape(candidate.group(2))
+                    direct = re.search(r'\b' + variable + r'\s*\.\s*ParseFromString\s*\(', body_code)
+                    strict = re.search(r'\bservice::room::wire::parseMessage\s*\(\s*\w+\s*\.\s*payload\s*\(\s*\)\s*,\s*' + variable + r'\s*,\s*4096\s*\)', body_code)
+                    if direct or strict and _strict_room_wire(sources):
+                        parsed.append(_cpp_type(candidate.group(1), aliases))
+                if len(parsed) > 1:
+                    problems.append((line, 'native handler parses multiple unsupported request types'))
+                request = parsed[0] if len(parsed) == 1 else None
+                if re.search(r'\bself\s*->\s*health\s*\(\s*request\s*\)', body_code):
+                    if shared is None:
+                        shared, shared_problem = _native_worker_dispatch(clean, sources)
+                    if shared_problem or name != 'health.ready':
+                        problems.append((line, shared_problem or 'unsupported native health delegation'))
+                    else:
+                        request, emitted, _ = shared[name]
             if name in registered:
                 problems.append((line, 'duplicate native handler registration'))
-            parsed = []
-            for candidate in re.finditer(r'\b((?:\w+::)+\w+)\s+(\w+)\s*;', body_code):
-                if re.search(r'\b' + re.escape(candidate.group(2)) + r'\s*\.\s*ParseFromString\s*\(', body_code):
-                    parsed.append(candidate.group(1).replace('::', '.'))
-            if len(parsed) > 1:
-                problems.append((line, 'native handler parses multiple unsupported request types'))
-            registered[name] = (parsed[0] if len(parsed) == 1 else None, name, line)
-            handlers[name] = (body, line)
+            registered[name] = (request, name, line)
+            handlers[name] = (body, line, emitted)
+        for use in re.finditer(r'\b' + re.escape(registry) + r'\b', code):
+            if not any(begin <= use.start() < end for begin, end in registry_uses):
+                problems.append((_line(clean, use.start()), 'native handler map escapes its closed listener'))
+        for alias, allowed in allowed_alias_uses.items():
+            for use in re.finditer(r'\b' + re.escape(alias) + r'\b', code):
+                if not any(begin <= use.start() < end for begin, end in allowed):
+                    problems.append((_line(clean, use.start()), 'native shared handler alias is mutable or escapes the closed listener'))
     return registered, handlers, problems
 
 
@@ -533,7 +826,7 @@ def analyze(root, contract_path=None, policy_path=None):
     native_implementations = {c.get('implementation') for _, c in contract_files
                               if isinstance(c, dict) and c.get('registration_kind') == 'native_server'}
     for path, source in sources.items():
-        if PurePosixPath(path).suffix in CPP and re.search(r'\bServer::Handlers\s+\w+', _cpp_code(source)) and re.search(r'\bServer\s+\w+\s*\(', _cpp_code(source)):
+        if PurePosixPath(path).suffix in CPP and re.search(r'\bServer::Handlers\s+\w+', _cpp_code(source)) and re.search(r'\bServer\s+\w+\s*\(|\bstd::make_unique\s*<\s*(?:arena::internal_rpc::)?Server\s*>', _cpp_code(source)):
             if path not in native_implementations:
                 issue('contract_native_undeclared', path, 1, 'native Server handler registration requires a service contract')
     for name,expected in (('Request',COMMON_REQUEST),('Response',COMMON_RESPONSE)):
@@ -557,7 +850,7 @@ def analyze(root, contract_path=None, policy_path=None):
             issue('contract_owner',str(current_path),1,'Storage owns physical SQL')
         native = current.get('registration_kind') == 'native_server'
         if native:
-            registered, handlers, registration_problems = _native_registrations(sources.get(implementation, ''))
+            registered, handlers, registration_problems = _native_registrations(sources.get(implementation, ''), sources)
             default = re.search(r'\bmaxBudget\s*\{\s*(\d+)\s*\}', _cpp_code(sources.get('shared/include/rpc/Server.h', '')))
             actual_maximum = int(default.group(1)) if default else None
             implementation_source = _cpp_code(sources.get(implementation, ''))
@@ -638,10 +931,11 @@ def analyze(root, contract_path=None, policy_path=None):
                     if not isinstance(response_path, str) or _owner(response_path) != service or response_path not in sources:
                         issue('contract_response', implementation, line, f'{name} response implementation must belong to its service')
                     else:
-                        response_text = _cpp_code(sources[response_path])
+                        response_text = _cpp_code(node[0] if response_path == implementation and node else sources[response_path])
                         response_type = str(method['response']).replace('.', '::')
-                        emitted = any(re.search(r'\b' + re.escape(match.group(1)) + r'\s*\.\s*Serialize(?:AsString|ToString|ToArray)\s*\(', response_text)
-                                      for match in re.finditer(r'\b' + re.escape(response_type) + r'\s+(\w+)\s*;', response_text))
+                        emitted = (method['response'] in node[2] if node and node[2] is not None else
+                            any(re.search(r'\b' + re.escape(match.group(1)) + r'\s*\.\s*Serialize(?:AsString|ToString|ToArray)\s*\(', response_text)
+                                for match in re.finditer(r'\b' + re.escape(response_type) + r'\s+(\w+)\s*;', response_text)))
                         if not emitted:
                             issue('contract_response', response_path, 1, f'{name} does not serialize declared reply {method["response"]}')
                 continue
@@ -707,7 +1001,7 @@ def analyze(root, contract_path=None, policy_path=None):
         for cycle in cycles[kind]:
             issue(kind+'_cycle','',1,' -> '.join(cycle))
     issues.sort(key=lambda i:(i['path'],i['line'],i['code'],i['message']))
-    return dict(schema_version=1,passed=not issues,issues=issues,inventory=dict(files=len(sources),modules=sorted({_owner(p) for p in sources})),contracts=dict(declared=sorted({name for service,name in declared}),registered=sorted({name for service,name in registered}),qualified_declared=sorted(service+'/'+name for service,name in declared),qualified_registered=sorted(service+'/'+name for service,name in registered),native_and_python_calls=rpc_calls,data_tables=sorted(tables)),graphs=dict(build=build,include=includes,python_import=imports,rpc=runtime),cycles=cycles,limitations=['Static literal source policy; arbitrary macro-generated or runtime-generated source requires separate compiler/runtime checks.','Gateway forwards business requests to independent Lobby; Match/Room owners are local to Lobby and are not independent network services.','Caller declarations are build contracts, not a substitute for runtime caller identity authorization.'])
+    return dict(schema_version=1,passed=not issues,issues=issues,inventory=dict(files=len(sources),modules=sorted({_owner(p) for p in sources})),contracts=dict(declared=sorted({name for service,name in declared}),registered=sorted({name for service,name in registered}),qualified_declared=sorted(service+'/'+name for service,name in declared),qualified_registered=sorted(service+'/'+name for service,name in registered),native_and_python_calls=rpc_calls,data_tables=sorted(tables)),graphs=dict(build=build,include=includes,python_import=imports,rpc=runtime),cycles=cycles,limitations=['Static literal source policy; arbitrary macro-generated or runtime-generated source requires separate compiler/runtime checks.','Gateway forwards to Lobby; Lobby owns Registry/Queue and one authoritative journal; independent Room workers execute isolated kernels through a finite verified native dispatch. This static source check does not prove arbitrary C++ control flow or replace runtime authorization tests.','Caller declarations are build contracts, not a substitute for runtime caller identity authorization.'])
 
 
 def main():

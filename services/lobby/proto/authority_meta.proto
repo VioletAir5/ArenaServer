@@ -44,6 +44,14 @@ message SettlementDelivery {
   uint32 last_status = 12;
   sint64 retention_deadline_nanos = 13;
 }
+// A durable reservation; remote worker creation occurs outside the owner CAS.
+message PendingRoom {
+  uint64 room_id = 1;
+  uint64 incarnation = 2;
+  uint64 match_id = 3;
+  uint64 created_unix_ms = 4;
+  sint64 deadline_nanos = 5;
+}
 message Metadata {
   uint32 version = 1;
   string boot_id = 2;
@@ -55,4 +63,5 @@ message Metadata {
   repeated Transport transports = 8;
   repeated Receipt receipts = 9;
   repeated SettlementDelivery settlements = 10;
+  repeated PendingRoom pending_rooms = 11;
 }

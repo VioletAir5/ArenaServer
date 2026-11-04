@@ -1099,7 +1099,13 @@ wire::CoreCheckpoint encodeCore(const CoreCheckpoint& v)
 {
     wire::CoreCheckpoint w;
     Budget budget;
-    w.set_version(1);
+    w.set_version(2);
+    w.set_distributed_rooms(v.distributedRooms);
+    if (v.distributedRooms)
+        require(
+            v.rooms.actors.empty() && v.rooms.matches.empty() &&
+            v.rooms.roomCounters.empty()
+        );
     encode(v.registry, w.mutable_registry(), budget);
     encode(v.queue, w.mutable_queue(), budget);
     encode(v.rooms, w.mutable_rooms(), budget);
@@ -1107,14 +1113,27 @@ wire::CoreCheckpoint encodeCore(const CoreCheckpoint& v)
 }
 CoreCheckpoint decodeCore(const wire::CoreCheckpoint& w)
 {
-    version(w.version());
+    if (w.version() != 1 && w.version() != 2)
+        throw Rejected{CodecError::UnsupportedVersion};
     require(w.has_registry() && w.has_queue() && w.has_rooms());
+    require(
+        w.version() == 1 ? !w.has_distributed_rooms()
+                         : w.has_distributed_rooms()
+    );
     Budget budget;
-    return {
+    CoreCheckpoint value{
         decode(w.registry(), budget),
         decode(w.queue(), budget),
-        decode(w.rooms(), budget)
+        decode(w.rooms(), budget),
+        w.version() == 2 && w.distributed_rooms()
     };
+    if (value.distributedRooms)
+        require(
+            value.rooms.actors.empty() &&
+            value.rooms.matches.empty() &&
+            value.rooms.roomCounters.empty()
+        );
+    return value;
 }
 wire::TickEnvelope encodeTick(const room::TickRecord& v)
 {

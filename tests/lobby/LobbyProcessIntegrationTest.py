@@ -25,7 +25,7 @@ from ServiceStackFixture import ServiceStack
 class Acceptance(ServiceStack):
     def unchanged_journey(self):
         before=self.sample('independent-listeners-ready')
-        require(len(set(before.values())) == 4,'roles are not distinct processes')
+        require(len(before) == 6 and len(set(before.values())) == 6,'six roles are not distinct processes')
         self.alice,self.bob=self.connect(),self.connect(True)
         self.alice_grant=self.alice.login(); self.bob_grant=self.bob.login(b'bob')
         require(self.alice_grant['player'] == 42 and self.bob_grant['player'] == 43,'canonical identity changed')
@@ -97,7 +97,7 @@ class Acceptance(ServiceStack):
         self.until(lambda:health_http(self.ports['gateway-health'],'/health/ready')[0] == 200,
                    'same Lobby sees restarted Auth',8)
         after=self.sample('after-auth-recovery')
-        require(all(after[role] == before[role] for role in ('gateway','lobby','storage')),
+        require(all(after[role] == before[role] for role in self.children if role != 'auth'),
                 'Auth restart affected another process')
         return dict(failed_login_ms=elapsed,other_pids_preserved=True,
                     outage_elapsed_ms=(time.monotonic()-started)*1000)
@@ -172,7 +172,7 @@ class Acceptance(ServiceStack):
                     existing_archive_preserved=True)
 
     def run(self):
-        self.report['scope']='real four-process smoke and active-room continuity; not the 90-restart gate'
+        self.report['scope']='real six-process smoke and active-room continuity; not the 90-restart gate'
         self.setup()
         for name,action in (('unchanged_tcp_ws_login_match_room_inputs',self.unchanged_journey),
             ('lobby_sigkill_recovers_acknowledged_active_room',self.lobby_crash_recovers_room),
@@ -191,6 +191,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('descriptor','auth','lobby','gateway','replay','replay-export','pg-bin','report'):
         parser.add_argument('--'+key,type=Path,required=True)
+    parser.add_argument('--room', type=Path)
     parser.add_argument('--repository-root',type=Path,default=ROOT)
     parser.add_argument('--pg-share',type=Path); parser.add_argument('--pg-lib',type=Path)
     args=parser.parse_args()
@@ -207,7 +208,8 @@ def main():
     test.report['source_hashes']={str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest()
         for p in [ROOT/'services/gateway/app/main.cpp',ROOT/'services/lobby/app/main.cpp',
                   ROOT/'services/lobby/src/LobbyAuthority.cpp',ROOT/'services/lobby/src/LobbyService.cpp',
-                  ROOT/'tests/lobby/ServiceStackFixture.py', Path(__file__)]}
+                  ROOT/'tests/lobby/ServiceStackFixture.py', ROOT/'services/room/worker/app/main.cpp',
+                  ROOT/'services/room/worker/src/RoomWorker.cpp', ROOT/'services/room/src/RoomRuntime.cpp', Path(__file__)]}
     output=json.dumps(test.report,indent=2)
     test.assert_no_secrets(output)
     args.report.parent.mkdir(parents=True,exist_ok=True);args.report.write_text(output+'\n')

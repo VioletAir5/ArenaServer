@@ -7,6 +7,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -220,6 +221,9 @@ class Player:
     acknowledged: int = 0
     issued: int = 0
     history_missing_ns: int | None = None
+    credential_expiry: int = 0
+    login_complete: bool = False
+    renewal: dict | None = None
 
 
 class Acceptance(ServiceStack):
@@ -235,6 +239,7 @@ class Acceptance(ServiceStack):
                         (('alice', 42, False), ('bob', 43, True))}
         self.match = self.room = self.incarnation = 0
         self.phase = 'baseline'
+        self.frozen_terminal = None
         self.ticket_release_lower_ns = None
         self.ticket_release_upper_ns = None
         self.ticket_retention_ns = 60_000_000_000
@@ -263,12 +268,20 @@ class Acceptance(ServiceStack):
                 'fixed logical denominator changed')
         self.logical = {identity: dict(id=identity, status='not_started', attempts=0) for identity in logical_ids}
         for identity, operation in self.logical.items():
+            if identity.startswith('final/status/'):
+                operation['credential_contract'] = ('When at most 60 seconds remain on the signed 300-second credential, '
+                    'complete a real TOKEN handoff before expiry with the same session/room/membership and acknowledged inputs; '
+                    'every failed transport, login or verification attempt remains a raw failure.')
             if '/transaction/' in identity and identity.endswith('/4'):
                 operation['contract'] = 'bounded matched-ticket retention plus current room/session/ACK continuity'
-        self.report.update(scope='Day33 formal real four-process fixed 90-restart acceptance',
-            plan_version='day33-fixed-1666-validated-results-strict-failure-deadline-v4',
+        self.report.update(scope='Day33 fixed 90-restart acceptance with six real processes and two Room bystanders',
+            plan_version='day33-fixed-1666-validated-results-strict-failure-deadline-v5',
             schedule=self.plan, logical_denominator=1666, logical_operations=list(self.logical.values()),
             raw_attempts=[], failed_attempt_deadline_violations=[], fault_windows=[], role_restarts=[], resource_curve=[], wait_graph_samples=[],
+            token_renewals=[], token_renewal_policy=dict(lifetime_seconds=300, before_expiry_seconds=60,
+                max_attempts=40, raw_attempt_timeout_ms=1000, fixed_logical_denominator=1666,
+                operation='Credential maintenance is a required sub-contract of its original business operation; '
+                          'it does not add successes to the availability denominator.'),
             final_phase_observations=[], ticket_history_observations=[], ticket_history_policy=dict(
                 retention_ms=60000, clock='same-host CLOCK_MONOTONIC nanoseconds',
                 source='services/match/include/match/MatchQueue.h::QueueConfig::retention',
@@ -412,12 +425,26 @@ class Acceptance(ServiceStack):
         if final or settling:
             require(state['played'] == state['duration'] == self.args.battle_ticks,
                     'natural settlement did not consume the exact declared battle duration')
-            require('settlement' in state and state['settlement']['reason'] == 1 and
-                    state['settlement']['match'] == self.match and
-                    state['settlement']['room'] == self.room and
-                    state['settlement']['tick'] == snapshot['tick'] and
-                    state['settlement']['checksum'] == snapshot['checksum'],
-                    'terminal room has an early abort or inconsistent frozen result')
+            if settling:
+                require('settlement' not in state, 'Settling exposed a result before the external durable ACK')
+            else:
+                require('settlement' in state and state['settlement']['reason'] == 1 and
+                        state['settlement']['match'] == self.match and
+                        state['settlement']['room'] == self.room and
+                        state['settlement']['tick'] == snapshot['tick'] and
+                        state['settlement']['checksum'] == snapshot['checksum'],
+                        'terminal room has an early abort or inconsistent frozen result')
+            frozen = dict(room=snapshot['room'], incarnation=snapshot['incarnation'],
+                          tick=snapshot['tick'], checksum=snapshot['checksum'],
+                          played=state['played'], duration=state['duration'])
+            # Both bots must retain the same cutoff while PostgreSQL commits.
+            # A direct Finished observation still requires its own durable ACK.
+            with self.lock:
+                if self.frozen_terminal is not None:
+                    require(frozen == self.frozen_terminal, 'terminal snapshot changed after Settling began')
+                elif settling:
+                    self.frozen_terminal = frozen
+                    self.report['frozen_terminal_observation'] = dict(frozen, observed_at=time.monotonic())
         require(set(snapshot['players']) == {42, 43}, 'fixed match roster changed')
         with self.lock:
             issued = {p.identity: p.issued for p in self.players.values()}
@@ -433,7 +460,66 @@ class Acceptance(ServiceStack):
                 require((member['dx'], member['dy']) == self.control_for(player.identity, member['seq']),
                         'last input controls diverged from the ordered log')
 
+    def credential_expiry(self, grant):
+        """Validate issuer output without retaining credentials in evidence."""
+        try:
+            token = grant['token'].decode('ascii')
+            parts = token.split('.')
+            require(len(parts) == 3 and len(token) <= 4096, 'invalid credential encoding')
+            def decode(value):
+                return base64.urlsafe_b64decode(value + '=' * ((4 - len(value) % 4) % 4))
+            signature = hmac.new(self.signer_key.encode(), '.'.join(parts[:2]).encode(), hashlib.sha256).digest()
+            require(hmac.compare_digest(decode(parts[2]), signature), 'credential signature mismatch')
+            header, payload = (json.loads(decode(value)) for value in parts[:2])
+            require(header == dict(alg='HS256', typ='JWT') and
+                    payload.get('iss') == 'arena-auth' and payload.get('aud') == 'arena-gateway' and
+                    payload.get('sub') == str(grant['player']) and payload.get('epoch') == str(grant['epoch']),
+                    'credential identity or profile changed')
+            require(all(type(payload.get(key)) is int for key in ('iat', 'nbf', 'exp')) and
+                    payload['iat'] == payload['nbf'] <= time.time() < payload['exp'] and
+                    payload['exp'] - payload['iat'] == 300, 'production credential lifetime changed')
+            return payload['exp']
+        except InvariantFailure:
+            raise
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            raise InvariantFailure('invalid credential issuer output') from None
+
+    @staticmethod
+    def begin_token_login(player):
+        player.operation = LoginOperation(os.urandom(16).hex().encode(), player.grant['token'],
+                                          b'', True, player.grant['epoch'])
+        player.login_complete = False
+
+    def renew_due(self, player, logical, deadline, *, forced=False):
+        now = time.time()
+        if player.renewal is None:
+            if not forced and player.credential_expiry - now > 60:
+                return
+            require(player.credential_expiry > now, 'credential renewal started after expiry')
+            player.renewal = dict(logical=logical, player=player.identity, websocket=player.websocket,
+                started=time.monotonic(), previous_expiry=player.credential_expiry,
+                previous_epoch=player.grant['epoch'], attempts=0, status='running', forced=forced)
+            with self.lock:
+                self.report['token_renewals'].append(player.renewal)
+            self.begin_token_login(player)
+            self.close_peer(player)
+        row = player.renewal
+        require(row['attempts'] < 40, 'credential renewal exhausted its finite attempt budget')
+        row['attempts'] += 1
+        # Keep this proof and nonce until login AND its room verification complete.
+        # An unknown ACK must not turn into a second logical login operation.
+        self.login_once(player, logical, deadline)
+        require(player.credential_expiry >= row['previous_expiry'] and
+                (row['forced'] or player.credential_expiry > row['previous_expiry']),
+                'credential renewal did not refresh expiry')
+        row.update(status='succeeded', finished=time.monotonic(), renewed_expiry=player.credential_expiry,
+            renewed_epoch=player.grant['epoch'], logical_session_preserved=True,
+            room_membership_and_acknowledged_inputs_verified=True)
+        player.renewal = None
+
     def login_once(self, player, logical, deadline, *, baseline=False):
+        if player.login_complete and not baseline:
+            self.begin_token_login(player)
         try:
             peer = self.open_peer(player, logical, deadline)
             peer.deadline = min(deadline, time.monotonic() + 1)
@@ -453,6 +539,7 @@ class Acceptance(ServiceStack):
                 require(grant['resumed'] and grant['session'] == player.session and grant['room'] in allowed_rooms and
                         grant['epoch'] > player.operation.before_epoch,
                         'reconnect fabricated a fresh session or lost its room binding')
+            player.credential_expiry = self.credential_expiry(grant)
             player.grant = grant
             with self.lock:
                 self.secrets = (*self.secrets, grant['token'].decode('ascii'))
@@ -463,6 +550,7 @@ class Acceptance(ServiceStack):
                 self.verify_world(state, floor,
                     final=self.phase == 'settlement' and state['phase'] == 5,
                     settling=self.phase == 'settlement' and state['phase'] == 4)
+            player.login_complete = True
             return grant
         except TransientFailure:
             self.close_peer(player)
@@ -475,6 +563,7 @@ class Acceptance(ServiceStack):
 
     def business(self, player, logical, kind, deadline, action):
         try:
+            self.renew_due(player, logical, deadline)
             if player.peer is None or player.peer.closed:
                 self.login_once(player, logical, deadline)
             return self.raw(logical, kind, deadline, lambda end:
@@ -794,8 +883,12 @@ class Acceptance(ServiceStack):
                 pass
         require(rows and rows[-1].get('state') == 'stopped', 'normal selected stop has no final physical counters')
         last = rows[-1]
-        fields = ('active','queued','busy','workers') if role == 'auth' else ('active','auth_inflight','storage_inflight')
+        fields = ('active','queued','busy','workers') if role == 'auth' else (
+            'active','auth_inflight','storage_inflight','room_inflight','journal_pending','owner_pending','coordinator_pending')
         require(all(last.get(key) == 0 for key in fields), 'normal selected stop retained actual jobs')
+        if role == 'lobby':
+            require(last.get('journal_closed') is True and last.get('local_room_actors') == 0,
+                    'Lobby retained a physical journal worker or local room kernel')
         return {key:last[key] for key in fields}
 
     def window(self, window):
@@ -807,10 +900,9 @@ class Acceptance(ServiceStack):
                    started=time.monotonic(),signals=[],passed=False,logical_count=22)
         self.report['fault_windows'].append(row)
         for player in self.players.values():
-            # This exact original proof and nonce stay unchanged through all
-            # unknown-ACK retries/transport repairs belonging to this window.
-            player.operation = LoginOperation(os.urandom(16).hex().encode(), player.grant['token'],
-                                              b'', True, player.grant['epoch'])
+            # The original proof and nonce stay unchanged through unknown-ACK
+            # retries until that login and its room verification complete.
+            self.begin_token_login(player)
         self.stop_selected(window,row,deadline)
         for role in ROLES:
             if role in window['roles']:
@@ -968,7 +1060,7 @@ class Acceptance(ServiceStack):
     def run(self):
         self.setup()
         initial_pids = self.sample('initial-ready-before-clients')
-        require(len(set(initial_pids.values())) == 4, 'Auth/Lobby/Gateway/Storage are not independent actual processes')
+        require(len(self.children) == 6 and len(set(initial_pids.values())) == 6, 'six service instances are not independent actual processes')
         self.initial_resources = self.resources('initial-ready-before-clients')
         self.baseline()
         for window in self.plan:
@@ -1009,7 +1101,8 @@ class Acceptance(ServiceStack):
         self.report['passed'] = bool(self.report['passed'] and percentage >= .999 and
             not self.report['unexpected_exits'] and not self.report.get('cleanup_errors') and
             not self.report.get('service_cleanup_errors') and not self.report['forced_kills'] and
-            not self.report['failed_attempt_deadline_violations'])
+            not self.report['failed_attempt_deadline_violations'] and
+            all(row['status'] == 'succeeded' for row in self.report['token_renewals']))
         latencies = sorted(row['elapsed_ms'] for row in self.report['raw_attempts'])
         self.report['restart_totals'] = dict(planned=90,
             completed=sum(row.get('completed',False) for row in self.report['role_restarts']),
@@ -1058,10 +1151,12 @@ class Acceptance(ServiceStack):
             for name in ('services/gateway/app/main.cpp','services/lobby/app/main.cpp',
                 'services/lobby/src/LobbyService.cpp','services/lobby/src/LobbyAuthority.cpp',
                 'services/auth/src/AuthService.cpp','services/storage/server.py',
+                'services/room/worker/app/main.cpp','services/room/worker/src/RoomWorker.cpp',
+                'services/room/src/RoomRuntime.cpp',
                 'tests/lobby/ServiceRestartAcceptanceTest.py','tests/lobby/ServiceStackFixture.py',
                 'services/match/include/match/MatchQueue.h','services/match/src/MatchQueue.cpp')}
         binaries = {}
-        for role in ROLES:
+        for role in (*ROLES, 'room'):
             path = Path(getattr(self.args,role)).resolve()
             digest = hashlib.sha256()
             with path.open('rb') as binary:
@@ -1078,6 +1173,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('descriptor','auth','lobby','gateway','pg-bin','report'):
         parser.add_argument('--'+name,type=Path,required=True)
+    parser.add_argument('--room', type=Path)
     parser.add_argument('--repository-root',type=Path,default=ROOT)
     parser.add_argument('--pg-share',type=Path); parser.add_argument('--pg-lib',type=Path)
     parser.add_argument('--battle-ticks',type=int,default=6000)

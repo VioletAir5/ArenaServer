@@ -3,12 +3,6 @@ target_include_directories(arena_lobby_contract INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/api/include)
 target_link_libraries(arena_lobby_contract INTERFACE arena_domain)
 
-add_library(arena_lobby_state src/DurableStateStore.cpp)
-target_include_directories(arena_lobby_state PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(arena_lobby_state PUBLIC arena_shared)
-target_compile_options(arena_lobby_state PRIVATE -Wall -Wextra -Wpedantic
-    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
-
 add_library(arena_lobby_auth src/AuthClient.cpp)
 target_include_directories(arena_lobby_auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(arena_lobby_auth PUBLIC arena_shared)
@@ -22,7 +16,7 @@ add_library(arena_lobby_core
     src/MatchmakingService.cpp)
 target_include_directories(arena_lobby_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(arena_lobby_core PUBLIC
-    arena_lobby_contract arena_shared arena_auth arena_match arena_room spdlog::spdlog)
+    arena_lobby_contract arena_shared arena_auth arena_match arena_room arena_room_wire spdlog::spdlog)
 target_compile_options(arena_lobby_core PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 
@@ -35,7 +29,7 @@ add_custom_command(
            "${lobby_proto_out}/authority_meta.pb.cc" "${lobby_proto_out}/authority_meta.pb.h"
            "${lobby_proto_out}/lobby-private.desc"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${lobby_proto_out}"
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE} --cpp_out "${lobby_proto_out}"
+    COMMAND ${Protobuf_PROTOC_EXECUTABLE} --experimental_allow_proto3_optional --cpp_out "${lobby_proto_out}"
         --descriptor_set_out "${lobby_proto_out}/lobby-private.desc"
         --proto_path "${CMAKE_CURRENT_SOURCE_DIR}/proto"
         "${CMAKE_CURRENT_SOURCE_DIR}/proto/lobby_state.proto"
@@ -55,17 +49,17 @@ target_compile_options(arena_lobby_storage PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 
 add_library(arena_lobby_replay src/ReplayArchive.cpp)
-target_link_libraries(arena_lobby_replay PUBLIC arena_lobby_codec arena_lobby_state)
+target_link_libraries(arena_lobby_replay PUBLIC arena_lobby_codec arena_shared arena_room_wire)
 target_compile_options(arena_lobby_replay PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 
 add_library(arena_lobby_authority src/LobbyAuthority.cpp)
-target_link_libraries(arena_lobby_authority PUBLIC arena_lobby_replay)
+target_link_libraries(arena_lobby_authority PUBLIC arena_lobby_replay arena_lobby_migration arena_lobby_legacy_room_import arena_room_wire)
 target_compile_options(arena_lobby_authority PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 
 add_library(arena_lobby_service src/LobbyService.cpp)
-target_link_libraries(arena_lobby_service PUBLIC arena_lobby_authority arena_lobby_auth arena_lobby_storage)
+target_link_libraries(arena_lobby_service PUBLIC arena_lobby_authority arena_lobby_auth arena_lobby_storage arena_lobby_room_coordinator arena_room_query)
 target_compile_options(arena_lobby_service PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 
@@ -86,8 +80,23 @@ target_link_options(arena_replay_export PRIVATE
 find_package(OpenSSL REQUIRED)
 add_library(arena_lobby_migration src/RoomDirectory.cpp src/RoomMigration.cpp)
 
-target_link_libraries(arena_lobby_migration PUBLIC arena_lobby_codec arena_lobby_state
+target_link_libraries(arena_lobby_migration PUBLIC arena_lobby_codec arena_shared arena_room_wire
     PRIVATE OpenSSL::Crypto)
 
 target_compile_options(arena_lobby_migration PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+add_library(arena_lobby_room_client src/RoomClient.cpp)
+target_include_directories(arena_lobby_room_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(arena_lobby_room_client PUBLIC arena_room_wire arena_shared)
+target_compile_options(arena_lobby_room_client PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+
+add_library(arena_lobby_legacy_room_import src/LegacyRoomImport.cpp)
+target_link_libraries(arena_lobby_legacy_room_import PUBLIC arena_lobby_codec)
+target_compile_options(arena_lobby_legacy_room_import PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+
+add_library(arena_lobby_room_coordinator src/RoomCoordinator.cpp)
+target_link_libraries(arena_lobby_room_coordinator PUBLIC arena_lobby_authority arena_lobby_room_client arena_lobby_legacy_room_import)
+target_compile_options(arena_lobby_room_coordinator PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)

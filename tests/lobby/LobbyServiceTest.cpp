@@ -3,11 +3,15 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -18,8 +22,59 @@
 #include <boost/asio/io_context.hpp>
 #include <gtest/gtest.h>
 
+#include "lobby/ReplayArchive.h"
+#include "room/RoomWire.h"
+#include "room/RoomWorker.h"
 #include "rpc/Server.h"
 #include "security/SecureErase.h"
+
+namespace
+{
+std::atomic<bool> holdLobbySync{false}, lobbySyncHeld{false};
+std::mutex lobbySyncMutex;
+std::condition_variable lobbySyncChanged;
+bool releaseLobbySync{true};
+std::string lobbySyncMarker;
+void unblockLobbySync()
+{
+    std::lock_guard lock(lobbySyncMutex);
+    releaseLobbySync = true;
+    lobbySyncChanged.notify_all();
+}
+} // namespace
+extern "C" int __real_fdatasync(int);
+extern "C" int __wrap_fdatasync(int descriptor)
+{
+    std::array<char, 4096> path{};
+    const auto link = "/proc/self/fd/" + std::to_string(descriptor);
+    const auto count = ::readlink(
+        link.c_str(),
+        path.data(),
+        path.size()
+    );
+    if (count > 0 &&
+        std::string_view(path.data(), static_cast<std::size_t>(count))
+            .ends_with("/lobby/authority.wal") &&
+        holdLobbySync.load())
+    {
+        std::unique_lock lock(lobbySyncMutex);
+        if (!lobbySyncMarker.empty())
+        {
+            std::ifstream journal(link, std::ios::binary);
+            const std::string bytes{
+                std::istreambuf_iterator<char>(journal),
+                {}
+            };
+            if (bytes.find(lobbySyncMarker) == std::string::npos)
+                return __real_fdatasync(descriptor);
+        }
+        holdLobbySync = false;
+        lobbySyncHeld = true;
+        lobbySyncChanged.notify_all();
+        lobbySyncChanged.wait(lock, [] { return releaseLobbySync; });
+    }
+    return __real_fdatasync(descriptor);
+}
 
 namespace service::lobby
 {
@@ -45,8 +100,8 @@ std::int64_t civilNow()
 }
 
 // Auth and Storage are external collaborator fixtures. Authority,
-// WAL, Queue, RoomService, clients and actual RPC sockets remain real
-// in every case.
+// WAL, Queue, two RoomWorkers, clients and actual RPC sockets remain
+// real in every case.
 struct Dependencies
 {
     struct Claims
@@ -56,7 +111,8 @@ struct Dependencies
     };
     boost::asio::io_context& io;
     std::unique_ptr<Server> auth, storage;
-    bool holdAuth{false}, authReady{true}, storageReady{true};
+    bool holdAuth{false}, holdAuthHealth{false}, authReady{true},
+        storageReady{true};
     rpc::Status authError{rpc::OK}, playerError{rpc::OK},
         saveError{rpc::OK};
     bool persistUnknown{false};
@@ -83,7 +139,13 @@ struct Dependencies
                 arena::rpc::Response result;
                 if (!authReady)
                     result.set_status(rpc::UNAVAILABLE);
-                complete(std::move(result));
+                if (holdAuthHealth)
+                    held.emplace_back(
+                        std::move(complete),
+                        std::move(result)
+                    );
+                else
+                    complete(std::move(result));
                 return Server::Cancellation{};
             }
         );
@@ -355,6 +417,8 @@ struct Harness
     std::filesystem::path directory;
     LobbyService::Config config;
     std::unique_ptr<LobbyService> service;
+    std::array<std::unique_ptr<::service::room::RoomWorker>, 2>
+        workers;
     std::uint64_t requestId{0};
     explicit Harness(bool startNow = true)
     {
@@ -367,7 +431,10 @@ struct Harness
                 "cannot create private Lobby journal directory"
             );
         directory = pattern;
-        config.authority.journal.directory = directory;
+        config.authority.journal.directory = directory / "lobby";
+        std::filesystem::create_directories(
+            config.authority.journal.directory
+        );
         config.authority.bootId = "lobby-service-test-boot";
         config.authority.wallNow = civilNow;
         config.authority.rooms.externalTicks = true;
@@ -395,12 +462,58 @@ struct Harness
         config.settlementMaxAttempts = 4;
         config.retryBase = 10ms;
         config.retryMax = 20ms;
+        config.rooms.token = std::string(48, 'r');
+        config.rooms.maxInflight = 32;
+        config.rooms.timeout = 1s;
+        for (std::size_t index = 0; index != workers.size(); ++index)
+        {
+            ::service::room::RoomWorker::Config worker;
+            worker.nodeId = index ? "room-b" : "room-a";
+            worker.token = config.rooms.token;
+            worker.directory = directory / worker.nodeId;
+            workers[index] = std::make_unique<
+                service::room::RoomWorker>(io.get_executor(), worker);
+            config.rooms.nodes.push_back(
+                {worker.nodeId,
+                 {boost::asio::ip::address_v4::loopback(),
+                  workers[index]->port()}}
+            );
+        }
+        if (!until(
+                [&]
+                {
+                    return workers[0]->stats().ready &&
+                           workers[1]->stats().ready;
+                }
+            ))
+            throw std::runtime_error(
+                "real Room workers did not become ready"
+            );
         if (startNow)
             start();
     }
     ~Harness()
     {
+        unblockLobbySync();
         stop();
+        for (auto& worker : workers)
+            worker->stop();
+        EXPECT_TRUE(until(
+            [&]
+            {
+                return workers[0]->stats().stopped &&
+                       workers[1]->stats().stopped;
+            }
+        ));
+        for (auto& worker : workers)
+        {
+            EXPECT_TRUE(worker->stats().journalClosed);
+            EXPECT_EQ(worker->stats().activeJobs, 0u);
+            EXPECT_EQ(worker->stats().journalPending, 0u);
+            EXPECT_EQ(worker->stats().rpcActive, 0u);
+            EXPECT_EQ(worker->stats().rpcPeers, 0u);
+            worker.reset();
+        }
         dependencies.release();
         dependencies.auth->stop();
         dependencies.storage->stop();
@@ -468,6 +581,8 @@ struct Harness
         EXPECT_EQ(service->stats().active, 0u);
         EXPECT_EQ(service->stats().authInflight, 0u);
         EXPECT_EQ(service->stats().storageInflight, 0u);
+        EXPECT_EQ(service->stats().roomInflight, 0u);
+        EXPECT_EQ(service->stats().coordinatorPending, 0u);
         service.reset();
         io.restart();
         io.poll();
@@ -703,12 +818,19 @@ struct Harness
         }
     }
 };
-arena::lobby_meta::Metadata durableMetadata(Harness& fixture)
+struct DurableRooms
+{
+    CoreCheckpoint core;
+    std::map<RoomIdentity, service::room::RuntimeImage> images;
+    std::map<RoomIdentity, RoomRouteLifecycle> lifecycle;
+};
+arena::lobby_meta::Metadata
+durableMetadata(Harness& fixture, DurableRooms* rooms = nullptr)
 {
     fixture.stop();
     arena::lobby_meta::Metadata metadata;
     {
-        DurableStateStore reader(
+        AtomicJournal reader(
             fixture.io.get_executor(),
             fixture.config.authority.journal
         );
@@ -717,18 +839,44 @@ arena::lobby_meta::Metadata durableMetadata(Harness& fixture)
         if (found == snapshot->values.end() ||
             !metadata.ParseFromString(found->second))
             throw std::runtime_error("durable metadata missing");
-        for (const auto& [key, value] : snapshot->values)
-            if (key.starts_with("replay/"))
+        const auto core = decodeCoreCheckpoint(
+            snapshot->values.at("authority/core")
+        );
+        EXPECT_TRUE(core);
+        if (core)
+        {
+            EXPECT_TRUE(core->distributedRooms);
+            EXPECT_TRUE(core->rooms.actors.empty());
+            EXPECT_TRUE(core->rooms.matches.empty());
+        }
+        if (rooms)
+        {
+            if (!core)
+                throw std::runtime_error("missing durable core");
+            rooms->core = *core;
+            RoomMigration migration(
+                fixture.config.authority.directoryLimits,
+                fixture.config.authority.bootId
+            );
+            const auto directory = migration.load(reader);
+            if (!directory)
+                throw std::runtime_error("invalid durable directory");
+            for (const auto id : (*directory)->ids())
             {
-                const auto log = decodeReplayLog(value);
-                EXPECT_TRUE(log);
-                if (log)
-                {
-                    EXPECT_TRUE(
-                        service::room::RoomActor::replay(*log)
+                const auto* route = (*directory)->find(id);
+                auto image = service::room::wire::decodeImage(
+                    route->image.checkpoint
+                );
+                if (!image)
+                    throw std::runtime_error(
+                        "invalid durable room image"
                     );
-                }
+                rooms->images.emplace(id, std::move(*image));
+                rooms->lifecycle.emplace(id, route->lifecycle);
             }
+        }
+        const auto archives = assembleReplayArchives(*snapshot);
+        EXPECT_TRUE(archives);
         reader.stop();
         EXPECT_TRUE(fixture.until([&]
                                   { return reader.stats().closed; }));
@@ -886,6 +1034,653 @@ TEST(
 
 TEST(
     LobbyServiceTest,
+    CommittedSnapshotReadsPreserveInputAckWithoutNewJournalWork
+)
+{
+    Harness h;
+    const auto alice = h.login("alice", 1, "read-snapshot-alice-01");
+    h.joinRoom(1, alice, 73);
+    auto query = h.request(1, &alice);
+    query.mutable_message()->mutable_room_snapshot_request();
+    std::optional<wire::RoomSnapshot> initial;
+    ASSERT_TRUE(h.until(
+        [&]
+        {
+            const auto value = h.execute(query);
+            if (value &&
+                value->message().has_room_snapshot_response())
+                initial = value->message()
+                              .room_snapshot_response()
+                              .state();
+            return initial && initial->players_size() == 1;
+        }
+    ));
+    auto input = h.request(1, &alice);
+    auto* command = input.mutable_message()
+                        ->mutable_room_input_request();
+    command->set_actor_incarnation(initial->incarnation());
+    command->set_membership_epoch(initial->players(0).member_epoch());
+    command->set_seq(1);
+    command->set_dx(1);
+    const auto applied = h.execute(input);
+    ASSERT_TRUE(applied);
+    ASSERT_TRUE(applied->message().has_room_input_response());
+    ASSERT_EQ(
+        applied->message().room_input_response().result(),
+        wire::ROOM_INPUT_APPLIED
+    );
+    const auto acknowledged = applied->message()
+                                  .room_input_response()
+                                  .state();
+    const auto afterAck = h.execute(query);
+    ASSERT_TRUE(afterAck);
+    ASSERT_TRUE(afterAck->message().has_room_snapshot_response());
+    const auto& visible = afterAck->message()
+                              .room_snapshot_response()
+                              .state();
+    ASSERT_EQ(visible.players_size(), 1);
+    EXPECT_EQ(visible.players(0).last_seq(), 1u);
+    EXPECT_GE(visible.tick(), acknowledged.tick());
+    if (visible.tick() == acknowledged.tick())
+    {
+        EXPECT_EQ(visible.checksum(), acknowledged.checksum());
+    }
+    h.config.authority.autoTicks = false;
+    h.restart();
+    h.pump(150ms);
+    const auto stable = h.execute(query);
+    ASSERT_TRUE(stable);
+    ASSERT_TRUE(stable->message().has_room_snapshot_response());
+    const auto
+        expected = stable->message().room_snapshot_response().state();
+    arena::lobby::MigrationStatusRequest status;
+    status.set_version(1);
+    status.set_room_id(expected.room_id());
+    status.set_incarnation(expected.incarnation());
+    const auto canonical = h.service->migrationStatus(status);
+    ASSERT_TRUE(canonical);
+    EXPECT_EQ(expected.tick(), canonical->physical_tick());
+    EXPECT_EQ(expected.checksum(), canonical->checksum());
+    EXPECT_EQ(expected.players(0).last_seq(), 1u);
+    const auto before = h.service->stats();
+    for (unsigned index = 0; index != 24; ++index)
+    {
+        query.mutable_message()->set_request_id(++h.requestId);
+        const auto read = h.execute(query);
+        ASSERT_TRUE(read);
+        ASSERT_TRUE(read->message().has_room_snapshot_response());
+        EXPECT_EQ(
+            read->message().request_id(),
+            query.message().request_id()
+        );
+        EXPECT_EQ(
+            read->message()
+                .room_snapshot_response()
+                .state()
+                .SerializeAsString(),
+            expected.SerializeAsString()
+        );
+        EXPECT_EQ(
+            read->committed_revision(),
+            before.committedRevision
+        );
+    }
+    EXPECT_EQ(
+        h.service->stats().committedRevision,
+        before.committedRevision
+    );
+    EXPECT_EQ(h.service->stats().roomTicks, before.roomTicks);
+}
+
+TEST(
+    LobbyServiceTest,
+    CommittedTerminalQueriesRetainExactLogicalCohortWithoutWrites
+)
+{
+    Harness h;
+    const auto match = h.match();
+    h.ready(match);
+    std::optional<wire::RoomStatus> finished;
+    ASSERT_TRUE(h.until(
+        [&]
+        {
+            const auto read = h.roomStatus(1, match.alice);
+            if (read && read->message().has_room_status_response())
+                finished = read->message()
+                               .room_status_response()
+                               .state();
+            return finished &&
+                   finished->phase() == wire::ROOM_PHASE_FINISHED;
+        }
+    ));
+    h.config.authority.autoTicks = false;
+    h.restart();
+    h.pump(150ms);
+    auto query = h.request(1, &match.alice);
+    query.mutable_message()
+        ->mutable_settlement_request()
+        ->set_match_id(match.id);
+    const auto before = h.service->stats();
+    for (unsigned index = 0; index != 12; ++index)
+    {
+        const auto status = h.roomStatus(1, match.alice);
+        ASSERT_TRUE(status);
+        ASSERT_TRUE(status->message().has_room_status_response());
+        EXPECT_EQ(
+            status->message()
+                .room_status_response()
+                .state()
+                .SerializeAsString(),
+            finished->SerializeAsString()
+        );
+        EXPECT_EQ(
+            status->committed_revision(),
+            before.committedRevision
+        );
+        query.mutable_message()->set_request_id(++h.requestId);
+        const auto result = h.execute(query);
+        ASSERT_TRUE(result);
+        ASSERT_TRUE(result->message().has_settlement_response());
+        EXPECT_EQ(
+            result->message()
+                .settlement_response()
+                .state()
+                .SerializeAsString(),
+            finished->settlement().SerializeAsString()
+        );
+        EXPECT_EQ(
+            result->committed_revision(),
+            before.committedRevision
+        );
+    }
+    EXPECT_EQ(
+        h.service->stats().committedRevision,
+        before.committedRevision
+    );
+    EXPECT_EQ(h.service->stats().roomTicks, before.roomTicks);
+    const auto fresh = h.login(
+        "alice",
+        3,
+        "read-new-logical-session-01"
+    );
+    ASSERT_NE(
+        fresh.session().session_id(),
+        match.alice.session().session_id()
+    );
+    businessError(
+        h.roomStatus(1, match.alice),
+        wire::ERR_UNAUTHENTICATED
+    );
+    businessError(h.roomStatus(3, fresh), wire::ERR_BUSINESS_FAILURE);
+    auto outsider = h.request(3, &fresh);
+    outsider.mutable_message()
+        ->mutable_settlement_request()
+        ->set_match_id(match.id);
+    businessError(h.execute(outsider), wire::ERR_BUSINESS_FAILURE);
+}
+
+TEST(LobbyServiceTest, CommittedReadsCannotRenewExpiredTransportOrJwt)
+{
+    {
+        auto now = Clock::now();
+        Harness h(false);
+        h.config.authority.now = [&] { return now; };
+        h.config.transportLease = 150ms;
+        h.start();
+        const auto alice = h.login(
+            "alice",
+            1,
+            "read-lease-alice-00001"
+        );
+        h.joinRoom(1, alice, 74);
+        auto query = h.request(1, &alice);
+        query.mutable_message()->mutable_room_snapshot_request();
+        const auto seeded = h.execute(query);
+        ASSERT_TRUE(seeded);
+        ASSERT_TRUE(seeded->message().has_room_snapshot_response());
+        ASSERT_EQ(
+            seeded->message()
+                .room_snapshot_response()
+                .state()
+                .players_size(),
+            1
+        );
+        h.config.authority.autoTicks = false;
+        h.restart();
+        h.pump(150ms);
+        const auto before = h.service->stats().committedRevision;
+        now += 100ms;
+        const auto read = h.execute(query);
+        ASSERT_TRUE(read);
+        ASSERT_TRUE(read->message().has_room_snapshot_response());
+        EXPECT_EQ(read->committed_revision(), before);
+        now += 51ms;
+        businessError(h.execute(query), wire::ERR_UNAUTHENTICATED);
+        businessError(h.execute(query), wire::ERR_UNAUTHENTICATED);
+        EXPECT_EQ(h.service->stats().committedRevision, before);
+        EXPECT_EQ(h.dependencies.authCalls, 1u);
+    }
+    {
+        auto wall = civilNow();
+        Harness h(false);
+        h.config.authority.wallNow = [&] { return wall; };
+        h.config.authority.autoTicks = false;
+        h.start();
+        const auto alice = h.login(
+            "alice",
+            1,
+            "read-expiry-alice-0001"
+        );
+        h.joinRoom(1, alice, 75);
+        auto query = h.request(1, &alice);
+        query.mutable_message()->mutable_room_snapshot_request();
+        const auto before = h.service->stats().committedRevision;
+        wall = alice.session().expires_at_unix();
+        businessError(h.execute(query), wire::ERR_UNAUTHENTICATED);
+        EXPECT_EQ(h.service->stats().committedRevision, before);
+        EXPECT_EQ(h.dependencies.authCalls, 1u);
+    }
+}
+
+TEST(
+    LobbyServiceTest,
+    CommittedSnapshotsConvergeAfterJoinLeaveAndRejoin
+)
+{
+    Harness h;
+    const auto alice = h.login("alice", 1, "read-roster-alice-0001");
+    const auto bob = h.login("bob", 2, "read-roster-bob-000001");
+    h.joinRoom(1, alice, 76);
+    auto query = h.request(1, &alice);
+    query.mutable_message()->mutable_room_snapshot_request();
+    std::optional<wire::RoomSnapshot> image;
+    const auto readMembers = [&](unsigned count)
+    {
+        const auto read = h.execute(query);
+        if (read && read->message().has_room_snapshot_response())
+            image = read->message().room_snapshot_response().state();
+        return image &&
+               image->players_size() == static_cast<int>(count);
+    };
+    ASSERT_TRUE(h.until([&] { return readMembers(1); }));
+    const auto oldEpoch = image->players(0).member_epoch();
+    h.joinRoom(2, bob, 76);
+    ASSERT_TRUE(h.until([&] { return readMembers(2); }));
+    auto leave = h.request(1, &alice);
+    leave.mutable_message()->mutable_room_leave_request();
+    const auto left = h.execute(leave);
+    ASSERT_TRUE(left);
+    ASSERT_TRUE(left->message().has_room_leave_response());
+    query = h.request(2, &bob);
+    query.mutable_message()->mutable_room_snapshot_request();
+    ASSERT_TRUE(h.until([&] { return readMembers(1); }));
+    EXPECT_EQ(
+        image->players(0).player_id(),
+        bob.session().player_id()
+    );
+    h.joinRoom(1, alice, 76);
+    ASSERT_TRUE(h.until([&] { return readMembers(2); }));
+    const auto found = std::find_if(
+        image->players().begin(),
+        image->players().end(),
+        [&](const auto& player)
+        { return player.player_id() == alice.session().player_id(); }
+    );
+    ASSERT_NE(found, image->players().end());
+    EXPECT_GT(found->member_epoch(), oldEpoch);
+}
+
+TEST(
+    LobbyServiceTest,
+    CancelledRoomWaiterDoesNotDiscardItsPhysicallyAdmittedCommand
+)
+{
+    Harness h;
+    const auto alice = h.login("alice", 1, "cancel-room-command-01");
+    h.joinRoom(1, alice, 71);
+    auto snapshotRequest = h.request(1, &alice);
+    snapshotRequest.mutable_message()
+        ->mutable_room_snapshot_request();
+    const auto snapshot = h.execute(snapshotRequest);
+    ASSERT_TRUE(snapshot);
+    ASSERT_TRUE(snapshot->message().has_room_snapshot_response());
+    const auto
+        first = snapshot->message().room_snapshot_response().state();
+    ASSERT_EQ(first.players_size(), 1);
+    service::room::RuntimeCommand command;
+    command.kind = service::room::RuntimeCommandKind::Input;
+    command.caller = service::room::RuntimeAuthorization{
+        {arena::domain::PlayerId{42},
+         arena::domain::SessionId{alice.session().session_id()},
+         first.players(0).member_epoch()},
+        alice.session().epoch(),
+        1,
+        true
+    };
+    command.incarnation = first.incarnation();
+    command.sequence = 1;
+    command.dx = 1;
+    command.dy = -1;
+    const auto marker = service::room::wire::encodeCommand(command);
+    ASSERT_TRUE(marker);
+    auto input = h.request(1, &alice);
+    auto* control = input.mutable_message()
+                        ->mutable_room_input_request();
+    control->set_actor_incarnation(first.incarnation());
+    control->set_membership_epoch(first.players(0).member_epoch());
+    control->set_seq(1);
+    control->set_dx(1);
+    control->set_dy(-1);
+    const auto revision = h.service->stats().committedRevision;
+    {
+        std::lock_guard lock(lobbySyncMutex);
+        lobbySyncMarker = *marker;
+        lobbySyncHeld = false;
+        releaseLobbySync = false;
+        holdLobbySync = true;
+    }
+    unsigned callbacks = 0;
+    std::optional<Execute> result;
+    auto accepted = h.service->execute(
+        input,
+        Harness::context(),
+        [&](auto value)
+        {
+            ++callbacks;
+            result.emplace(std::move(value));
+        }
+    );
+    ASSERT_TRUE(accepted);
+    // The hook matches this command's complete canonical payload in a
+    // newly written frame; an unrelated background tick cannot
+    // satisfy the hold.
+    ASSERT_TRUE(h.until([] { return lobbySyncHeld.load(); }));
+    EXPECT_FALSE(result);
+    EXPECT_GE(h.service->stats().committedRevision, revision);
+    (*accepted)();
+    ASSERT_TRUE(h.until([&] { return result.has_value(); }));
+    ASSERT_FALSE(*result);
+    EXPECT_EQ(result->error(), rpc::CANCELLED);
+    unblockLobbySync();
+    std::optional<wire::RoomSnapshot> current;
+    ASSERT_TRUE(h.until(
+        [&]
+        {
+            const auto recovered = h.execute(snapshotRequest);
+            if (recovered &&
+                recovered->message().has_room_snapshot_response())
+                current = recovered->message()
+                              .room_snapshot_response()
+                              .state();
+            return current && current->players_size() == 1 &&
+                   current->players(0).last_seq() == 1;
+        }
+    ));
+    EXPECT_EQ(current->players(0).last_dx(), 1);
+    EXPECT_EQ(current->players(0).last_dy(), -1);
+    const auto duplicate = h.execute(input);
+    ASSERT_TRUE(duplicate);
+    ASSERT_TRUE(duplicate->message().has_room_input_response());
+    EXPECT_EQ(
+        duplicate->message().room_input_response().result(),
+        wire::ROOM_INPUT_DUPLICATE
+    );
+    EXPECT_EQ(callbacks, 1u);
+}
+
+TEST(
+    LobbyServiceTest,
+    LobbyRestartRetainsTheActualWorkerOwnerAndItsInputSequence
+)
+{
+    Harness h;
+    const std::array identities{
+        h.workers[0]->stats().workerId,
+        h.workers[1]->stats().workerId
+    };
+    const auto alice = h.login("alice", 1, "worker-owner-restart-01");
+    h.joinRoom(1, alice, 72);
+    auto query = h.request(1, &alice);
+    query.mutable_message()->mutable_room_snapshot_request();
+    auto before = h.execute(query);
+    ASSERT_TRUE(before);
+    ASSERT_TRUE(before->message().has_room_snapshot_response());
+    const auto
+        initial = before->message().room_snapshot_response().state();
+    ASSERT_EQ(initial.players_size(), 1);
+    auto input = h.request(1, &alice);
+    auto* control = input.mutable_message()
+                        ->mutable_room_input_request();
+    control->set_actor_incarnation(initial.incarnation());
+    control->set_membership_epoch(initial.players(0).member_epoch());
+    control->set_seq(1);
+    control->set_dx(1);
+    const auto applied = h.execute(input);
+    ASSERT_TRUE(applied);
+    ASSERT_TRUE(applied->message().has_room_input_response());
+    h.restart();
+    EXPECT_EQ(h.workers[0]->stats().workerId, identities[0]);
+    EXPECT_EQ(h.workers[1]->stats().workerId, identities[1]);
+    const auto after = h.execute(query);
+    ASSERT_TRUE(after);
+    ASSERT_TRUE(after->message().has_room_snapshot_response());
+    const auto&
+        state = after->message().room_snapshot_response().state();
+    EXPECT_EQ(state.incarnation(), initial.incarnation());
+    ASSERT_EQ(state.players_size(), 1);
+    EXPECT_EQ(state.players(0).last_seq(), 1u);
+    EXPECT_EQ(
+        state.players(0).member_epoch(),
+        initial.players(0).member_epoch()
+    );
+    control->set_seq(2);
+    const auto continued = h.execute(input);
+    ASSERT_TRUE(continued);
+    ASSERT_TRUE(continued->message().has_room_input_response());
+    EXPECT_EQ(
+        continued->message().room_input_response().result(),
+        wire::ROOM_INPUT_APPLIED
+    );
+    EXPECT_EQ(
+        continued->message()
+            .room_input_response()
+            .state()
+            .players(0)
+            .last_seq(),
+        2u
+    );
+}
+
+TEST(
+    LobbyServiceTest,
+    RejectedManualRoomJoinsCannotAllocateDurableOrWorkerState
+)
+{
+    Harness h;
+    const auto match = h.match();
+    DurableRooms beforeRooms;
+    const auto before = durableMetadata(h, &beforeRooms);
+    h.start();
+    // Readiness probes finish before cached routes are reinstalled.
+    const auto recovered = h.roomStatus(1, match.alice);
+    ASSERT_TRUE(recovered);
+    ASSERT_TRUE(recovered->message().has_room_status_response());
+    EXPECT_EQ(
+        recovered->message()
+            .room_status_response()
+            .state()
+            .snapshot()
+            .room_id(),
+        match.room
+    );
+    const auto activeWorkers = [&]
+    {
+        return h.workers[0]->stats().activeRoutes +
+               h.workers[1]->stats().activeRoutes;
+    };
+    const auto activeBefore = activeWorkers();
+    auto reserved = h.request(1, &match.alice);
+    reserved.mutable_message()
+        ->mutable_room_join_request()
+        ->set_room_id((std::uint64_t{1} << 63) | 7);
+    businessError(h.execute(reserved), wire::ERR_BUSINESS_FAILURE);
+    auto impossible = h.request(1, &match.alice);
+    impossible.mutable_message()
+        ->mutable_room_join_request()
+        ->set_room_id(93);
+    businessError(h.execute(impossible), wire::ERR_BUSINESS_FAILURE);
+    h.pump(100ms);
+    EXPECT_EQ(activeWorkers(), activeBefore);
+    DurableRooms afterRooms;
+    const auto after = durableMetadata(h, &afterRooms);
+    EXPECT_EQ(
+        after.incarnation_high_water(),
+        before.incarnation_high_water()
+    );
+    EXPECT_EQ(
+        after.pending_rooms_size(),
+        before.pending_rooms_size()
+    );
+    EXPECT_EQ(afterRooms.images.size(), beforeRooms.images.size());
+    for (const auto& [id, image] : afterRooms.images)
+    {
+        (void)image;
+        EXPECT_NE(id.room, 93u);
+    }
+}
+
+TEST(
+    LobbyServiceTest,
+    LiveWorkerMetricsMoveToRetiredLedgerWithoutDropsOrDuplicates
+)
+{
+    {
+        Harness h;
+        const auto alice = h.login(
+            "alice",
+            1,
+            "live-metric-manual-001"
+        );
+        h.joinRoom(1, alice, 94);
+        auto query = h.request(1, &alice);
+        query.mutable_message()->mutable_room_snapshot_request();
+        const auto snapshot = h.execute(query);
+        ASSERT_TRUE(snapshot);
+        ASSERT_TRUE(snapshot->message().has_room_snapshot_response());
+        const auto actor = snapshot->message()
+                               .room_snapshot_response()
+                               .state();
+        EXPECT_EQ(h.service->stats().roomActors, 1u);
+        EXPECT_GE(h.service->stats().roomTicks, actor.tick());
+        auto leave = h.request(1, &alice);
+        leave.mutable_message()->mutable_room_leave_request();
+        const auto left = h.execute(leave);
+        ASSERT_TRUE(left);
+        ASSERT_TRUE(left->message().has_room_leave_response());
+        ASSERT_TRUE(h.until(
+            [&]
+            {
+                return h.workers[0]->stats().activeRoutes +
+                           h.workers[1]->stats().activeRoutes ==
+                       0;
+            }
+        ));
+        const auto retired = h.service->stats();
+        DurableRooms facts;
+        durableMetadata(h, &facts);
+        const RoomIdentity id{94, actor.incarnation()};
+        ASSERT_EQ(
+            facts.lifecycle.at(id),
+            RoomRouteLifecycle::Retired
+        );
+        EXPECT_EQ(retired.roomActors, 0u);
+        EXPECT_EQ(
+            retired.roomTicks,
+            facts.images.at(id).counters.ticks
+        );
+        EXPECT_EQ(
+            facts.core.rooms.unattributedCounters.ticks,
+            facts.images.at(id).counters.ticks
+        );
+        h.start();
+        h.pump(100ms);
+        EXPECT_EQ(h.service->stats().roomTicks, retired.roomTicks);
+        EXPECT_EQ(h.service->stats().roomActors, 0u);
+    }
+    {
+        Harness h(false);
+        h.config.authority.rooms.battleDurationTicks = 1;
+        h.config.authority.rooms.resultRetention = 500ms;
+        h.start();
+        const auto match = h.match();
+        h.ready(match);
+        std::optional<wire::RoomStatus> finished;
+        ASSERT_TRUE(h.until(
+            [&]
+            {
+                const auto status = h.roomStatus(1, match.alice);
+                if (status &&
+                    status->message().has_room_status_response() &&
+                    status->message()
+                            .room_status_response()
+                            .state()
+                            .phase() == wire::ROOM_PHASE_FINISHED)
+                    finished = status->message()
+                                   .room_status_response()
+                                   .state();
+                return finished.has_value();
+            }
+        ));
+        EXPECT_EQ(h.service->stats().roomActors, 1u);
+        EXPECT_EQ(h.service->stats().settlementsCommitted, 1u);
+        EXPECT_GE(
+            h.service->stats().roomTicks,
+            finished->snapshot().tick()
+        );
+        ASSERT_TRUE(h.until(
+            [&]
+            {
+                return h.workers[0]->stats().activeRoutes +
+                           h.workers[1]->stats().activeRoutes ==
+                       0;
+            }
+        ));
+        EXPECT_EQ(h.service->stats().roomActors, 0u);
+        EXPECT_EQ(h.service->stats().settlementsCommitted, 1u);
+        h.restart();
+        EXPECT_EQ(h.service->stats().settlementsCommitted, 1u);
+    }
+    {
+        Harness h(false);
+        h.config.settlementMaxAttempts = 1;
+        h.dependencies.saveError = rpc::INTERNAL;
+        h.start();
+        const auto match = h.match();
+        h.ready(match);
+        ASSERT_TRUE(
+            h.until([&] { return h.dependencies.saveCalls == 1; })
+        );
+        h.pump(150ms);
+        const auto metadata = durableMetadata(h);
+        ASSERT_EQ(metadata.settlements_size(), 1);
+        ASSERT_EQ(
+            metadata.settlements(0).phase(),
+            arena::lobby_meta::SettlementDelivery::BLOCKED
+        );
+        h.start();
+        EXPECT_TRUE(h.until(
+            [&] { return h.service->stats().settlementsBlocked == 1; }
+        ));
+        EXPECT_EQ(h.service->stats().roomActors, 1u);
+        EXPECT_GT(h.service->stats().roomTicks, 0u);
+        EXPECT_EQ(h.service->stats().settlementsCommitted, 0u);
+        h.restart();
+        EXPECT_EQ(h.service->stats().settlementsBlocked, 1u);
+    }
+}
+
+TEST(
+    LobbyServiceTest,
     PasswordReceiptSurvivesRestartAndCannotStealANewerPasswordSession
 )
 {
@@ -934,7 +1729,7 @@ TEST(
     );
     h.stop();
     std::ifstream input(
-        h.directory / "authority.wal",
+        h.config.authority.journal.directory / "authority.wal",
         std::ios::binary
     );
     const std::string contents(
@@ -1547,7 +2342,7 @@ TEST(
     Harness h(false);
     {
         std::ofstream corrupted(
-            h.directory / "authority.wal",
+            h.config.authority.journal.directory / "authority.wal",
             std::ios::binary
         );
         corrupted << "invalid-private-journal";
@@ -1607,5 +2402,55 @@ TEST(
     );
 }
 
+TEST(
+    LobbyServiceProbeFence,
+    ChangedDiscoveryCannotReusePreviousReadyObservation
+)
+{
+    Harness h(false);
+    auto snapshot = [&](unsigned version)
+    {
+        const auto name = version == 1 ? "old" : "replacement";
+        const std::string
+            document = "{\"version\":\"" + std::to_string(version) +
+                       "\",\"desiredReady\":true,\"drainGraceMs\":"
+                       "100,\"nodes\":["
+                       "{\"service\":\"auth\",\"nodeId\":\"" +
+                       name + "\",\"host\":\"127.0.0.1\",\"port\":" +
+                       std::to_string(h.dependencies.auth->port()) +
+                       ",\"ready\":true},"
+                       "{\"service\":\"storage\",\"nodeId\":\"" +
+                       name + "\",\"host\":\"127.0.0.1\",\"port\":" +
+                       std::to_string(
+                           h.dependencies.storage->port()
+                       ) +
+                       ",\"ready\":true}]}";
+        auto parsed = arena::runtime::ConfigSnapshot::parse(document);
+        if (!parsed)
+            throw std::runtime_error("invalid probe snapshot");
+        return *parsed;
+    };
+    auto store = std::make_shared<arena::runtime::ConfigStore>(
+        snapshot(1)
+    );
+    h.config.auth.runtime = store;
+    h.config.storage.runtime = store;
+    h.start();
+    ASSERT_TRUE(h.service->stats().ready);
+    h.dependencies.holdAuthHealth = true;
+    ASSERT_TRUE(h.until([&]
+                        { return !h.dependencies.held.empty(); }));
+    ASSERT_TRUE(store->publish(snapshot(2)));
+    EXPECT_FALSE(
+        h.service->stats().ready
+    ) << "new route identity has no successful readiness observation";
+    h.dependencies.holdAuthHealth = false;
+    h.dependencies.release();
+    h.pump(20ms);
+    EXPECT_FALSE(h.service->stats().ready)
+        << "late successful old-version probe cannot authorize the "
+           "new route";
+    EXPECT_TRUE(h.until([&] { return h.service->stats().ready; }));
+}
 } // namespace
 } // namespace service::lobby

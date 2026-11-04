@@ -9,18 +9,23 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <boost/asio/any_io_executor.hpp>
 
 #include "authority_meta.pb.h"
 #include "envelope.pb.h"
 #include "lobby/AuthorityCodec.h"
-#include "lobby/DurableStateStore.h"
+#include "lobby/RoomMigration.h"
+#include "persistence/AtomicJournal.h"
+#include "room/RoomRuntime.h"
 
 namespace service::lobby
 {
+using arena::persistence::AtomicJournal;
 /** @brief Serializes isolated business candidates and one physical
  * WAL write. The supplied executor must keep pumping until
  * stats().stopped. Mutable models exist only inside one owner
@@ -42,13 +47,14 @@ public:
     {
         /// Exclusive local journal; opening/recovery precedes
         /// readiness.
-        DurableStateStore::Config journal;
+        AtomicJournal::Config journal;
         /// Linux boot identity fencing unmapped steady-clock
         /// deadlines.
         std::string bootId;
         OnlineRegistryConfig registry;
         service::match::QueueConfig queue;
         RoomServiceConfig rooms;
+        RoomDirectoryLimits directoryLimits;
         /// Control jobs, including undelivered completions.
         std::size_t maxPending{128};
         /// Tick jobs, including physical writes and completion
@@ -71,13 +77,21 @@ public:
         std::uint64_t revision{0};
         CoreCheckpoint core;
         arena::lobby_meta::Metadata meta;
+        std::shared_ptr<const RoomDirectory> directory;
+        std::map<
+            RoomIdentity,
+            std::shared_ptr<const service::room::RuntimeImage>>
+            roomImages;
     };
     struct WorkingState
     {
     private:
         struct Auxiliary;
         friend struct State;
-        explicit WorkingState(std::shared_ptr<Auxiliary>);
+        explicit WorkingState(
+            std::shared_ptr<Auxiliary>,
+            std::shared_ptr<const Snapshot>
+        );
         /// Owns the frozen clocks, metadata and disposable effect
         /// collector.
         std::shared_ptr<Auxiliary> m_aux;
@@ -87,7 +101,15 @@ public:
         /// is forbidden.
         std::shared_ptr<OnlineRegistry> online;
         std::unique_ptr<service::match::MatchQueue> queue;
-        std::unique_ptr<RoomService> rooms;
+        /// Committed routing and worker values; never a local
+        /// simulation.
+        const std::shared_ptr<const Snapshot> base;
+        /// Composed once with registry/queue/metadata in the same WAL
+        /// CAS.
+        std::vector<RoomDirectoryCommand> roomChanges;
+        /// Passive remaining v1 values until their real worker Stage
+        /// succeeds.
+        RoomCheckpoint legacyRooms;
         arena::lobby_meta::Metadata& meta;
         const Clock::time_point now;
         const std::int64_t wallNow;
@@ -132,7 +154,7 @@ public:
         std::size_t pending{0}, roomPending{0};
         std::uint64_t committed{0}, rejected{0}, cancelled{0},
             callbackFailures{0};
-        DurableStateStore::Stats journal;
+        AtomicJournal::Stats journal;
     };
 
     /** @brief Queues startup recovery; listeners must wait for

@@ -7,6 +7,8 @@
 #include "lobby/OnlineRegistry.h"
 #include "lobby/RoomService.h"
 #include "match/MatchQueue.h"
+#include "room.pb.h"
+#include "room/RoomRuntime.h"
 namespace service::lobby
 {
 void encodeState(
@@ -26,6 +28,25 @@ void encodeRoomStatus(
 );
 void encodeSettlement(
     const RoomSettlement&, arena::protocol::SettlementResult&
+);
+/** @brief Projects immutable worker state without constructing a room
+ * kernel. */
+void encodeRoomStatus(
+    const service::room::RuntimeImage&, arena::protocol::RoomStatus&
+);
+/** @brief Projects one complete immutable worker settlement intent.
+ */
+void encodeSettlement(
+    const service::room::RuntimeSettlement&,
+    arena::protocol::SettlementResult&
+);
+/** @brief Builds a request-independent durable public receipt for one
+ * command. */
+std::expected<arena::protocol::Envelope, arena::protocol::ErrorCode>
+encodeRoomReply(
+    const service::room::RuntimeCommand&,
+    const arena::room::CommandResult&,
+    const service::room::RuntimeImage&
 );
 arena::protocol::RoomInputStatus
     wireStatus(service::room::InputStatus);

@@ -637,10 +637,14 @@ HTTP is read-only and loopback-only. It has at most 16 admitted connections, a
 250 ms request deadline, 4096-byte headers, at most 64 header lines and a 16 KiB
 JSON response limit. These endpoints do not require the business RPC credential.
 The PG readiness cache refreshes every 250 ms using a real repository query with
-a 250 ms context deadline; a result from an earlier config version cannot make
-the current version ready. Saturated workers or an unavailable database make
-readiness fail. Internal `health.ready` RPC remains admissible during quiesce,
-checks operator intent and performs its own bounded PG query.
+a 250 ms context deadline. HTTP and internal `health.ready` share that result,
+which must match the current config version and be less than 500 ms old. Health
+RPCs do not consume additional SQL worker slots. Probe admission overload keeps
+the previous observation without renewing its timestamp; the 500 ms limit still
+expires it. Actual query, connection and deadline failures immediately mark the
+dependency unavailable. Operator intent, local node readiness and terminal drain
+apply to both health interfaces. Standalone Storage without the runtime control
+plane continues to perform a bounded PG query for `health.ready`.
 
 Publishing `desiredReady: false` (or `ready: false` on the matching local record)
 rejects new business RPCs while accepted requests finish. It leaves the RPC

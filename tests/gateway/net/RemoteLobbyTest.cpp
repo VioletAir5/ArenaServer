@@ -925,6 +925,98 @@ TEST(
 }
 
 TEST(
+    RemoteLobbyClientTest,
+    SuccessfulHealthRefreshNeverPublishesTemporaryNotReady
+)
+{
+    Network network;
+    network.client->stop();
+    ASSERT_TRUE(
+        network.until([&] { return network.client->stats().stopped; })
+    );
+    std::string document =
+        R"({"version":"1","desiredReady":true,"drainGraceMs":0,"nodes":[)";
+    for (unsigned index = 0; index < 128; ++index)
+    {
+        if (index)
+            document += ",";
+        document += R"({"service":"lobby","nodeId":"lobby-)" +
+                    std::to_string(1000 + index) +
+                    R"(","host":"127.0.0.1","port":)" +
+                    std::to_string(network.server->port()) +
+                    R"(,"ready":)" +
+                    (index == 127 ? "true" : "false") + "}";
+    }
+    document += "]}";
+    const auto snapshot = arena::runtime::ConfigSnapshot::parse(
+        document
+    );
+    ASSERT_TRUE(snapshot);
+    auto runtime = std::make_shared<arena::runtime::ConfigStore>(
+        *snapshot
+    );
+    LobbyClient::Config config;
+    config.endpoint.port(network.server->port());
+    config.serviceToken = std::string(32, 'g');
+    config.gatewayInstance = std::string(32, 'a');
+    config.runtime = runtime;
+    network.client = std::make_shared<LobbyClient>(
+        network.io.get_executor(),
+        std::move(config)
+    );
+    ASSERT_TRUE(network.until(
+        [&] { return network.client->stats().dependencyReady; }
+    ));
+    const auto previousCalls = network.healthCalls;
+    std::atomic<std::uint64_t> observations{0}, falseObservations{0};
+    std::jthread observer(
+        [&](std::stop_token stopped)
+        {
+            while (!stopped.stop_requested())
+            {
+                if (!network.client->stats().dependencyReady)
+                    ++falseObservations;
+                ++observations;
+            }
+        }
+    );
+    ASSERT_TRUE(network.until(
+        [&]
+        {
+            return network.healthCalls >= previousCalls + 3 &&
+                   !network.client->stats().probeInflight;
+        }
+    ));
+    observer.request_stop();
+    observer.join();
+    EXPECT_GT(observations.load(), 0);
+    EXPECT_EQ(falseObservations.load(), 0);
+    document.replace(
+        document.find("\"version\":\"1\""),
+        13,
+        "\"version\":\"2\""
+    );
+    const auto replacement = arena::runtime::ConfigSnapshot::parse(
+        document
+    );
+    ASSERT_TRUE(replacement);
+    ASSERT_TRUE(runtime->publish(*replacement));
+    EXPECT_FALSE(network.client->stats().dependencyReady);
+    ASSERT_TRUE(network.until(
+        [&] { return network.client->stats().dependencyReady; }
+    ));
+    network.authReady = false;
+    ASSERT_TRUE(network.until(
+        [&] { return !network.client->stats().dependencyReady; }
+    ));
+    network.client->stop();
+    EXPECT_FALSE(network.client->stats().dependencyReady);
+    ASSERT_TRUE(
+        network.until([&] { return network.client->stats().stopped; })
+    );
+}
+
+TEST(
     RemoteLobbyClientTest, RejectsActualLegacyVersionReplyWithoutRetry
 )
 {

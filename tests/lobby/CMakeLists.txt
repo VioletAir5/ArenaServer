@@ -1,11 +1,4 @@
-add_executable(arena_lobby_state_tests DurableStateStoreTest.cpp)
-target_link_libraries(arena_lobby_state_tests PRIVATE arena_lobby_state GTest::gtest_main)
-target_compile_options(arena_lobby_state_tests PRIVATE -Wall -Wextra -Wpedantic
-    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
-target_link_options(arena_lobby_state_tests PRIVATE -Wl,--wrap=fdatasync -Wl,--wrap=renameat -Wl,--wrap=fsync
-    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
 include(GoogleTest)
-gtest_discover_tests(arena_lobby_state_tests)
 
 add_executable(arena_verified_session_tests VerifiedSessionTest.cpp)
 target_link_libraries(arena_verified_session_tests PRIVATE arena_lobby_core GTest::gtest_main)
@@ -63,7 +56,7 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
     endif()
     set(lobby_process_arguments --repository-root "${PROJECT_SOURCE_DIR}"
         --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
-        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>" --room "$<TARGET_FILE:ArenaRoom>"
         --gateway "$<TARGET_FILE:ArenaServer>"
         --replay "$<TARGET_FILE:arena_replay>" --replay-export "$<TARGET_FILE:arena_replay_export>" --pg-bin "${lobby_process_pg_bin}"
         --report "${CMAKE_CURRENT_BINARY_DIR}/lobby-process-report.json")
@@ -83,10 +76,41 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
         ${lobby_process_arguments})
     set_tests_properties(LobbyProcessAcceptance PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
         LABELS "integration;lobby;rpc;postgresql;process;recovery")
+    set(room_migration_process_arguments --repository-root "${PROJECT_SOURCE_DIR}"
+        --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --room "$<TARGET_FILE:ArenaRoom>" --gateway "$<TARGET_FILE:ArenaServer>"
+        --replay "$<TARGET_FILE:arena_replay>" --replay-export "$<TARGET_FILE:arena_replay_export>"
+        --pg-bin "${lobby_process_pg_bin}"
+        --report "${CMAKE_CURRENT_BINARY_DIR}/room-migration-process-report.json")
+    if(ARENA_POSTGRES_SHARE)
+        list(APPEND room_migration_process_arguments --pg-share "${ARENA_POSTGRES_SHARE}")
+    endif()
+    add_test(NAME RoomMigrationProcessAcceptance COMMAND ${lobby_process_clock}
+        "${lobby_process_python}" "${CMAKE_CURRENT_SOURCE_DIR}/RoomMigrationProcessTest.py"
+        ${room_migration_process_arguments})
+    set_tests_properties(RoomMigrationProcessAcceptance PROPERTIES TIMEOUT 1400 RUN_SERIAL TRUE
+        LABELS "integration;room;migration;rpc;postgresql;process;recovery")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # The fixture gates real WAL synchronization only in selected test children.
+        add_library(arena_room_fsync_fault SHARED support/RoomFsyncFaultShim.c)
+        target_compile_features(arena_room_fsync_fault PRIVATE c_std_11)
+        target_compile_options(arena_room_fsync_fault PRIVATE -Wall -Wextra -Wpedantic)
+        target_link_libraries(arena_room_fsync_fault PRIVATE ${CMAKE_DL_LIBS})
+        string(REPLACE "room-migration-process-report.json" "room-migration-fault-report.json"
+            room_migration_fault_arguments "${room_migration_process_arguments}")
+        add_test(NAME RoomMigrationFaultAcceptance COMMAND ${lobby_process_clock}
+            "${lobby_process_python}" "${CMAKE_CURRENT_SOURCE_DIR}/RoomMigrationFaultTest.py"
+            ${room_migration_fault_arguments}
+            --fsync-shim "$<TARGET_FILE:arena_room_fsync_fault>"
+            --total-timeout 600)
+        set_tests_properties(RoomMigrationFaultAcceptance PROPERTIES TIMEOUT 680 RUN_SERIAL TRUE
+            LABELS "integration;room;migration;fault;rpc;postgresql;process;recovery")
+    endif()
 endif()
 
 add_executable(arena_lobby_authority_tests LobbyAuthorityTest.cpp)
-target_link_libraries(arena_lobby_authority_tests PRIVATE arena_lobby_authority GTest::gtest_main)
+target_link_libraries(arena_lobby_authority_tests PRIVATE arena_lobby_authority arena_room_runtime arena_room_wire GTest::gtest_main)
 target_compile_options(arena_lobby_authority_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 target_link_options(arena_lobby_authority_tests PRIVATE -Wl,--wrap=fdatasync
@@ -94,15 +118,15 @@ target_link_options(arena_lobby_authority_tests PRIVATE -Wl,--wrap=fdatasync
 gtest_discover_tests(arena_lobby_authority_tests)
 
 add_executable(arena_lobby_service_tests LobbyServiceTest.cpp)
-target_link_libraries(arena_lobby_service_tests PRIVATE arena_lobby_service GTest::gtest_main)
+target_link_libraries(arena_lobby_service_tests PRIVATE arena_lobby_service arena_room_worker GTest::gtest_main)
 target_compile_options(arena_lobby_service_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
-target_link_options(arena_lobby_service_tests PRIVATE
+target_link_options(arena_lobby_service_tests PRIVATE -Wl,--wrap=fdatasync
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
 gtest_discover_tests(arena_lobby_service_tests)
 
 add_executable(arena_lobby_replay_tests ReplayArchiveTest.cpp)
-target_link_libraries(arena_lobby_replay_tests PRIVATE arena_lobby_replay GTest::gtest_main)
+target_link_libraries(arena_lobby_replay_tests PRIVATE arena_lobby_replay arena_room_runtime GTest::gtest_main)
 target_compile_options(arena_lobby_replay_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
 target_link_options(arena_lobby_replay_tests PRIVATE
@@ -120,12 +144,12 @@ endif()
 if(ARENA_ENABLE_POSTGRES_TESTS)
     set(lobby_restart_arguments --repository-root "${PROJECT_SOURCE_DIR}"
         --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
-        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>" --room "$<TARGET_FILE:ArenaRoom>"
         --gateway "$<TARGET_FILE:ArenaServer>" --pg-bin "${lobby_process_pg_bin}"
         --report "${CMAKE_CURRENT_BINARY_DIR}/service-restart-report.json")
     set(supervised_process_arguments --repository-root "${PROJECT_SOURCE_DIR}"
         --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
-        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>" --room "$<TARGET_FILE:ArenaRoom>"
         --gateway "$<TARGET_FILE:ArenaServer>" --pg-bin "${lobby_process_pg_bin}"
         --report "${CMAKE_CURRENT_BINARY_DIR}/supervised-process-report.json")
     if(ARENA_POSTGRES_SHARE)
@@ -148,7 +172,7 @@ endif()
 if(ARENA_ENABLE_POSTGRES_TESTS)
     set(service_boundary_arguments --repository-root "${PROJECT_SOURCE_DIR}"
         --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
-        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>" --room "$<TARGET_FILE:ArenaRoom>"
         --gateway "$<TARGET_FILE:ArenaServer>" --pg-bin "${lobby_process_pg_bin}"
         --report "${CMAKE_CURRENT_BINARY_DIR}/service-boundary-report.json")
     if(ARENA_POSTGRES_SHARE)
@@ -171,7 +195,7 @@ gtest_discover_tests(arena_room_aggregate_tests)
 
 add_executable(arena_room_migration_tests RoomMigrationTest.cpp)
 
-target_link_libraries(arena_room_migration_tests PRIVATE arena_lobby_migration GTest::gtest_main)
+target_link_libraries(arena_room_migration_tests PRIVATE arena_lobby_migration arena_room_runtime GTest::gtest_main)
 
 target_compile_options(arena_room_migration_tests PRIVATE -Wall -Wextra -Wpedantic
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
@@ -180,3 +204,27 @@ target_link_options(arena_room_migration_tests PRIVATE -Wl,--wrap=fdatasync
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
 
 gtest_discover_tests(arena_room_migration_tests)
+add_executable(arena_lobby_room_client_tests RoomClientTest.cpp)
+target_link_libraries(arena_lobby_room_client_tests PRIVATE arena_lobby_room_client arena_room_worker GTest::gtest_main)
+target_compile_options(arena_lobby_room_client_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_lobby_room_client_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_lobby_room_client_tests)
+
+add_executable(arena_legacy_room_import_tests LegacyRoomImportTest.cpp)
+target_link_libraries(arena_legacy_room_import_tests PRIVATE arena_lobby_legacy_room_import
+    arena_lobby_core arena_room_runtime GTest::gtest_main)
+target_compile_options(arena_legacy_room_import_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_legacy_room_import_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_legacy_room_import_tests)
+
+add_executable(arena_lobby_room_coordinator_tests RoomCoordinatorTest.cpp)
+target_link_libraries(arena_lobby_room_coordinator_tests PRIVATE arena_lobby_room_coordinator arena_room_worker GTest::gtest_main)
+target_compile_options(arena_lobby_room_coordinator_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_lobby_room_coordinator_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_lobby_room_coordinator_tests)

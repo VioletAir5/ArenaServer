@@ -3,6 +3,8 @@
  * replies.
  */
 #include "lobby/Protocol.h"
+
+#include <stdexcept>
 namespace service::lobby
 {
 arena::protocol::Presence
@@ -257,5 +259,150 @@ queueError(service::match::QueueError error)
         return arena::protocol::ERR_BUSINESS_FAILURE;
     }
     return arena::protocol::ERR_INTERNAL;
+}
+void encodeSettlement(
+    const service::room::RuntimeSettlement& value,
+    arena::protocol::SettlementResult& response
+)
+{
+    RoomSettlement dto{
+        value.resultId,
+        value.matchId,
+        value.roomId,
+        value.finalTick,
+        value.finalChecksum,
+        static_cast<SettlementReason>(value.reason),
+        value.winnerPlayerId,
+        value.players,
+        value.createdUnixMs,
+        value.startedUnixMs,
+        value.finishedUnixMs,
+        value.startedTick,
+        value.playedTicks
+    };
+    encodeSettlement(dto, response);
+}
+void encodeRoomStatus(
+    const service::room::RuntimeImage& image,
+    arena::protocol::RoomStatus& response
+)
+{
+    if (!image.managed)
+        throw std::invalid_argument("managed projection required");
+    const auto& managed = *image.managed;
+    RoomStatus dto{
+        image.actor,
+        managed.allocation.matchId,
+        static_cast<RoomPhase>(managed.phase),
+        {},
+        managed.startedTick,
+        managed.finishedTick,
+        managed.playedTicks,
+        image.policy.battleDurationTicks,
+        {}
+    };
+    for (std::size_t index = 0;
+         index < managed.allocation.members.size();
+         ++index)
+        dto.members.push_back(
+            {managed.allocation.members[index],
+             managed.ready[index],
+             managed.online[index] ? Presence::Online
+                                   : Presence::Detached}
+        );
+    encodeRoomStatus(dto, image.policy.actor.positionLimit, response);
+    if (managed.phase == service::room::RuntimePhase::Finished &&
+        managed.result)
+        encodeSettlement(
+            *managed.result,
+            *response.mutable_settlement()
+        );
+}
+std::expected<arena::protocol::Envelope, arena::protocol::ErrorCode>
+encodeRoomReply(
+    const service::room::RuntimeCommand& command,
+    const arena::room::CommandResult& result,
+    const service::room::RuntimeImage& image
+)
+{
+    namespace publicWire = arena::protocol;
+    using Kind = service::room::RuntimeCommandKind;
+    if (result.has_error())
+    {
+        switch (result.error())
+        {
+        case arena::room::AUTHENTICATION:
+            return std::unexpected(publicWire::ERR_UNAUTHENTICATED);
+        case arena::room::CAPACITY:
+        case arena::room::NOT_AVAILABLE:
+            return std::unexpected(publicWire::ERR_UNAVAILABLE);
+        case arena::room::BUSINESS_FAILURE:
+            return std::unexpected(publicWire::ERR_BUSINESS_FAILURE);
+        case arena::room::INVALID:
+            return std::unexpected(publicWire::ERR_INVALID_REQUEST);
+        default:
+            return std::unexpected(publicWire::ERR_INTERNAL);
+        }
+    }
+    publicWire::Envelope reply;
+    switch (command.kind)
+    {
+    case Kind::Snapshot:
+        reply.set_msg_id(publicWire::MSG_ROOM_SNAPSHOT_RESPONSE);
+        encodeSnapshot(
+            image.actor,
+            image.policy.actor.positionLimit,
+            *reply.mutable_room_snapshot_response()->mutable_state()
+        );
+        break;
+    case Kind::Input:
+        if (!result.has_input())
+            return std::unexpected(publicWire::ERR_INTERNAL);
+        reply.set_msg_id(publicWire::MSG_ROOM_INPUT_RESPONSE);
+        encodeSnapshot(
+            image.actor,
+            image.policy.actor.positionLimit,
+            *reply.mutable_room_input_response()->mutable_state()
+        );
+        reply.mutable_room_input_response()->set_result(wireStatus(
+            static_cast<service::room::InputStatus>(result.input())
+        ));
+        break;
+    case Kind::Ready:
+    case Kind::Status:
+        if (!image.managed)
+            return std::unexpected(publicWire::ERR_INTERNAL);
+        if (command.kind == Kind::Ready)
+        {
+            reply.set_msg_id(publicWire::MSG_ROOM_READY_RESPONSE);
+            encodeRoomStatus(
+                image,
+                *reply.mutable_room_ready_response()->mutable_state()
+            );
+        }
+        else
+        {
+            reply.set_msg_id(publicWire::MSG_ROOM_STATUS_RESPONSE);
+            encodeRoomStatus(
+                image,
+                *reply.mutable_room_status_response()->mutable_state()
+            );
+        }
+        break;
+    case Kind::Settlement:
+        if (!image.managed || !image.managed->result ||
+            image.managed->phase !=
+                service::room::RuntimePhase::Finished)
+            return std::unexpected(publicWire::ERR_INTERNAL);
+        reply.set_msg_id(publicWire::MSG_SETTLEMENT_RESPONSE);
+        encodeSettlement(
+            *image.managed->result,
+            *reply.mutable_settlement_response()->mutable_state()
+        );
+        break;
+    case Kind::SettlementAck:
+        return reply;
+    }
+    return reply;
 }
 } // namespace service::lobby

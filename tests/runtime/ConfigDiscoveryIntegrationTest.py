@@ -143,7 +143,9 @@ class Acceptance(Journey):
             nodes=[dict(service='storage',nodeId=node.name,host='127.0.0.1',port=node.port,
                         ready=selected is None or index == selected) for index,node in enumerate(self.nodes)]
                 + [dict(service=role,nodeId=role+'-smoke',host='127.0.0.1',
-                        port=self.ports[role],ready=True) for role in ('auth','lobby','gateway')])
+                        port=self.ports[role],ready=True) for role in ('auth','lobby','gateway')]
+                + [dict(service='room',nodeId=role,host='127.0.0.1',port=self.ports[role],ready=True)
+                   for role in self.room_roles])
 
     def until(self, action, description, timeout=5, *, processes=True):
         deadline, last = time.monotonic()+timeout, None
@@ -182,12 +184,38 @@ class Acceptance(Journey):
         for node in self.nodes:
             node.start()
         self.children['auth'].start()
+        for role in self.room_roles:
+            self.children[role].start()
         self.children['lobby'].start()
         self.start_gateway()
         pids=[self.gateway.pid,self.children['auth'].process.pid,self.children['lobby'].process.pid,
-              *(node.process.pid for node in self.nodes)]
-        require(len(set(pids)) == 5,'discovery fixture did not use five independent service processes')
+              *(node.process.pid for node in self.nodes),
+              *(self.children[role].process.pid for role in self.room_roles)]
+        require(len(set(pids)) == 7,'discovery fixture did not use seven independent service processes')
         self.report['service_pids']=pids
+        self.sample('seven-process-discovery-ready')
+
+    def sample(self, label):
+        processes={role:child.process for role,child in self.children.items() if role != 'storage'}
+        processes.update({'storage-'+node.name:node.process for node in self.nodes})
+        values={}
+        for role,process in processes.items():
+            require(process is not None and process.poll() is None, role+' missing from physical sample')
+            pid=process.pid
+            descriptors=list(Path(f'/proc/{pid}/fd').iterdir())
+            sockets=0
+            for descriptor in descriptors:
+                try:
+                    sockets+=os.readlink(descriptor).startswith('socket:')
+                except FileNotFoundError:
+                    pass
+            values[role]=dict(pid=pid,fd=len(descriptors),sockets=sockets,
+                rss_bytes=int(Path(f'/proc/{pid}/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE'),
+                start_ticks=int(Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()[19]),
+                executable=os.readlink(f'/proc/{pid}/exe'))
+        require(len(values) == 7,'physical discovery resource denominator changed')
+        self.report['physical_process_samples'].append(dict(label=label,at=time.monotonic(),roles=values))
+        return {role:value['pid'] for role,value in values.items()}
 
 
     def start_gateway(self, *, ready_ticks=100):
@@ -286,16 +314,19 @@ class Acceptance(Journey):
         before = [node.health()[1] for node in self.nodes]
         peer = self.connect()
         lock = self.lock_accounts()
+        self.report['route_switch_stage'] = 'old_login_entering_account_lock'
         try:
             with ThreadPoolExecutor(max_workers=1) as workers:
                 pending = workers.submit(peer.login)
                 try:
                     self.wait_account_barrier(a,count(before[0],'account.find'))
+                    self.report['route_switch_stage'] = 'old_lookup_admitted_before_quiesce'
                     write_config(a.config_path,self.manifest(2,desired=False))
                     a.process.send_signal(signal.SIGHUP)
                     self.until(lambda:a.health('/health/ready')[0] == 503,'old node not-ready before route change',1)
                     require(a.health('/health/alive')[0] == 200,'quiescing old node lost liveness')
                     switch = self.publish(self.next_manifest(1),wait_ready=False)
+                    self.report['route_switch_stage'] = 'old_admitted_login_result_after_publication'
                     lock.rollback()
                     require(pending.result(timeout=3)['player'] == 42,'old admitted route lost its result')
                 finally:
@@ -311,9 +342,12 @@ class Acceptance(Journey):
         self.until(lambda:a.health('/health/ready')[0] == 200,'old node restored for later explicit rollback')
         self.until(lambda:self.health('/health/ready')[0] == 200,'replacement route ready')
         fresh = self.connect()
+        self.report['route_switch_stage'] = 'new_login_on_replacement'
         require(fresh.login(b'bob')['player'] == 43,'new business did not reach replacement route')
         self.close_peers()
+        self.report['route_switch_stage'] = 'full_match_on_replacement'
         result = self.play(b)
+        self.report['route_switch_stage'] = 'durable_id_replenishment_on_replacement'
         burned=self.exhaust_reserved_ids(b,count(before[1],'match.allocate_ids'))
         result['cancelled_tickets_to_next_real_block']=burned
         result.update(old_admitted_node='node-a',old_call_replayed=False,switch_ms=switch*1000)
@@ -561,6 +595,13 @@ class Acceptance(Journey):
             for node in self.nodes:
                 self.until(lambda node=node:node.health('/health/ready')[0] == 503,node.name+' PG-down readiness')
                 require(node.health('/health/alive')[0] == 200,'PG outage killed Storage liveness')
+                from shared.runtime.rpc import RpcError, UNAVAILABLE
+                try:
+                    self.direct_ready(node)
+                except RpcError as error:
+                    require(error.status == UNAVAILABLE, 'PG-down RPC readiness used another classification')
+                else:
+                    raise AssertionError('cached RPC readiness hid the actual PG outage')
             self.until(lambda:self.health('/health/ready')[0] == 503,'Gateway PG-down readiness')
             require(self.health('/health/alive')[0] == 200,'PG outage killed Gateway liveness')
             self.assert_new_connection_rejected()
@@ -580,6 +621,7 @@ class Acceptance(Journey):
             require(result.returncode == 0,'private PostgreSQL restart failed')
         for node in self.nodes:
             self.until(lambda node=node:node.health('/health/ready')[0] == 200,node.name+' PG recovery',8)
+            self.direct_ready(node)
         self.until(lambda:self.health('/health/ready')[0] == 200,'Gateway same-process recovery',8)
         require([node.process.pid for node in self.nodes] == pids,'outage recovery restarted Storage')
         result = self.finished(alice)
@@ -610,6 +652,15 @@ class Acceptance(Journey):
                 peer.close()
         self.until(lambda:self.health('/health/alive')[0] == 200,'health slot recovery')
         return dict(slow_headers=16,reclaimed_within_seconds=1)
+
+    def direct_ready(self, node):
+        async def check():
+            from shared.runtime.rpc import Client
+            client = Client(self.protocol, '127.0.0.1', node.port,
+                service_token=self.storage_token, caller_service='auth', target_service='storage')
+            reply = await client.call('health.ready', timeout=1, correlation_id='actual-pg-readiness')
+            require(reply == b'' and client.inflight == 0, 'Storage readiness retained RPC work')
+        return asyncio.run(check())
 
     def direct_find(self,node):
         async def lookup():
@@ -709,7 +760,7 @@ class Acceptance(Journey):
 
     def close(self):
         errors = []
-        for role in ('gateway','lobby','auth'):
+        for role in ('gateway','lobby',*reversed(self.room_roles),'auth'):
             try:
                 if role == 'gateway':
                     self.stop_gateway()
@@ -762,6 +813,29 @@ def main():
         report = test.run()
     except BaseException as error:
         report.update(passed=False,error=f'{type(error).__name__}: {error}')
+        trace = []
+        frame = error.__traceback__
+        while frame is not None:
+            trace.append(dict(file=Path(frame.tb_frame.f_code.co_filename).name,
+                line=frame.tb_lineno, function=frame.tb_frame.f_code.co_name))
+            frame = frame.tb_next
+        report['failure_locations'] = trace
+        fields = ('ready', 'config_version', 'dependency_ready', 'probe_version', 'probe_error',
+            'worker', 'pool', 'methods', 'completions', 'admission_rejected', 'inflight')
+        observations = {}
+        for node in test.nodes:
+            try:
+                body = node.health()[1]
+                observations[node.name] = {name:body[name] for name in fields if name in body}
+            except Exception as inspection:
+                observations[node.name] = dict(observation_error=type(inspection).__name__)
+        for role in ('auth', 'lobby', 'gateway'):
+            try:
+                body = health_http(test.ports[role+'-health'])[1]
+                observations[role] = {name:body[name] for name in fields if name in body}
+            except Exception as inspection:
+                observations[role] = dict(observation_error=type(inspection).__name__)
+        report['failure_health_observations'] = observations
         if test.gateway is not None:
             report['gateway_log_tail'] = test.content()[-7000:]
         report['storage_log_tails'] = {node.name:node.log_path.read_text(errors='replace')[-5000:]

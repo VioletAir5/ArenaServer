@@ -42,7 +42,7 @@ def stopped_lobby(text):
 
 
 def scenario(args, mode):
-    # The shared fixture owns its private PostgreSQL cluster and all four children.
+    # The shared fixture owns its private PostgreSQL cluster and all six children.
     # Import lazily: the fixture shares JourneyProtocol without importing this driver.
     from ServiceStackFixture import ServiceStack
 
@@ -52,7 +52,7 @@ def scenario(args, mode):
     stack = ServiceStack(local, battle_ticks=80, ready_ticks=200,
                          grace_ms=300 if mode == "expired" else 3000)
     outcome = dict(mode=mode, passed=False)
-    stack.report.update(scope="real four-process complete journey and every-tick replay",
+    stack.report.update(scope="real six-process complete journey and every-tick replay",
                         current_case=mode, mode=mode)
     try:
         stack.setup()
@@ -165,8 +165,9 @@ def scenario(args, mode):
         assert len(re.findall(r"event=room_result result_id=" + str(match) + r" ", lobby_log)) == 1
         committed = stopped_lobby(lobby_log)
         assert all(committed[name] == 0 for name in (
-            "active", "auth_inflight", "storage_inflight", "journal_pending", "owner_pending"))
+            "active", "auth_inflight", "storage_inflight", "room_inflight", "journal_pending", "owner_pending", "coordinator_pending"))
         assert committed["journal_closed"] is True
+        assert committed["local_room_actors"] == 0
         assert committed["committed_revision"] > 0 and committed["receipts"] > 0
         assert committed["queued"] == 0 and committed["matched_pairs"] == 1
         assert committed["room_indexes"] == 0
@@ -278,6 +279,8 @@ def scenario(args, mode):
             name: hashlib.sha256((args.repository_root / name).read_bytes()).hexdigest()
             for name in ("services/gateway/app/main.cpp", "services/lobby/app/main.cpp",
                          "services/lobby/src/LobbyService.cpp", "tests/lobby/ServiceStackFixture.py",
+                         "services/room/worker/app/main.cpp", "services/room/worker/src/RoomWorker.cpp",
+                         "services/room/src/RoomRuntime.cpp",
                          "tests/room/JourneyProtocol.py", "tests/room/FullJourneyIntegrationTest.py")}
         text = json.dumps(stack.report, indent=2)
         stack.assert_no_secrets(text)
@@ -291,6 +294,7 @@ def main():
     parser.add_argument("replay_binary", type=Path)
     for key in ("auth", "lobby", "descriptor", "pg-bin", "replay-export"):
         parser.add_argument("--" + key, type=Path, required=True)
+    parser.add_argument("--room", type=Path)
     parser.add_argument("--pg-share", type=Path)
     parser.add_argument("--pg-lib", type=Path)
     parser.add_argument("--repository-root", type=Path, default=ROOT)

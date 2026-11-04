@@ -20,7 +20,8 @@ from ServiceStackFixture import ServiceStack
 from AuthProcessIntegrationTest import health_http
 from StorageMigrationTest import require, run
 
-ROLES = ("storage", "auth", "lobby", "gateway")
+SERVICES = ("storage", "auth", "lobby", "gateway")
+ROLES = ("storage", "auth", "room-a", "room-b", "lobby", "gateway")
 SANITIZER = re.compile(
     r"AddressSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer|runtime error:|ThreadSanitizer"
 )
@@ -110,7 +111,8 @@ class Acceptance(ServiceStack):
         self.build = self.args.gateway.parents[3]
         expected = {"gateway": self.build / "services/gateway/app/ArenaServer",
                     "auth": self.build / "services/auth/ArenaAuth",
-                    "lobby": self.build / "services/lobby/ArenaLobby"}
+                    "lobby": self.build / "services/lobby/ArenaLobby",
+                    "room": self.build / "services/room/worker/ArenaRoom"}
         for role, path in expected.items():
             selected = getattr(self.args, role)
             require(selected == path.resolve() and selected.is_file() and os.access(selected, os.X_OK),
@@ -158,7 +160,8 @@ class Acceptance(ServiceStack):
         environment = self.environment()
         environment.update(ARENA_LOBBY_TOKEN=self.lobby_token, ARENA_AUTH_TOKEN=self.auth_token,
                            ARENA_STORAGE_AUTH_TOKEN=self.storage_token,
-                           ARENA_STORAGE_LOBBY_TOKEN=self.other_token, ARENA_JWT_KEY=self.signer_key)
+                           ARENA_STORAGE_LOBBY_TOKEN=self.other_token, ARENA_JWT_KEY=self.signer_key,
+                           ARENA_ROOM_TOKEN=self.room_token)
         command = [sys.executable, str(self.args.repository_root / "tools/runtime/RunServices.py"),
                    "--repo-root", str(self.args.repository_root), "--build-dir", str(self.build),
                    "--python", sys.executable, "--descriptor", str(self.args.descriptor),
@@ -166,8 +169,11 @@ class Acceptance(ServiceStack):
                    "--log-dir", str(self.logs), "--startup-timeout", "15",
                    "--stop-timeout", "10", "--probe-timeout", ".25",
                    "--restart-attempts", "2", "--restart-backoff-base", ".05",
-                   "--restart-backoff-max", ".2"]
-        for role in ROLES:
+                   "--restart-backoff-max", ".2", "--room-bin", str(self.args.room)]
+        for role in self.room_roles:
+            command.extend(("--room-node", role+":"+str(self.ports[role]),
+                            "--room-health-port", role+":"+str(self.ports[role+"-health"])))
+        for role in SERVICES:
             command.extend(("--" + role + "-port", str(self.ports[role]),
                             "--" + role + "-health-port", str(self.ports[role + "-health"])))
         command.extend(("--gateway-ws-port", str(self.ports["gateway-ws"])))
@@ -187,14 +193,24 @@ class Acceptance(ServiceStack):
         sampled = {}
         for role, pid in current.items():
             executable = Path(os.readlink(f"/proc/{pid}/exe")).resolve()
-            expected = Path(sys.executable).resolve() if role == "storage" else getattr(self.args, role)
+            expected = Path(sys.executable).resolve() if role == "storage" else getattr(self.args, "room" if role in self.room_roles else role)
             require(executable == expected, role + " is not the expected real executable")
             if role == "storage":
                 command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
                 require(b"-m" in command and b"services.storage.server" in command,
                         "Storage is not the production Python module")
-            sampled[role] = dict(pid=pid, executable=str(executable),
-                                 fd=len(os.listdir(f"/proc/{pid}/fd")))
+            descriptors = list(Path(f"/proc/{pid}/fd").iterdir())
+            sockets = 0
+            for descriptor in descriptors:
+                try:
+                    sockets += os.readlink(descriptor).startswith('socket:')
+                except FileNotFoundError:
+                    pass
+            rss = int(Path(f"/proc/{pid}/statm").read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
+            birth = int(Path(f"/proc/{pid}/stat").read_text().rpartition(')')[2].split()[19])
+            sampled[role] = dict(pid=pid, start_ticks=birth, executable=str(executable),
+                                 fd=len(descriptors), sockets=sockets, rss_bytes=rss,
+                                 service='room' if role in self.room_roles else role, node_id=role)
         self.report["physical_process_samples"].append(dict(label=label, roles=sampled))
         return current
 
@@ -226,12 +242,12 @@ class Acceptance(ServiceStack):
                                for row in self.rows()), "bounded automatic Auth recovery", 20)
         after = self.sample("after-auth-recovery")
         require(after["auth"] != initial["auth"], "Auth was not actually restarted")
-        require(all(after[role] == initial[role] for role in ("gateway", "lobby", "storage")),
+        require(all(after[role] == initial[role] for role in ROLES if role != "auth"),
                 "Auth recovery cascaded into a bystander process")
         require([row["role"] for row in self.lifecycle_starts()] == [*ROLES, "auth"],
                 "supervisor restarted an unrelated role")
         self.until(lambda: all(health_http(self.ports[role + "-health"], "/health/ready")[0] == 200
-                               for role in ROLES), "four actual service health endpoints recover", 10)
+                               for role in ROLES), "all six actual service health endpoints recover", 10)
         current = alice.room_snapshot()
         require(current["incarnation"] == before["incarnation"] and current["players"] == kept["players"],
                 "Auth recovery reset acknowledged room state")
@@ -268,7 +284,7 @@ class Acceptance(ServiceStack):
         require(not any(row.get("event") in ("forced_kill", "join_timeout", "degraded", "failure")
                         for row in self.rows()), "supervisor exhausted or forced cleanup")
         owned = self.lifecycle_starts()
-        require(len({row["pid"] for row in owned}) == 5, "unexpected owned process history")
+        require(len({row["pid"] for row in owned}) == len(ROLES)+1, "unexpected owned process history")
         require(all(not Path("/proc", str(row["pid"])).exists() for row in owned),
                 "supervisor retained an owned historical or current PID")
         self.report["supervisor_owned_history"] = owned
@@ -293,23 +309,32 @@ class Acceptance(ServiceStack):
             self.assert_no_secrets(text)
             require(not SANITIZER.search(text), "sanitizer reported a production stack failure")
             for row in json_rows(path):
-                if row.get("state") == "stopped" and row.get("service") in ROLES:
-                    require(row["service"] not in stops, "duplicate final service stop report")
-                    stops[row["service"]] = row
+                if row.get("state") == "stopped":
+                    role = next((name for name in ROLES if path.name.startswith(name+"-")), None)
+                    if role is not None and role != "gateway":
+                        require(row.get("service") == ("room" if role in self.room_roles else role),
+                                "physical stop report has a wrong logical service")
+                        require(role not in stops, "duplicate final physical service stop report")
+                        stops[role] = row
             if path.name.startswith("gateway-"):
                 require("LOBBY_COUNTS tracked=0 business_inflight=0 heartbeat_inflight=0 probe_inflight=0 owner_posts=0 stopped=1" in text,
                         "Gateway retained remote physical work")
                 require(re.search(r"connection_admission active=0 ", text), "Gateway retained connections")
         require(total <= 16 * 1024 * 1024, "aggregate acceptance logs exceeded sixteen MiB")
-        require(set(stops) == {"storage", "auth", "lobby"}, "missing real service stop counters")
+        require(set(stops) == {"storage", "auth", "lobby", *self.room_roles}, "missing real service stop counters")
         require(all(stops["auth"][name] == 0 for name in ("active", "queued", "busy", "workers")),
                 "Auth retained workers or operations")
         require(all(stops["lobby"][name] == 0 for name in (
-            "active", "auth_inflight", "storage_inflight", "journal_pending", "owner_pending")) and
-                stops["lobby"]["journal_closed"], "Lobby retained operations or journal resources")
+            "active", "auth_inflight", "storage_inflight", "room_inflight", "journal_pending", "owner_pending", "coordinator_pending")) and
+                stops["lobby"]["journal_closed"] and stops["lobby"].get("local_room_actors") == 0, "Lobby retained operations or journal resources")
         require(stops["lobby"]["room_indexes"] == 0, "Lobby retained a dangling room binding")
         require(stops["storage"]["worker"]["active"] == stops["storage"]["pool"]["checked_out"] == 0 and
                 stops["storage"]["pool"]["closed"], "Storage retained worker jobs or pool loans")
+        for role in self.room_roles:
+            require(all(stops[role].get(name) == 0 for name in
+                        ("active", "journal_pending", "rpc_active", "rpc_peers")) and
+                    stops[role].get("journal_closed") is True,
+                    role+" retained physical operations, peers or journal resources")
         self.report["stop_counters"] = stops
         self.report["supervisor_lifecycle"] = self.rows()
         self.report["owned_run_logs"] = [str(path) for path in self.run_log_paths()]
@@ -389,6 +414,7 @@ def main():
     parser.add_argument("--repository-root", type=Path, default=ROOT)
     for name in ("pg-bin", "descriptor", "auth", "lobby", "gateway", "report"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--room", type=Path)
     parser.add_argument("--pg-share", type=Path)
     parser.add_argument("--pg-lib", type=Path)
     args = parser.parse_args()
@@ -424,7 +450,9 @@ def main():
     report["source_hashes"] = {}
     for name in ("tools/runtime/RunServices.py", "services/auth/app/main.cpp",
                  "services/lobby/app/main.cpp", "services/gateway/app/main.cpp",
-                 "services/storage/server.py", "tests/lobby/SupervisedProcessIntegrationTest.py"):
+                 "services/storage/server.py", "services/room/worker/app/main.cpp",
+                 "services/room/worker/src/RoomWorker.cpp", "services/room/src/RoomRuntime.cpp",
+                 "tests/lobby/ServiceStackFixture.py", "tests/lobby/SupervisedProcessIntegrationTest.py"):
         try:
             report["source_hashes"][name] = hashlib.sha256((args.repository_root / name).read_bytes()).hexdigest()
         except OSError:

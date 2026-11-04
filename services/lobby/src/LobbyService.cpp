@@ -20,6 +20,9 @@
 #include <boost/asio/strand.hpp>
 
 #include "lobby/Protocol.h"
+#include "lobby/RoomCoordinator.h"
+#include "room/RoomQuery.h"
+#include "room/RoomWire.h"
 #include "security/SecureErase.h"
 
 namespace service::lobby
@@ -37,6 +40,24 @@ using Capture = LobbyAuthority::Capture;
 using Work = LobbyAuthority::WorkingState;
 using Snapshot = LobbyAuthority::Snapshot;
 
+/** @brief Gives static endpoints a nonzero identity and discovery
+ * probes their captured version. */
+std::uint64_t runtimeVersion(
+    const std::shared_ptr<arena::runtime::ConfigStore>& runtime
+) noexcept
+{
+    return runtime ? runtime->snapshot()->version() : 1;
+}
+/** @brief Accepts a positive observation only for the current
+ * complete discovery view. */
+bool readyForRuntime(
+    const std::atomic<std::uint64_t>& observed,
+    const std::shared_ptr<arena::runtime::ConfigStore>& runtime
+) noexcept
+{
+    return observed.load(std::memory_order_acquire) ==
+           runtimeVersion(runtime);
+}
 std::int64_t nanos(Clock::time_point time)
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -222,6 +243,7 @@ LobbyService::Config validated(LobbyService::Config config)
     {
         arena::security::eraseSecret(config.auth.token);
         arena::security::eraseSecret(config.storage.token);
+        arena::security::eraseSecret(config.rooms.token);
         throw std::invalid_argument(
             "invalid Lobby service configuration"
         );
@@ -229,10 +251,317 @@ LobbyService::Config validated(LobbyService::Config config)
     return config;
 }
 
+std::expected<arena::lobby::MigrationReply, rpc::Status>
+migrationView(
+    const std::shared_ptr<const Snapshot>& snapshot,
+    RoomIdentity identity,
+    std::uint64_t migration
+)
+{
+    if (!snapshot || !snapshot->directory)
+        return std::unexpected(rpc::UNAVAILABLE);
+    const auto* route = snapshot->directory->find(identity);
+    if (!route)
+        return std::unexpected(rpc::NOT_FOUND);
+    if (migration &&
+        (!route->handoff || route->handoff->id != migration))
+        return std::unexpected(rpc::CONFLICT);
+    arena::lobby::MigrationReply reply;
+    reply.set_version(1);
+    reply.set_room_id(identity.room);
+    reply.set_incarnation(identity.incarnation);
+    reply.set_owner(route->owner);
+    reply.set_owner_epoch(route->ownerEpoch);
+    reply.set_physical_tick(route->image.tick);
+    reply.set_logical_tick(route->image.logicalTick);
+    reply.set_checksum(route->image.checksum);
+    reply.set_cursor(route->image.cursor);
+    reply.set_committed_revision(snapshot->revision);
+    if (route->handoff)
+    {
+        const auto& handoff = *route->handoff;
+        reply.set_migration_id(handoff.id);
+        reply.set_source(handoff.source);
+        reply.set_target(handoff.target);
+        reply.set_source_epoch(handoff.sourceEpoch);
+        reply.set_target_epoch(handoff.targetEpoch);
+        reply.set_cutoff(handoff.cutoff);
+        reply.set_deadline_nanos(handoff.deadline);
+        reply.set_phase(
+            static_cast<arena::lobby::MigrationReply::Phase>(
+                static_cast<unsigned>(handoff.phase) + 1
+            )
+        );
+    }
+    return reply;
+}
+
+RoomCoordinator::Config
+coordinatorConfig(const LobbyService::Config& config)
+{
+    RoomCoordinator::Config result;
+    result.client = config.rooms;
+    result.policy.actor = config.authority.rooms.actor;
+    result.policy.maxCommands = config.authority.rooms
+                                    .maxPendingPerRoom;
+    result.policy.battleDurationTicks = config.authority.rooms
+                                            .battleDurationTicks;
+    result.policy.readyTimeoutTicks = config.authority.rooms
+                                          .readyTimeoutTicks;
+    result.policy.resultRetentionNanos =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            config.authority.rooms.resultRetention
+        )
+            .count();
+    result.maxBatch = std::max<std::size_t>(
+        1,
+        config.authority.directoryLimits.maxCommands / 2
+    );
+    result.now = config.authority.now;
+    result.wallNow = config.authority.wallNow;
+    return result;
+}
+/** @brief Selects a committed route without constructing a room
+ * actor. */
+const RoomRouteRecord* roomRoute(
+    const Snapshot& snapshot,
+    const OnlineSnapshot& caller,
+    const Envelope& message
+)
+{
+    if (!snapshot.directory)
+        return nullptr;
+    const RoomRouteRecord* retained = nullptr;
+    for (const auto& [id, image] : snapshot.roomImages)
+    {
+        const auto* route = snapshot.directory->find(id);
+        if (!route || route->lifecycle != RoomRouteLifecycle::Active)
+            continue;
+        if (message.has_settlement_request())
+        {
+            if (image->managed &&
+                image->managed->allocation.matchId ==
+                    message.settlement_request().match_id())
+                return route;
+            continue;
+        }
+        if (caller.roomId && caller.roomId->value() == id.room)
+            return route;
+        if (message.has_room_status_request() && image->managed)
+            for (const auto& member :
+                 image->managed->allocation.members)
+                if (member.playerId == caller.playerId &&
+                    member.sessionId == caller.sessionId &&
+                    (!retained ||
+                     id.incarnation > retained->identity.incarnation))
+                    retained = route;
+    }
+    return retained;
+}
+
+/** @brief Resolves a live physical caller without pruning the
+ * committed view. */
+const RegistryEntryCheckpoint* queryCaller(
+    const Snapshot& snapshot,
+    const arena::lobby::ExecuteRequest& request,
+    Clock::time_point now,
+    std::int64_t wall
+)
+{
+    if (snapshot.core.registry.stopped || wall < 0)
+        return nullptr;
+    const auto index = transport(
+        snapshot.meta,
+        request.gateway_instance(),
+        request.connection_id()
+    );
+    if (index < 0)
+        return nullptr;
+    const auto& binding = snapshot.meta.transports(index);
+    const auto* entry = player(snapshot, request.player_id());
+    if (!entry || binding.player_id() != request.player_id() ||
+        binding.epoch() != request.session_epoch() ||
+        binding.lease_deadline_nanos() <= nanos(now) ||
+        binding.token_expires_at_unix() <= wall ||
+        entry->expiresAt <= wall || !entry->leaseValid ||
+        entry->snapshot.presence != Presence::Online ||
+        entry->binding.playerId.value() != binding.player_id() ||
+        entry->binding.connectionId != binding.handle() ||
+        entry->binding.epoch != binding.epoch() ||
+        entry->snapshot.connectionId != binding.handle() ||
+        entry->snapshot.epoch != binding.epoch())
+        return nullptr;
+    return entry;
+}
+service::room::RuntimeAuthorization queryAuthorization(
+    const Snapshot& snapshot,
+    const RegistryEntryCheckpoint& entry,
+    Clock::time_point now
+)
+{
+    bool online = entry.snapshot.presence == Presence::Online &&
+                  entry.leaseValid;
+    if (online)
+    {
+        const auto binding = std::find_if(
+            snapshot.meta.transports().begin(),
+            snapshot.meta.transports().end(),
+            [&](const auto& value)
+            {
+                return value.handle() == entry.binding.connectionId &&
+                       value.player_id() ==
+                           entry.snapshot.playerId.value() &&
+                       value.epoch() == entry.snapshot.epoch;
+            }
+        );
+        online = binding != snapshot.meta.transports().end() &&
+                 binding->lease_deadline_nanos() > nanos(now);
+    }
+    return {
+        {entry.snapshot.playerId,
+         entry.snapshot.sessionId,
+         entry.snapshot.roomEpoch},
+        entry.snapshot.epoch,
+        online ? entry.snapshot.connectionId : 0,
+        online
+    };
+}
+service::room::RuntimeCutoff queryContext(
+    const Snapshot& snapshot,
+    const RegistryEntryCheckpoint& caller,
+    RoomIdentity room,
+    Clock::time_point now,
+    std::int64_t wall
+)
+{
+    service::room::RuntimeCutoff result;
+    result.nowNanos = nanos(now);
+    for (const auto& entry : snapshot.core.registry.entries)
+    {
+        const auto& member = entry.snapshot;
+        if (!member.roomId || member.roomId->value() != room.room ||
+            entry.expiresAt <= wall ||
+            (member.presence == Presence::Detached &&
+             (!member.graceDeadline || now >= *member.graceDeadline)))
+            continue;
+        result.roster.push_back(
+            queryAuthorization(snapshot, entry, now)
+        );
+    }
+    result.currentAuthorizations.push_back(
+        queryAuthorization(snapshot, caller, now)
+    );
+    return result;
+}
+/** @brief Waits for a real cutoff after membership or presence
+ * changes. */
+bool queryImageCurrent(
+    const service::room::RuntimeImage& image,
+    const service::room::RuntimeCutoff& context
+)
+{
+    using Phase = service::room::RuntimePhase;
+    if (image.managed && (image.managed->phase == Phase::Settling ||
+                          image.managed->phase == Phase::Finished))
+        return true;
+    if (image.actor.players.size() != context.roster.size())
+        return false;
+    for (std::size_t i = 0; i < context.roster.size(); ++i)
+        if (image.actor.players[i].member != context.roster[i].member)
+            return false;
+    if (image.managed)
+        for (std::size_t i = 0;
+             i < image.managed->allocation.members.size();
+             ++i)
+        {
+            const auto& member = image.managed->allocation.members[i];
+            const auto current = std::find_if(
+                context.roster.begin(),
+                context.roster.end(),
+                [&](const auto& value)
+                { return value.member == member; }
+            );
+            const bool online = current != context.roster.end() &&
+                                current->online;
+            if (image.managed->online[i] != online)
+                return false;
+        }
+    return true;
+}
+
+/** @brief Reserves a bounded command slot, including a future cutoff
+ * slot. The caller publishes the numeric operation key only after
+ * Authority WAL ACK.
+ */
+std::expected<std::uint64_t, wire::ErrorCode> acceptRoomCommand(
+    Work& work,
+    const RoomRouteRecord& route,
+    const service::room::RuntimeCommand& command,
+    const RoomDirectoryLimits& limits,
+    std::string stableKey = {}
+)
+{
+    const auto image = work.base->roomImages.find(route.identity);
+    if (image == work.base->roomImages.end() ||
+        route.lifecycle != RoomRouteLifecycle::Active ||
+        work.roomChanges.size() >= limits.maxCommands)
+        return std::unexpected(wire::ERR_UNAVAILABLE);
+    if (!stableKey.empty() && route.receipts.contains(stableKey))
+        return route.receipts.at(stableKey).sequence;
+    std::size_t staged = 0, tail = 0;
+    for (const auto& input : route.inbox)
+        if (input.operation.kind == RoomIngressKind::Tick)
+            tail = 0;
+        else
+            ++tail;
+    for (const auto& change : work.roomChanges)
+        if (const auto* accept = std::get_if<RoomAccept>(&change);
+            accept && accept->room == route.identity)
+        {
+            if (!stableKey.empty() &&
+                accept->operation.id == stableKey)
+                return route.nextSequence + staged;
+            ++staged;
+            if (accept->operation.kind == RoomIngressKind::Tick)
+                tail = 0;
+            else
+                ++tail;
+        }
+    if (tail >= image->second->policy.maxCommands ||
+        route.inbox.size() + staged + 1 >= limits.maxInbox ||
+        route.receipts.size() + staged + 1 >= limits.maxReceipts ||
+        staged >= UINT64_MAX - route.nextSequence)
+        return std::unexpected(wire::ERR_UNAVAILABLE);
+    const auto sequence = route.nextSequence + staged;
+    auto bytes = service::room::wire::encodeCommand(command);
+    if (!bytes || bytes->size() > limits.maxOperationBytes)
+        return std::unexpected(wire::ERR_INVALID_REQUEST);
+    RoomIngressKind kind = RoomIngressKind::Input;
+    if (command.kind == service::room::RuntimeCommandKind::Ready)
+        kind = RoomIngressKind::Ready;
+    else if (
+        command.kind ==
+        service::room::RuntimeCommandKind::SettlementAck
+    )
+        kind = RoomIngressKind::Settlement;
+    work.roomChanges.emplace_back(
+        RoomAccept{
+            route.identity,
+            route.ownerEpoch,
+            {stableKey.empty() ? std::to_string(sequence)
+                               : std::move(stableKey),
+             kind,
+             0,
+             std::move(*bytes)}
+        }
+    );
+    return sequence;
+}
+
 /** @brief Constructs one immutable storage intent from the committed
  * managed cohort. */
 arena::storage::SaveResultRequest
-settlementRequest(const ManagedMatchCheckpoint& match)
+settlementRequest(const service::room::RuntimeManaged& match)
 {
     arena::storage::SaveResultRequest request;
     auto* record = request.mutable_match();
@@ -240,16 +569,18 @@ settlementRequest(const ManagedMatchCheckpoint& match)
     record->set_match_id(result.matchId);
     record->set_room_id(result.roomId.value());
     record->set_state(
-        result.reason == SettlementReason::Completed ? "completed"
-                                                     : "aborted"
+        result.reason == service::room::RuntimeReason::Completed
+            ? "completed"
+            : "aborted"
     );
     record->set_result_version(1);
     record->set_winner_player_id(result.winnerPlayerId);
     record->set_final_tick(result.finalTick);
     record->set_final_checksum(result.finalChecksum);
     record->set_finish_reason(
-        result.reason == SettlementReason::Completed ? "completed"
-        : result.reason == SettlementReason::ReadyTimeout
+        result.reason == service::room::RuntimeReason::Completed
+            ? "completed"
+        : result.reason == service::room::RuntimeReason::ReadyTimeout
             ? "ready_timeout"
             : "member_unavailable"
     );
@@ -271,8 +602,8 @@ settlementRequest(const ManagedMatchCheckpoint& match)
         p->set_player_id(member.playerId.value());
         p->set_slot(static_cast<std::uint32_t>(i + 1));
         p->set_session_id(member.sessionId.value());
-        p->set_membership_epoch(member.roomEpoch);
-        p->set_initial_mmr(member.initialMmr);
+        p->set_membership_epoch(member.epoch);
+        p->set_initial_mmr(match.allocation.initialMmr[i]);
         p->set_last_input_seq(found->sequence);
         p->set_final_x(found->x);
         p->set_final_y(found->y);
@@ -314,6 +645,16 @@ struct LobbyService::State : std::enable_shared_from_this<State>
         std::uint64_t receiptEpoch{0}, receiptSession{0};
         std::uint32_t mmr{0};
         bool hasMmr{false};
+        enum class RoomWait
+        {
+            None,
+            Join,
+            Match,
+            Command,
+            Query
+        } roomWait{RoomWait::None};
+        RoomIdentity room;
+        std::string operationId;
         std::vector<std::uint64_t> revoked;
         ~Job()
         {
@@ -335,6 +676,7 @@ struct LobbyService::State : std::enable_shared_from_this<State>
         , auth(strand, config.auth)
         , storage(strand, config.storage)
         , authority(strand, config.authority)
+        , coordinator(strand, authority, coordinatorConfig(config))
         , timer(strand)
     {
     }
@@ -342,6 +684,7 @@ struct LobbyService::State : std::enable_shared_from_this<State>
     {
         arena::security::eraseSecret(config.auth.token);
         arena::security::eraseSecret(config.storage.token);
+        arena::security::eraseSecret(config.rooms.token);
     }
     void start()
     {
@@ -519,6 +862,16 @@ struct LobbyService::State : std::enable_shared_from_this<State>
                                 .has_match_join_request()
                         )
                             self->prepareMatch(job);
+                        else if (
+                            job->kind == Job::Kind::Execute &&
+                            (job->execute.message()
+                                 .has_room_snapshot_request() ||
+                             job->execute.message()
+                                 .has_room_status_request() ||
+                             job->execute.message()
+                                 .has_settlement_request())
+                        )
+                            self->readRoom(job);
                         else
                             self->mutate(job);
                     }
@@ -681,6 +1034,8 @@ struct LobbyService::State : std::enable_shared_from_this<State>
     void reject(const std::shared_ptr<Job>&, wire::ErrorCode);
     void mutate(const std::shared_ptr<Job>&);
     void poll();
+    void pollRoom(const std::shared_ptr<Job>&);
+    void readRoom(const std::shared_ptr<Job>&);
     void probes();
     void reserveIds();
     void settlements();
@@ -736,6 +1091,7 @@ struct LobbyService::State : std::enable_shared_from_this<State>
         catch (...)
         {
         }
+        coordinator.stop();
         authority.stop();
     }
     void stop()
@@ -760,14 +1116,18 @@ struct LobbyService::State : std::enable_shared_from_this<State>
     AuthClient auth;
     StorageClient storage;
     LobbyAuthority authority;
+    RoomCoordinator coordinator;
     boost::asio::steady_timer timer;
     std::shared_ptr<State> keepAlive;
     std::mutex mutex;
     std::map<std::uint64_t, std::shared_ptr<Job>> jobs;
     std::uint64_t nextJob{0};
     std::atomic<std::size_t> active{0}, background{0};
-    std::atomic<bool> stopping{false}, stopped{false}, fatal{false},
-        authReady{false}, storageReady{false};
+    std::atomic<bool> stopping{false}, stopped{false}, fatal{false};
+    /// One atomic value publishes result and configuration identity
+    /// together; zero rejects readiness.
+    std::atomic<std::uint64_t> authReadyVersion{0},
+        storageReadyVersion{0};
     bool stopApplied{false};
     bool authProbe{false}, storageProbe{false}, idPending{false},
         settlementPending{false};
@@ -1365,13 +1725,25 @@ void LobbyService::State::reject(
 void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
 {
     const auto lease = config.transportLease;
+    const auto limits = config.authority.directoryLimits;
+    const auto maxRooms = config.authority.rooms.maxRooms;
+    struct AdmissionValue
+    {
+        Job::RoomWait kind{Job::RoomWait::None};
+        RoomIdentity room;
+        std::uint64_t sequence{0};
+    };
+    auto admitted = std::make_shared<AdmissionValue>();
     const bool tick = job->kind == Job::Kind::Execute &&
                       static_cast<unsigned>(
                           job->execute.message().payload_case()
                       ) >= 50;
     transact(
         job,
-        [job, lease](Work& work, Capture capture)
+        [job, lease, limits, admitted, maxRooms](
+            Work& work,
+            Capture capture
+        )
         {
             if (job->kind == Job::Kind::Detach)
             {
@@ -1481,11 +1853,100 @@ void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
                     );
                     return;
                 }
+                const auto roomId = message.room_join_request()
+                                        .room_id();
+                // Reject managed-room transitions before reserving a
+                // worker.
+                if ((roomId & (std::uint64_t{1} << 63)) ||
+                    (authorized->session.roomId &&
+                     work.online->managedRoom(
+                         *authorized->session.roomId
+                     )))
+                {
+                    capture(
+                        std::unexpected(wire::ERR_BUSINESS_FAILURE)
+                    );
+                    return;
+                }
+                const RoomRouteRecord* current = nullptr;
+                for (const auto& [id, image] : work.base->roomImages)
+                {
+                    (void)image;
+                    if (id.room != roomId)
+                        continue;
+                    const auto* route = work.base->directory->find(
+                        id
+                    );
+                    if (route && route->lifecycle ==
+                                     RoomRouteLifecycle::Active)
+                        current = route;
+                }
+                int pending = -1;
+                for (int i = 0; i < work.meta.pending_rooms_size();
+                     ++i)
+                    if (work.meta.pending_rooms(i).room_id() ==
+                        roomId)
+                    {
+                        pending = i;
+                        break;
+                    }
+                if (!current)
+                {
+                    if (pending < 0)
+                    {
+                        if (work.meta.incarnation_high_water() ==
+                                UINT64_MAX ||
+                            work.base->roomImages.size() +
+                                    work.legacyRooms.actors.size() +
+                                    static_cast<std::size_t>(
+                                        work.meta.pending_rooms_size()
+                                    ) >=
+                                maxRooms ||
+                            work.base->directory->size() +
+                                    static_cast<std::size_t>(
+                                        work.meta.pending_rooms_size()
+                                    ) >=
+                                limits.maxRooms)
+                        {
+                            capture(
+                                std::unexpected(wire::ERR_UNAVAILABLE)
+                            );
+                            return;
+                        }
+                        work.meta.set_incarnation_high_water(
+                            work.meta.incarnation_high_water() + 1
+                        );
+                        auto* reservation = work.meta
+                                                .add_pending_rooms();
+                        reservation->set_room_id(roomId);
+                        reservation->set_incarnation(
+                            work.meta.incarnation_high_water()
+                        );
+                        reservation->set_match_id(0);
+                        reservation->set_created_unix_ms(
+                            static_cast<std::uint64_t>(work.wallNow) *
+                            1000
+                        );
+                        reservation->set_deadline_nanos(
+                            expiry(work.now, 10s)
+                        );
+                    }
+                    admitted->kind = Job::RoomWait::Join;
+                    capture(internalReply());
+                    return;
+                }
+                if (pending >= 0 &&
+                    (work.meta.pending_rooms(pending).match_id() !=
+                         0 ||
+                     work.meta.pending_rooms(pending)
+                             .deadline_nanos() <= nanos(work.now)))
+                {
+                    capture(std::unexpected(wire::ERR_UNAVAILABLE));
+                    return;
+                }
                 auto result = work.online->joinRoom(
                     session,
-                    arena::domain::RoomId{
-                        message.room_join_request().room_id()
-                    }
+                    arena::domain::RoomId{roomId}
                 );
                 if (!result)
                 {
@@ -1494,6 +1955,11 @@ void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
                     );
                     return;
                 }
+                if (pending >= 0)
+                    work.meta.mutable_pending_rooms()->DeleteSubrange(
+                        pending,
+                        1
+                    );
                 reply.set_msg_id(wire::MSG_ROOM_JOIN_RESPONSE);
                 encodeState(
                     *result,
@@ -1542,6 +2008,23 @@ void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
                 if (replay)
                 {
                     reply.set_msg_id(wire::MSG_MATCH_JOIN_RESPONSE);
+                    if (replay->state ==
+                            service::match::TicketState::Assigned &&
+                        !replay->roomId)
+                    {
+                        if (replay->active)
+                        {
+                            admitted->kind = Job::RoomWait::Match;
+                            capture(internalReply());
+                        }
+                        else
+                            capture(
+                                std::unexpected(
+                                    wire::ERR_BUSINESS_FAILURE
+                                )
+                            );
+                        return;
+                    }
                     encodeTicket(
                         *replay,
                         *reply.mutable_match_join_response()
@@ -1570,6 +2053,23 @@ void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
                     return;
                 }
                 reply.set_msg_id(wire::MSG_MATCH_JOIN_RESPONSE);
+                if (result->state ==
+                        service::match::TicketState::Assigned &&
+                    !result->roomId)
+                {
+                    if (result->active)
+                    {
+                        admitted->kind = Job::RoomWait::Match;
+                        capture(internalReply());
+                    }
+                    else
+                        capture(
+                            std::unexpected(
+                                wire::ERR_BUSINESS_FAILURE
+                            )
+                        );
+                    return;
+                }
                 encodeTicket(
                     *result,
                     *reply.mutable_match_join_response()
@@ -1619,6 +2119,23 @@ void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
                     cancel ? wire::MSG_MATCH_CANCEL_RESPONSE
                            : wire::MSG_MATCH_STATUS_RESPONSE
                 );
+                if (result->state ==
+                        service::match::TicketState::Assigned &&
+                    !result->roomId)
+                {
+                    if (result->active)
+                    {
+                        admitted->kind = Job::RoomWait::Match;
+                        capture(internalReply());
+                    }
+                    else
+                        capture(
+                            std::unexpected(
+                                wire::ERR_BUSINESS_FAILURE
+                            )
+                        );
+                    return;
+                }
                 encodeTicket(
                     *result,
                     cancel ? *reply.mutable_match_cancel_response()
@@ -1632,205 +2149,121 @@ void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
             default:
                 break;
             }
-            const auto limit = work.rooms->positionLimit();
-            const auto requestId = message.request_id();
-            bool admitted = false;
-            if (message.has_room_status_request())
-                admitted = work.rooms->status(
-                    session,
-                    logical,
-                    [capture, limit, requestId](auto result)
-                    {
-                        if (!result)
-                        {
-                            capture(std::unexpected(result.error()));
-                            return;
-                        }
-                        Envelope reply;
-                        reply.set_request_id(requestId);
-                        reply.set_msg_id(
-                            wire::MSG_ROOM_STATUS_RESPONSE
-                        );
-                        encodeRoomStatus(
-                            *result,
-                            limit,
-                            *reply.mutable_room_status_response()
-                                 ->mutable_state()
-                        );
-                        capture(std::move(reply));
-                    }
-                );
-            else if (message.has_settlement_request())
+            using CommandKind = service::room::RuntimeCommandKind;
+            service::room::RuntimeCommand command;
+            command.caller = service::room::RuntimeAuthorization{
+                {authorized->session.playerId,
+                 logical,
+                 authorized->session.roomEpoch},
+                session.epoch,
+                session.connectionId,
+                true
+            };
+            if (message.has_room_ready_request())
             {
-                if (!message.settlement_request().match_id())
+                const auto& value = message.room_ready_request();
+                if (!value.actor_incarnation() ||
+                    !value.membership_epoch())
                 {
                     capture(
                         std::unexpected(wire::ERR_INVALID_REQUEST)
                     );
                     return;
                 }
-                admitted = work.rooms->settlement(
-                    session,
-                    logical,
-                    message.settlement_request().match_id(),
-                    [capture, requestId](auto result)
-                    {
-                        if (!result)
-                        {
-                            capture(std::unexpected(result.error()));
-                            return;
-                        }
-                        Envelope reply;
-                        reply.set_request_id(requestId);
-                        reply.set_msg_id(
-                            wire::MSG_SETTLEMENT_RESPONSE
-                        );
-                        encodeSettlement(
-                            *result,
-                            *reply.mutable_settlement_response()
-                                 ->mutable_state()
-                        );
-                        capture(std::move(reply));
-                    }
-                );
+                command.kind = CommandKind::Ready;
+                command.incarnation = value.actor_incarnation();
+                command.caller->member
+                    .epoch = value.membership_epoch();
+                command.ready = value.ready();
             }
-            else
+            else if (message.has_room_input_request())
             {
-                if (!authorized->session.roomId)
+                const auto& value = message.room_input_request();
+                if (!value.actor_incarnation() ||
+                    !value.membership_epoch() || !value.seq() ||
+                    value.dx() < -1 || value.dx() > 1 ||
+                    value.dy() < -1 || value.dy() > 1)
                 {
                     capture(
-                        std::unexpected(wire::ERR_BUSINESS_FAILURE)
+                        std::unexpected(wire::ERR_INVALID_REQUEST)
                     );
                     return;
                 }
-                const auto room = *authorized->session.roomId;
-                if (message.has_room_snapshot_request())
-                    admitted = work.rooms->snapshot(
-                        session,
-                        logical,
-                        room,
-                        [capture, limit, requestId](auto result)
-                        {
-                            if (!result)
-                            {
-                                capture(
-                                    std::unexpected(result.error())
-                                );
-                                return;
-                            }
-                            Envelope reply;
-                            reply.set_request_id(requestId);
-                            reply.set_msg_id(
-                                wire::MSG_ROOM_SNAPSHOT_RESPONSE
-                            );
-                            encodeSnapshot(
-                                *result,
-                                limit,
-                                *reply
-                                     .mutable_room_snapshot_response()
-                                     ->mutable_state()
-                            );
-                            capture(std::move(reply));
-                        }
-                    );
-                else if (message.has_room_ready_request())
-                {
-                    const auto& value = message.room_ready_request();
-                    if (!value.actor_incarnation() ||
-                        !value.membership_epoch())
-                    {
-                        capture(
-                            std::unexpected(wire::ERR_INVALID_REQUEST)
-                        );
-                        return;
-                    }
-                    admitted = work.rooms->ready(
-                        session,
-                        logical,
-                        room,
-                        value.actor_incarnation(),
-                        value.membership_epoch(),
-                        value.ready(),
-                        [capture, limit, requestId](auto result)
-                        {
-                            if (!result)
-                            {
-                                capture(
-                                    std::unexpected(result.error())
-                                );
-                                return;
-                            }
-                            Envelope reply;
-                            reply.set_request_id(requestId);
-                            reply.set_msg_id(
-                                wire::MSG_ROOM_READY_RESPONSE
-                            );
-                            encodeRoomStatus(
-                                *result,
-                                limit,
-                                *reply.mutable_room_ready_response()
-                                     ->mutable_state()
-                            );
-                            capture(std::move(reply));
-                        }
-                    );
-                }
-                else if (message.has_room_input_request())
-                {
-                    const auto& value = message.room_input_request();
-                    if (!value.actor_incarnation() ||
-                        !value.membership_epoch() || !value.seq() ||
-                        value.dx() < -1 || value.dx() > 1 ||
-                        value.dy() < -1 || value.dy() > 1)
-                    {
-                        capture(
-                            std::unexpected(wire::ERR_INVALID_REQUEST)
-                        );
-                        return;
-                    }
-                    admitted = work.rooms->input(
-                        session,
-                        logical,
-                        room,
-                        value.actor_incarnation(),
-                        value.membership_epoch(),
-                        value.seq(),
-                        value.dx(),
-                        value.dy(),
-                        [capture, limit, requestId](auto result)
-                        {
-                            if (!result)
-                            {
-                                capture(
-                                    std::unexpected(result.error())
-                                );
-                                return;
-                            }
-                            Envelope reply;
-                            reply.set_request_id(requestId);
-                            reply.set_msg_id(
-                                wire::MSG_ROOM_INPUT_RESPONSE
-                            );
-                            encodeSnapshot(
-                                result->snapshot,
-                                limit,
-                                *reply.mutable_room_input_response()
-                                     ->mutable_state()
-                            );
-                            reply.mutable_room_input_response()
-                                ->set_result(
-                                    wireStatus(result->status)
-                                );
-                            capture(std::move(reply));
-                        }
-                    );
-                }
+                command.kind = CommandKind::Input;
+                command.incarnation = value.actor_incarnation();
+                command.caller->member
+                    .epoch = value.membership_epoch();
+                command.sequence = value.seq();
+                command.dx = value.dx();
+                command.dy = value.dy();
             }
-            if (!admitted)
-                capture(std::unexpected(wire::ERR_UNAVAILABLE));
+            else
+            {
+                capture(std::unexpected(wire::ERR_INVALID_REQUEST));
+                return;
+            }
+            const auto* route = roomRoute(
+                *work.base,
+                authorized->session,
+                message
+            );
+            if (!route)
+            {
+                bool recovering = false;
+                if (authorized->session.roomId)
+                {
+                    const auto room = authorized->session.roomId
+                                          ->value();
+                    recovering =
+                        std::any_of(
+                            work.meta.pending_rooms().begin(),
+                            work.meta.pending_rooms().end(),
+                            [room](const auto& pending)
+                            { return pending.room_id() == room; }
+                        ) ||
+                        std::any_of(
+                            work.legacyRooms.actors.begin(),
+                            work.legacyRooms.actors.end(),
+                            [room](const auto& actor)
+                            { return actor.roomId.value() == room; }
+                        );
+                }
+                capture(
+                    std::unexpected(
+                        recovering ? wire::ERR_UNAVAILABLE
+                                   : wire::ERR_BUSINESS_FAILURE
+                    )
+                );
+                return;
+            }
+            const auto sequence = acceptRoomCommand(
+                work,
+                *route,
+                command,
+                limits
+            );
+            if (!sequence)
+            {
+                capture(std::unexpected(sequence.error()));
+                return;
+            }
+            admitted->kind = Job::RoomWait::Command;
+            admitted->room = route->identity;
+            admitted->sequence = *sequence;
+            capture(internalReply());
         },
-        [self = shared_from_this(), job](auto committed)
+        [self = shared_from_this(), job, admitted](auto committed)
         {
+            if (committed.reply &&
+                admitted->kind != Job::RoomWait::None)
+            {
+                job->roomWait = admitted->kind;
+                job->room = admitted->room;
+                job->operationId = std::to_string(admitted->sequence);
+                self->coordinator.wake();
+                self->pollRoom(job);
+                return;
+            }
             if (job->kind == Job::Kind::Execute)
             {
                 self->executeReply(job, std::move(committed));
@@ -1858,6 +2291,234 @@ void LobbyService::State::mutate(const std::shared_ptr<Job>& job)
         tick
     );
 }
+/** @brief Reads one coherent published image; gateway heartbeats own
+ * lease renewal. */
+void LobbyService::State::readRoom(const std::shared_ptr<Job>& job)
+{
+    const auto status = abandoned(job);
+    if (status != rpc::OK)
+    {
+        job->roomWait = Job::RoomWait::None;
+        retire(job, status);
+        return;
+    }
+    if (!authority.stats().ready)
+    {
+        job->roomWait = Job::RoomWait::None;
+        retire(job, rpc::UNAVAILABLE);
+        return;
+    }
+    const auto snapshot = authority.snapshot();
+    if (!snapshot || !snapshot->directory)
+    {
+        job->roomWait = Job::RoomWait::None;
+        retire(job, rpc::UNAVAILABLE);
+        return;
+    }
+    const auto now = config.authority.now();
+    const auto wall = config.authority.wallNow();
+    const auto*
+        caller = queryCaller(*snapshot, job->execute, now, wall);
+    if (!caller)
+    {
+        // Failed authorization never projects another generation's
+        // session.
+        arena::lobby::ExecuteReply reply;
+        *reply.mutable_message() = failure(
+            job->execute.message().request_id(),
+            wire::ERR_UNAUTHENTICATED
+        );
+        reply.set_committed_revision(snapshot->revision);
+        job->roomWait = Job::RoomWait::None;
+        done(job, std::move(reply));
+        return;
+    }
+    const auto& message = job->execute.message();
+    const auto finish =
+        [&](std::expected<Envelope, wire::ErrorCode> reply)
+    {
+        job->roomWait = Job::RoomWait::None;
+        executeReply(job, {std::move(reply), snapshot});
+    };
+    using Kind = service::room::RuntimeCommandKind;
+    service::room::RuntimeCommand command;
+    command.kind = message.has_room_snapshot_request()
+                       ? Kind::Snapshot
+                   : message.has_room_status_request()
+                       ? Kind::Status
+                       : Kind::Settlement;
+    command.caller = queryAuthorization(*snapshot, *caller, now);
+    if (command.kind == Kind::Settlement)
+    {
+        command.matchId = message.settlement_request().match_id();
+        if (!command.matchId)
+        {
+            finish(std::unexpected(wire::ERR_INVALID_REQUEST));
+            return;
+        }
+    }
+    const auto* route = roomRoute(
+        *snapshot,
+        caller->snapshot,
+        message
+    );
+    if (!route)
+    {
+        const bool recovering =
+            caller->snapshot.roomId &&
+            (std::any_of(
+                 snapshot->meta.pending_rooms().begin(),
+                 snapshot->meta.pending_rooms().end(),
+                 [&](const auto& value)
+                 {
+                     return value.room_id() ==
+                            caller->snapshot.roomId->value();
+                 }
+             ) ||
+             std::any_of(
+                 snapshot->core.rooms.actors.begin(),
+                 snapshot->core.rooms.actors.end(),
+                 [&](const auto& value)
+                 { return value.roomId == caller->snapshot.roomId; }
+             ));
+        finish(
+            std::unexpected(
+                recovering ? wire::ERR_UNAVAILABLE
+                           : wire::ERR_BUSINESS_FAILURE
+            )
+        );
+        return;
+    }
+    const auto image = snapshot->roomImages.find(route->identity);
+    if (image == snapshot->roomImages.end())
+    {
+        finish(std::unexpected(wire::ERR_UNAVAILABLE));
+        return;
+    }
+    auto context = queryContext(
+        *snapshot,
+        *caller,
+        route->identity,
+        now,
+        wall
+    );
+    arena::room::CommandResult result;
+    const auto permitted = service::room::authorizeRoomQuery(
+        *image->second,
+        command,
+        context
+    );
+    if (!permitted)
+        result.set_error(
+            static_cast<arena::room::RuntimeError>(permitted.error())
+        );
+    else if (!queryImageCurrent(*image->second, context))
+    {
+        job->roomWait = Job::RoomWait::Query;
+        coordinator.wake();
+        return;
+    }
+    finish(encodeRoomReply(command, result, *image->second));
+}
+void LobbyService::State::pollRoom(const std::shared_ptr<Job>& job)
+{
+    if (job->roomWait == Job::RoomWait::None)
+        return;
+    if (job->roomWait == Job::RoomWait::Query)
+    {
+        readRoom(job);
+        return;
+    }
+    const auto status = abandoned(job);
+    if (status != rpc::OK)
+    {
+        job->roomWait = Job::RoomWait::None;
+        retire(job, status);
+        return;
+    }
+    const auto snapshot = authority.snapshot();
+    if (!snapshot || !snapshot->directory)
+        return;
+    if (job->roomWait == Job::RoomWait::Match)
+    {
+        const auto& request = job->execute;
+        const auto& message = request.message();
+        const auto found = std::find_if(
+            snapshot->core.queue.entries.begin(),
+            snapshot->core.queue.entries.end(),
+            [&](const auto& ticket)
+            {
+                if (ticket.playerId.value() != request.player_id())
+                    return false;
+                return message.has_match_join_request()
+                           ? ticket.joinKey ==
+                                 message.match_join_request()
+                                     .join_key()
+                           : ticket.ticketId.value() ==
+                                 message.match_status_request()
+                                     .ticket_id();
+            }
+        );
+        if (found != snapshot->core.queue.entries.end() &&
+            found->lifecycle.state ==
+                service::match::TicketState::Assigned &&
+            found->active && !found->roomId)
+            return;
+        job->roomWait = Job::RoomWait::None;
+        mutate(job);
+        return;
+    }
+    if (job->roomWait == Job::RoomWait::Join)
+    {
+        const auto roomId = job->execute.message()
+                                .room_join_request()
+                                .room_id();
+        bool found = false;
+        for (const auto& [id, image] : snapshot->roomImages)
+        {
+            (void)image;
+            const auto* route = snapshot->directory->find(id);
+            if (id.room == roomId && route &&
+                route->lifecycle == RoomRouteLifecycle::Active)
+                found = true;
+        }
+        if (found)
+        {
+            job->roomWait = Job::RoomWait::None;
+            mutate(job);
+        }
+        return;
+    }
+    const auto* route = snapshot->directory->find(job->room);
+    if (!route)
+    {
+        job->roomWait = Job::RoomWait::None;
+        retire(job, rpc::INTERNAL);
+        return;
+    }
+    const auto receipt = route->receipts.find(job->operationId);
+    if (receipt == route->receipts.end())
+    {
+        job->roomWait = Job::RoomWait::None;
+        retire(job, rpc::INTERNAL);
+        return;
+    }
+    if (!receipt->second.applied)
+        return;
+    Envelope reply;
+    if (!reply.ParseFromString(receipt->second.response) ||
+        reply.payload_case() == Envelope::PAYLOAD_NOT_SET)
+    {
+        job->roomWait = Job::RoomWait::None;
+        retire(job, rpc::INTERNAL);
+        return;
+    }
+    job->roomWait = Job::RoomWait::None;
+    executeReply(
+        job,
+        LobbyAuthority::CommitReply{std::move(reply), snapshot}
+    );
+}
 void LobbyService::State::poll()
 {
     try
@@ -1875,6 +2536,11 @@ void LobbyService::State::poll()
         }
         for (auto& job : pending)
         {
+            if (job->roomWait != Job::RoomWait::None)
+            {
+                pollRoom(job);
+                continue;
+            }
             const auto status = abandoned(job);
             if (status != rpc::OK)
             {
@@ -1896,7 +2562,7 @@ void LobbyService::State::poll()
         }
         else if (
             !auth.inflight() && !storage.inflight() &&
-            authority.stats().stopped
+            coordinator.stats().stopped && authority.stats().stopped
         )
         {
             if (fatal.load())
@@ -1944,13 +2610,17 @@ void LobbyService::State::probes()
     if (!authProbe && now >= nextAuth)
     {
         authProbe = true;
+        const auto version = runtimeVersion(config.auth.runtime);
         ++background;
         auto accepted = auth.probe(
             {now + 300ms, "lobby-auth-probe", {"lobby"}},
             backgroundGuard(
-                [self = shared_from_this()](auto result)
+                [self = shared_from_this(), version](auto result)
                 {
-                    self->authReady = result.has_value();
+                    self->authReadyVersion.store(
+                        result ? version : 0,
+                        std::memory_order_release
+                    );
                     self->authProbe = false;
                     --self->background;
                     self->nextAuth = Clock::now() + 250ms;
@@ -1959,7 +2629,7 @@ void LobbyService::State::probes()
         );
         if (!accepted)
         {
-            authReady = false;
+            authReadyVersion.store(0, std::memory_order_release);
             authProbe = false;
             --background;
             nextAuth = now + 250ms;
@@ -1968,13 +2638,17 @@ void LobbyService::State::probes()
     if (!storageProbe && now >= nextStorage)
     {
         storageProbe = true;
+        const auto version = runtimeVersion(config.storage.runtime);
         ++background;
         auto accepted = storage.probe(
             {now + 300ms, "lobby-storage-probe", {"lobby"}},
             backgroundGuard(
-                [self = shared_from_this()](auto result)
+                [self = shared_from_this(), version](auto result)
                 {
-                    self->storageReady = result.has_value();
+                    self->storageReadyVersion.store(
+                        result ? version : 0,
+                        std::memory_order_release
+                    );
                     self->storageProbe = false;
                     --self->background;
                     self->nextStorage = Clock::now() + 250ms;
@@ -1983,7 +2657,7 @@ void LobbyService::State::probes()
         );
         if (!accepted)
         {
-            storageReady = false;
+            storageReadyVersion.store(0, std::memory_order_release);
             storageProbe = false;
             --background;
             nextStorage = now + 250ms;
@@ -1994,7 +2668,12 @@ void LobbyService::State::reserveIds()
 {
     const auto snapshot = authority.snapshot();
     const auto& values = snapshot->meta;
-    if (idPending || !storageReady.load() || Clock::now() < nextIds ||
+    if (idPending ||
+        !readyForRuntime(
+            storageReadyVersion,
+            config.storage.runtime
+        ) ||
+        Clock::now() < nextIds ||
         (values.ticket_next() &&
          values.ticket_next() <= values.ticket_last()))
         return;
@@ -2085,19 +2764,25 @@ void LobbyService::State::settlements()
         return;
     const auto snapshot = authority.snapshot();
     const auto now = nanos(config.authority.now());
-    for (const auto& match : snapshot->core.rooms.matches)
-        if (match.phase == RoomPhase::Settling && match.result &&
-            delivery(snapshot->meta, match.allocation.matchId) < 0)
+    for (const auto& [identity, image] : snapshot->roomImages)
+        if (image->managed &&
+            image->managed->phase ==
+                service::room::RuntimePhase::Settling &&
+            image->managed->result &&
+            delivery(
+                snapshot->meta,
+                image->managed->allocation.matchId
+            ) < 0)
         {
             settlementPending = true;
             ++background;
-            const auto id = match.allocation.matchId;
+            const auto id = image->managed->allocation.matchId;
             const auto limit = config.settlementMaxAttempts;
             const auto elapsed = config.settlementMaxElapsed;
             const auto base = config.retryBase;
             const auto maximum = config.retryMax;
             auto accepted = authority.submit(
-                [id, limit, elapsed, base, maximum](
+                [identity, id, limit, elapsed, base, maximum](
                     Work& work,
                     Capture capture
                 )
@@ -2107,23 +2792,16 @@ void LobbyService::State::settlements()
                         capture(internalReply());
                         return;
                     }
-                    const auto rooms = work.rooms->checkpoint();
-                    if (!rooms)
-                    {
-                        capture(
-                            std::unexpected(wire::ERR_UNAVAILABLE)
-                        );
-                        return;
-                    }
-                    const auto found = std::find_if(
-                        rooms->matches.begin(),
-                        rooms->matches.end(),
-                        [id](const auto& m)
-                        { return m.allocation.matchId == id; }
+                    const auto found = work.base->roomImages.find(
+                        identity
                     );
-                    if (found == rooms->matches.end() ||
-                        !found->result ||
-                        found->phase != RoomPhase::Settling)
+                    if (found == work.base->roomImages.end() ||
+                        !found->second->managed ||
+                        found->second->managed->allocation.matchId !=
+                            id ||
+                        !found->second->managed->result ||
+                        found->second->managed->phase !=
+                            service::room::RuntimePhase::Settling)
                     {
                         capture(
                             std::unexpected(
@@ -2152,17 +2830,23 @@ void LobbyService::State::settlements()
                     intent->set_phase(
                         meta::SettlementDelivery::PENDING
                     );
-                    settlementRequest(*found).SerializeToString(
-                        intent->mutable_request()
-                    );
+                    if (!settlementRequest(*found->second->managed)
+                             .SerializeToString(
+                                 intent->mutable_request()
+                             ))
+                        throw std::runtime_error(
+                            "settlement encoding failed"
+                        );
                     capture(internalReply());
                 },
                 Clock::now() + 1000ms,
-                [self = shared_from_this()](auto)
-                {
-                    self->settlementPending = false;
-                    --self->background;
-                }
+                backgroundGuard(
+                    [self = shared_from_this()](auto)
+                    {
+                        self->settlementPending = false;
+                        --self->background;
+                    }
+                )
             );
             if (!accepted)
             {
@@ -2187,7 +2871,10 @@ void LobbyService::State::settlements()
             recordSettlement(id, rpc::DEADLINE_EXCEEDED);
             return;
         }
-        if (!storageReady.load())
+        if (!readyForRuntime(
+                storageReadyVersion,
+                config.storage.runtime
+            ))
         {
             settlementPending = false;
             --background;
@@ -2365,11 +3052,12 @@ void LobbyService::State::recordSettlement(
         return;
     }
     const auto retention = config.authority.rooms.resultRetention;
+    const auto limits = config.authority.directoryLimits;
     auto accepted = authority.submit(
-        [id,
-         status,
-         acknowledged,
-         retention](Work& work, Capture capture)
+        [id, status, acknowledged, retention, limits](
+            Work& work,
+            Capture capture
+        )
         {
             const auto index = delivery(work.meta, id);
             if (index < 0)
@@ -2381,9 +3069,39 @@ void LobbyService::State::recordSettlement(
             intent->set_last_status(
                 static_cast<std::uint32_t>(status)
             );
+            const auto acknowledge = [&](bool committed)
+            {
+                for (const auto& [identity, image] :
+                     work.base->roomImages)
+                    if (image->managed &&
+                        image->managed->allocation.matchId == id)
+                    {
+                        const auto* route = work.base->directory
+                                                ->find(identity);
+                        if (!route)
+                            return false;
+                        service::room::RuntimeCommand command;
+                        command.kind = service::room::
+                            RuntimeCommandKind::SettlementAck;
+                        command.matchId = id;
+                        command.committed = committed;
+                        return acceptRoomCommand(
+                                   work,
+                                   *route,
+                                   command,
+                                   limits,
+                                   "settlement/" +
+                                       std::to_string(id) +
+                                       (committed ? "/ack"
+                                                  : "/blocked")
+                        )
+                            .has_value();
+                    }
+                return false;
+            };
             if (acknowledged)
             {
-                if (!work.rooms->acknowledgeSettlement(id, true))
+                if (!acknowledge(true))
                 {
                     capture(std::unexpected(wire::ERR_INTERNAL));
                     return;
@@ -2405,7 +3123,7 @@ void LobbyService::State::recordSettlement(
                 status == rpc::INVALID_ARGUMENT ||
                 status == rpc::INTERNAL)
             {
-                if (!work.rooms->acknowledgeSettlement(id, false))
+                if (!acknowledge(false))
                 {
                     capture(std::unexpected(wire::ERR_INTERNAL));
                     return;
@@ -2532,6 +3250,63 @@ LobbyService::Admission LobbyService::heartbeat(
     job->heartbeatComplete = std::move(complete);
     return m_state->admit(std::move(job));
 }
+LobbyService::Admission LobbyService::migrate(
+    arena::lobby::MigrationRequest request,
+    Context context,
+    Completion<arena::lobby::MigrationReply> complete
+)
+{
+    if (!complete || request.version() != 1 || !request.room_id() ||
+        !request.incarnation() || !request.owner_epoch() ||
+        !request.migration_id() || request.target_node().empty() ||
+        request.target_node().size() > 64 ||
+        request.GetReflection()
+            ->GetUnknownFields(request)
+            .field_count())
+        return std::unexpected(rpc::INVALID_ARGUMENT);
+    if (context.deadline <= Clock::now())
+        return std::unexpected(rpc::DEADLINE_EXCEEDED);
+    const RoomIdentity room{request.room_id(), request.incarnation()};
+    const auto migration = request.migration_id();
+    return m_state->coordinator.startMigration(
+        room,
+        request.owner_epoch(),
+        migration,
+        std::move(*request.mutable_target_node()),
+        context.deadline,
+        [state = m_state,
+         room,
+         migration,
+         complete = std::move(complete)](auto result) mutable
+        {
+            if (!result)
+                complete(std::unexpected(result.error()));
+            else
+                complete(migrationView(
+                    state->authority.snapshot(),
+                    room,
+                    migration
+                ));
+        }
+    );
+}
+LobbyService::Result<arena::lobby::MigrationReply>
+LobbyService::migrationStatus(
+    arena::lobby::MigrationStatusRequest request
+) const
+{
+    if (request.version() != 1 || !request.room_id() ||
+        !request.incarnation() ||
+        request.GetReflection()
+            ->GetUnknownFields(request)
+            .field_count())
+        return std::unexpected(rpc::INVALID_ARGUMENT);
+    return migrationView(
+        m_state->authority.snapshot(),
+        {request.room_id(), request.incarnation()},
+        request.migration_id()
+    );
+}
 void LobbyService::stop() noexcept
 {
     try
@@ -2544,6 +3319,15 @@ void LobbyService::stop() noexcept
 }
 LobbyService::Stats LobbyService::stats() const noexcept
 {
+    const auto authVersion = runtimeVersion(
+        m_state->config.auth.runtime
+    );
+    const auto storageVersion = runtimeVersion(
+        m_state->config.storage.runtime
+    );
+    const auto roomVersion = runtimeVersion(
+        m_state->config.rooms.runtime
+    );
     Stats result;
     result.authority = m_state->authority.stats();
     result.initialized = result.authority.initialized;
@@ -2552,8 +3336,13 @@ LobbyService::Stats LobbyService::stats() const noexcept
     result.stopped = m_state->stopped.load();
     result.authInflight = m_state->auth.inflight();
     result.storageInflight = m_state->storage.inflight();
+    const auto rooms = m_state->coordinator.stats();
+    result.roomInflight = rooms.rpcInflight;
+    result.coordinatorPending = rooms.inflight + rooms.walInflight +
+                                rooms.migrations;
     result.active = m_state->active.load() +
-                    m_state->background.load();
+                    m_state->background.load() +
+                    result.coordinatorPending;
     const auto snapshot = m_state->authority.snapshot();
     if (snapshot)
     {
@@ -2576,13 +3365,46 @@ LobbyService::Stats LobbyService::stats() const noexcept
                                           .persistenceCommitted;
         result.settlementsBlocked = snapshot->core.rooms.metrics
                                         .blockedSettlements;
+        const auto addCounter =
+            [](std::uint64_t& total, std::uint64_t value)
+        { total += std::min(value, UINT64_MAX - total); };
+        // Retirement atomically moves these counters into the legacy
+        // ledger.
+        for (const auto& [id, image] : snapshot->roomImages)
+        {
+            (void)id;
+            ++result.roomActors;
+            addCounter(result.roomTicks, image->counters.ticks);
+            addCounter(
+                result.settlementsCommitted,
+                image->counters.settlementsCommitted
+            );
+            if (image->managed && image->managed->persistenceBlocked)
+                ++result.settlementsBlocked;
+        }
         result.ready = !result.stopping && result.authority.ready &&
-                       m_state->authReady.load() &&
-                       m_state->storageReady.load() &&
-                       snapshot->meta.ticket_next() &&
+                       m_state->authReadyVersion.load(
+                           std::memory_order_acquire
+                       ) == authVersion &&
+                       m_state->storageReadyVersion.load(
+                           std::memory_order_acquire
+                       ) == storageVersion &&
+                       rooms.ready && snapshot->meta.ticket_next() &&
                        snapshot->meta.ticket_next() <=
                            snapshot->meta.ticket_last();
     }
+    // Monotonic versions prevent a reload between independent
+    // dependency reads from combining successful observations
+    // belonging to different views.
+    result.ready = result.ready &&
+                   authVersion ==
+                       runtimeVersion(m_state->config.auth.runtime) &&
+                   storageVersion ==
+                       runtimeVersion(
+                           m_state->config.storage.runtime
+                       ) &&
+                   roomVersion ==
+                       runtimeVersion(m_state->config.rooms.runtime);
     return result;
 }
 } // namespace service::lobby

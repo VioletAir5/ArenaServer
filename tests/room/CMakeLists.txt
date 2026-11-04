@@ -55,7 +55,7 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
             COMMAND_ERROR_IS_FATAL ANY)
     endif()
     set(journey_arguments "$<TARGET_FILE:ArenaServer>" "$<TARGET_FILE:arena_replay>"
-        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>" --room "$<TARGET_FILE:ArenaRoom>"
         --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
         --replay-export "$<TARGET_FILE:arena_replay_export>" --pg-bin "${journey_pg_bin}"
         --report-dir "${CMAKE_CURRENT_BINARY_DIR}/full-journey-report")
@@ -84,3 +84,34 @@ target_compile_options(arena_room_recovery_tests PRIVATE -Wall -Wextra -Wpedanti
 target_link_options(arena_room_recovery_tests PRIVATE
     $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
 gtest_discover_tests(arena_room_recovery_tests)
+
+add_executable(arena_room_runtime_tests RoomRuntimeTest.cpp)
+target_link_libraries(arena_room_runtime_tests PRIVATE arena_room_runtime GTest::gtest_main)
+target_compile_options(arena_room_runtime_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_room_runtime_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_room_runtime_tests)
+add_executable(arena_room_wire_tests RoomWireTest.cpp)
+target_link_libraries(arena_room_wire_tests PRIVATE arena_room_wire arena_room_runtime GTest::gtest_main)
+target_compile_options(arena_room_wire_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_room_wire_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_room_wire_tests)
+
+add_executable(arena_room_worker_tests RoomWorkerTest.cpp)
+target_link_libraries(arena_room_worker_tests PRIVATE arena_room_worker GTest::gtest_main)
+target_compile_options(arena_room_worker_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_room_worker_tests PRIVATE -Wl,--wrap=fdatasync
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_room_worker_tests)
+
+add_executable(arena_room_query_tests RoomQueryTest.cpp)
+target_link_libraries(arena_room_query_tests PRIVATE arena_room_query arena_room_runtime GTest::gtest_main)
+target_compile_options(arena_room_query_tests PRIVATE -Wall -Wextra -Wpedantic
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined>)
+target_link_options(arena_room_query_tests PRIVATE
+    $<$<BOOL:${ARENA_ENABLE_UBSAN}>:-fsanitize=undefined> -no-pie)
+gtest_discover_tests(arena_room_query_tests)

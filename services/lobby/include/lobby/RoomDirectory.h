@@ -13,10 +13,11 @@
 #include <string>
 #include <vector>
 
-#include "lobby/DurableStateStore.h"
+#include "persistence/AtomicJournal.h"
 
 namespace service::lobby
 {
+using arena::persistence::AtomicJournal;
 /** @brief Identifies one room lifetime independently of its owner. */
 struct RoomIdentity
 {
@@ -28,7 +29,9 @@ struct RoomIdentity
  * simulation. */
 struct RoomWorkerImage
 {
-    std::uint64_t tick{0}; ///< Last committed logical tick.
+    std::uint64_t tick{
+        0
+    }; ///< Last committed physical simulation tick.
     std::uint64_t checksum{
         0
     }; ///< Worker-reported canonical checksum.
@@ -36,6 +39,8 @@ struct RoomWorkerImage
         0
     }; ///< Last consumed ordered ingress record.
     std::string checkpoint; ///< Opaque canonical worker checkpoint.
+    /// Every committed 50ms cutoff, including Settling and Finished.
+    std::uint64_t logicalTick{0};
     bool operator==(const RoomWorkerImage&) const = default;
 };
 enum class RoomIngressKind : std::uint8_t
@@ -119,6 +124,13 @@ struct RoomHandoff
         frozenFingerprint; ///< Full image and identity digest.
     bool operator==(const RoomHandoff&) const = default;
 };
+/** @brief Fences ingress independently of retained actor history. */
+enum class RoomRouteLifecycle : std::uint8_t
+{
+    Active,
+    Closing,
+    Retired
+};
 /** @brief Is immutable after publication; it contains no actor or
  * live callbacks. */
 struct RoomRouteRecord
@@ -133,7 +145,7 @@ struct RoomRouteRecord
     std::uint64_t nextSequence{1};
     std::uint64_t admittedTick{
         0
-    }; ///< Includes durable ticks not yet applied.
+    }; ///< Includes durable logical cutoffs not yet applied.
     std::uint64_t initialTick{
         0
     }; ///< First opaque replay-history anchor.
@@ -141,15 +153,19 @@ struct RoomRouteRecord
     std::map<std::string, RoomReceipt> receipts;
     std::uint64_t migrationWatermark{0};
     std::optional<RoomHandoff> handoff;
+    /// Retired routes remain bounded fencing and archive anchors.
+    RoomRouteLifecycle lifecycle{RoomRouteLifecycle::Active};
     bool operator==(const RoomRouteRecord&) const = default;
 };
 struct RoomDirectoryLimits
 {
+    /// Total retained routes, including Closing and Retired
+    /// lifetimes.
     std::size_t maxRooms{4096};
     std::size_t maxInbox{512};
     std::size_t maxReceipts{2048};
-    std::size_t maxOperationBytes{16 * 1024};
-    std::size_t maxImageBytes{256 * 1024};
+    std::size_t maxOperationBytes{32 * 1024};
+    std::size_t maxImageBytes{128 * 1024};
     std::size_t maxReplayBytes{1024 * 1024};
     std::size_t maxCommands{128};
     std::int64_t receiptRetentionNanos{10'000'000'000};
@@ -174,18 +190,33 @@ class RoomDirectory final
 {
 public:
     std::uint64_t revision() const noexcept;
+    /** @brief Last local revision changing owner, lifecycle or
+     * handoff facts. */
+    std::uint64_t controlRevision() const noexcept
+    {
+        return m_controlRevision;
+    }
     std::size_t size() const noexcept;
     const RoomRouteRecord* find(RoomIdentity) const noexcept;
+    /** @brief Lists all retained identities, including retired
+     * lifetimes. */
+    std::vector<RoomIdentity> ids() const;
 
 private:
     friend class RoomMigration;
     RoomDirectory() = default;
     std::uint64_t m_revision{0};
+    /// Ephemeral scheduling index rebuilt from the durable revision
+    /// on load.
+    std::uint64_t m_controlRevision{0};
     std::string m_boot;
     RoomDirectoryLimits m_limits;
     std::map<RoomIdentity, std::shared_ptr<const RoomRouteRecord>>
         m_rooms;
-    std::shared_ptr<const DurableStateStore::Snapshot> m_durable;
+    /// Exact persisted replay-key count, including retired room
+    /// history.
+    std::size_t m_replayRecords{0};
+    std::shared_ptr<const AtomicJournal::Snapshot> m_durable;
 };
 /** @brief Hashes metadata and opaque image bytes; it does not verify
  * gameplay. */

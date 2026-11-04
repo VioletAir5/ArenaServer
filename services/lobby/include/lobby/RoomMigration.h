@@ -11,6 +11,7 @@
 
 namespace service::lobby
 {
+using arena::persistence::AtomicJournal;
 /** @brief Describes one opaque replay extent produced and validated
  * by a worker. */
 struct RoomReplayExtent
@@ -88,6 +89,16 @@ struct RoomAbort
     RoomIdentity room;
     std::uint64_t migration{0};
 };
+/** @brief Fences new ingress using the exact committed worker image.
+ */
+struct RoomRetire
+{
+    RoomIdentity room;
+    std::string owner;
+    std::uint64_t epoch{0};
+    std::uint64_t cursor{0};
+    std::string fingerprint;
+};
 struct RoomPruneReceipts
 {
     RoomIdentity room;
@@ -102,6 +113,7 @@ using RoomDirectoryCommand = std::variant<
     RoomTransferred,
     RoomCommit,
     RoomAbort,
+    RoomRetire,
     RoomPruneReceipts>;
 
 /** @brief Uses value candidates, never a second writer, executor or
@@ -110,7 +122,7 @@ using RoomDirectoryCommand = std::variant<
  * The authority validates/authenticates worker messages before
  * planning. Opaque checkpoint/replay bytes are not semantically
  * verified here. The authority combines mutations with its registry
- * metadata in ONE DurableStateStore CAS. Only publish(), after real
+ * metadata in ONE AtomicJournal CAS. Only publish(), after real
  * journal ACK, exposes the resulting route/receipt.
  */
 class RoomMigration final
@@ -124,14 +136,18 @@ public:
         Candidate& operator=(Candidate&&) noexcept = default;
         Candidate(const Candidate&) = delete;
         std::uint64_t expectedRevision() const noexcept;
-        const std::vector<DurableStateStore::Mutation>&
+        const std::vector<AtomicJournal::Mutation>&
         mutations() const noexcept;
+        /** @brief Borrows uncommitted values until this candidate is
+         * consumed or destroyed. No mutable shared ownership escapes.
+         */
+        const RoomDirectory& planned() const noexcept;
 
     private:
         friend class RoomMigration;
         Candidate() = default;
         std::shared_ptr<RoomDirectory> m_planned;
-        std::vector<DurableStateStore::Mutation> m_mutations;
+        std::vector<AtomicJournal::Mutation> m_mutations;
         std::uint64_t m_expected{0};
     };
 
@@ -141,7 +157,7 @@ public:
     /** @brief Recovers committed routes; unknown schema or boot
      * mismatch fails closed. */
     std::expected<std::shared_ptr<const RoomDirectory>, Error>
-    load(const DurableStateStore&) const;
+    load(const AtomicJournal&) const;
     /** @brief Produces a disposable bounded candidate without
      * publishing side effects. */
     std::expected<Candidate, Error> plan(
@@ -157,9 +173,7 @@ public:
      */
     std::expected<std::shared_ptr<const RoomDirectory>, Error>
     publish(
-        Candidate&&,
-        const DurableStateStore&,
-        std::uint64_t ackRevision
+        Candidate&&, const AtomicJournal&, std::uint64_t ackRevision
     ) const noexcept;
 
 private:

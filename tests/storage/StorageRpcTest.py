@@ -378,6 +378,185 @@ class Acceptance:
         require(reply.replayed and reply.settlement.replayed, "database restart lost committed receipt")
         return dict(same_process_recovered=True, post_restart_result_replayed=True)
 
+    async def readiness_probe_isolation(self):
+        from shared.runtime.rpc import Context, Server, RpcError, OVERLOADED, UNAVAILABLE
+        from shared.runtime.config import ConfigSnapshot, ConfigStore
+        from services.storage.database import Database
+        from services.storage.server import StorageService, _RuntimeState
+        application = 'arena-readiness-isolation'
+        database = Database(kwargs=dict(host=str(self.cluster.socket), dbname=self.database,
+            user='arena_test', connect_timeout=1, application_name=application),
+            max_size=2, max_waiting=2, acquire_timeout=.2)
+        service = StorageService(self.protocol, database, max_workers=2)
+        def snapshot(version, desired=True):
+            return ConfigSnapshot.parse(self.protocol, json.dumps(dict(version=str(version),
+                desiredReady=desired, drainGraceMs=5000, nodes=[dict(service='storage',
+                    nodeId='readiness-node', host='127.0.0.1', port=7105, ready=True)])))
+        store = ConfigStore(snapshot(1))
+        runtime = _RuntimeState(service, store, 'readiness-node')
+        service._runtime_readiness = runtime.ready
+        server = Server(self.protocol, service.handlers, service_token=self.token,
+            max_timeout=1, admission=runtime.admit)
+        runtime.server = server
+        port = await server.start()
+        client = self.Client(self.protocol, '127.0.0.1', port, service_token=self.token)
+        pending = []
+        blocker = None
+        facts = dict(real_postgres=True, max_workers=2, pool_max=2)
+        self.report['readiness_isolation'] = facts
+        def lock_accounts():
+            connection = self.connection()
+            connection.execute('BEGIN')
+            connection.execute('LOCK TABLE arena.account IN ACCESS EXCLUSIVE MODE')
+            return connection
+        def blocked():
+            return self.query("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+                "AND application_name=%s AND wait_event_type='Lock'", (application,))[0][0]
+        try:
+            runtime.start()
+            await self.wait_for(runtime.ready, 'initial real PG readiness probe failed')
+            blocker = lock_accounts()
+            await self.wait_for(lambda: service.worker.stats['active'] == 1 and blocked() == 1,
+                'periodic readiness probe did not reach the real account lock')
+            before = dict(service.worker.stats)
+            pending = [asyncio.create_task(client.call('health.ready', timeout=1,
+                correlation_id='readiness-cached-'+str(index))) for index in range(2)]
+            await self.wait_for(lambda: all(task.done() for task in pending)
+                or service.worker.stats['active'] == 2,
+                'readiness RPCs neither completed nor occupied worker slots', timeout=1)
+            facts.update(worker_before=before, worker_during=dict(service.worker.stats),
+                blocked_sql=blocked(), ready_replies_completed=sum(task.done() for task in pending))
+            payload = self.message('PlayerGetRequest', player_id=42).SerializeToString()
+            try:
+                raw = await client.call('player.get', payload, timeout=1,
+                    correlation_id='readiness-isolated-business')
+                reply = self.protocol.message('arena.storage.PlayerGetReply').FromString(raw)
+                facts['player_id'] = reply.player.player_id
+                facts['player_status'] = 'OK'
+            except RpcError as error:
+                facts['player_status'] = error.status
+            blocker.execute('ROLLBACK'); blocker.close(); blocker = None
+            replies = await asyncio.gather(*pending, return_exceptions=True)
+            facts['ready_statuses'] = [value.status if isinstance(value, RpcError)
+                else 'OK' if value == b'' else type(value).__name__ for value in replies]
+            await self.wait_for(lambda: service.worker.stats['active'] == 0
+                and database.stats['checked_out'] == 0, 'readiness lock loans did not drain')
+            require(facts.get('player_id') == 42,
+                'readiness RPCs starved actual player.get: '+json.dumps(facts, sort_keys=True))
+            require(facts['ready_statuses'] == ['OK', 'OK'] and facts['blocked_sql'] == 1
+                and facts['worker_during']['active'] == before['active']
+                and facts['worker_during']['completed'] == before['completed']
+                and facts['worker_during']['rejected'] == before['rejected'],
+                'cached readiness created additional SQL jobs')
+            # The old-version real SQL probe cannot satisfy a new configuration.
+            await self.wait_for(runtime.ready, 'readiness did not recover after releasing the lock')
+            blocker = lock_accounts()
+            await self.wait_for(lambda: service.worker.stats['active'] == 1 and blocked() == 1,
+                'version-fenced probe did not enter the actual SQL lock')
+            store.publish(snapshot(2))
+            require(not runtime.ready() and not runtime.status()['ready'],
+                'old-version dependency result made new configuration ready')
+            await self.expect(lambda: client.call('health.ready', timeout=1), UNAVAILABLE)
+            blocker.execute('ROLLBACK'); blocker.close(); blocker = None
+            await self.wait_for(lambda: runtime.ready() and runtime._dependency_version == 2,
+                'new-version real PG probe did not recover readiness')
+            store.publish(snapshot(3, desired=False))
+            await self.expect(lambda: client.call('health.ready', timeout=1), UNAVAILABLE)
+            require(not runtime.status()['ready'], 'HTTP status ignored operator not-ready')
+            store.publish(snapshot(4))
+            await self.wait_for(runtime.ready, 'operator-ready recovery lacked a fresh actual probe')
+            runtime.draining = True
+            await self.expect(lambda: client.call('health.ready', timeout=1), UNAVAILABLE)
+            facts.update(version_fenced=True, operator_fenced=True, drain_fenced=True,
+                cached_health_rpc_jobs=0, business_succeeded=True)
+            return facts
+        finally:
+            if blocker is not None:
+                blocker.execute('ROLLBACK'); blocker.close()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            runtime.draining = True
+            await server.close(grace=1)
+            await runtime.close()
+            await service.close()
+            facts.update(final_worker=dict(service.worker.stats), final_pool=dict(database.stats),
+                final_rpc_inflight=server.inflight)
+            require(service.worker.stats['active'] == database.stats['checked_out'] == server.inflight == 0
+                and database.stats['closed'], 'readiness acceptance leaked actual worker, SQL or RPC loans')
+
+    async def busy_probe_preserves_bounded_observation(self):
+        from shared.runtime.rpc import Server, RpcError, OVERLOADED, UNAVAILABLE
+        from services.storage.database import Database
+        from services.storage.server import StorageService, _RuntimeState
+        application = 'arena-busy-probe-regression'
+        database = Database(kwargs=dict(host=str(self.cluster.socket), dbname=self.database,
+            user='arena_test', connect_timeout=1, application_name=application),
+            max_size=2, max_waiting=2, acquire_timeout=.2)
+        service = StorageService(self.protocol, database, max_workers=2)
+        runtime = _RuntimeState(service, None, 'busy-probe')
+        service._runtime_readiness = runtime.ready
+        server = Server(self.protocol, service.handlers, service_token=self.token,
+            max_timeout=1, admission=runtime.admit)
+        runtime.server = server
+        port = await server.start()
+        client = self.Client(self.protocol, '127.0.0.1', port, service_token=self.token)
+        pending, blocker = [], None
+        facts = dict(real_postgres=True, max_workers=2, pool_max=2)
+        self.report['busy_probe'] = facts
+        try:
+            runtime.start()
+            await self.wait_for(runtime.ready, 'initial actual PG observation failed')
+            positive_at = runtime._dependency_checked_at
+            blocker = self.connection()
+            blocker.execute('BEGIN')
+            blocker.execute('LOCK TABLE arena.player IN ACCESS EXCLUSIVE MODE')
+            pending = [asyncio.create_task(client.call('player.get',
+                self.message('PlayerGetRequest', player_id=identity).SerializeToString(),
+                timeout=1, correlation_id='busy-probe-player-'+str(identity))) for identity in (42,43)]
+            await self.wait_for(lambda: service.worker.stats['active'] == 2 and self.query(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name=%s "
+                "AND wait_event_type='Lock'", (application,))[0][0] == 2,
+                'two actual player queries did not reach the SQL lock', timeout=1)
+            require(self.query('SELECT account_id FROM arena.account WHERE account_id=1') == [(1,)],
+                'the player lock also blocked the actual account health query')
+            await self.wait_for(lambda: runtime._probe_error == str(OVERLOADED),
+                'periodic probe did not reach bounded worker admission', timeout=1)
+            age = time.monotonic()-positive_at
+            require(age < .5, 'the last positive observation expired before admission rejection')
+            facts.update(last_positive_age_ms=age*1000, rejected_probe=runtime._probe_error,
+                worker_during=dict(service.worker.stats), account_health_query_succeeded=True)
+            require(runtime.ready(), 'local probe admission erased a still-fresh positive observation')
+            require(await client.call('health.ready', timeout=1) == b'', 'fresh readiness changed wire reply')
+            require(runtime._dependency_checked_at == positive_at, 'overload renewed the last positive timestamp')
+            await self.wait_for(lambda:time.monotonic()-positive_at >= .5,
+                'the hard observation expiry was not reached', timeout=1)
+            require(not runtime.ready(), 'sustained overload kept a result ready past500ms')
+            await self.expect(lambda:client.call('health.ready', timeout=1), UNAVAILABLE)
+            require(runtime._dependency_checked_at == positive_at, 'repeated rejection renewed readiness')
+            blocker.execute('ROLLBACK'); blocker.close(); blocker = None
+            replies = await asyncio.gather(*pending)
+            players = [self.protocol.message('arena.storage.PlayerGetReply').FromString(raw).player.player_id
+                for raw in replies]
+            require(players == [42,43], 'already admitted business did not complete after SQL release')
+            await self.wait_for(lambda:runtime.ready() and runtime._dependency_checked_at > positive_at,
+                'the same process did not recover with a new real PG observation')
+            facts.update(hard_expiry_ms=500, timestamp_not_renewed=True, expired_not_ready=True,
+                same_process_recovered=True, admitted_players=players)
+            return facts
+        finally:
+            if blocker is not None:
+                blocker.execute('ROLLBACK'); blocker.close()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            runtime.draining = True
+            await server.close(grace=1)
+            await runtime.close()
+            await service.close()
+            facts.update(final_worker=dict(service.worker.stats), final_pool=dict(database.stats),
+                final_rpc_inflight=server.inflight)
+            require(service.worker.stats['active'] == database.stats['checked_out'] == server.inflight == 0
+                and database.stats['closed'], 'busy-probe regression retained actual physical loans')
+
     async def worker_cancellation(self):
         from shared.runtime.rpc import Context, OVERLOADED
         from services.storage.database import Database
@@ -593,6 +772,8 @@ class Acceptance:
             ("abort_and_atomic_fk_failure", self.abort_and_rollback),
             ("concurrent_durable_ids_and_idempotent_result", self.concurrent_id_and_result),
             ("private_pg_outage_same_process_recovery", self.database_outage_recovery),
+            ("runtime_readiness_uses_one_actual_probe_without_business_starvation", self.readiness_probe_isolation),
+            ("busy_probe_preserves_original_observation_until_hard_expiry", self.busy_probe_preserves_bounded_observation),
             ("bounded_worker_actual_pg_cancellation_and_reuse", self.worker_cancellation),
             ("opt_in_runtime_outbox_drain_dedup_and_inflight_shutdown", self.runtime_outbox),
             ("cancelled_publisher_close_joins_actual_sql_and_pool", self.cancelled_close_lifetimes)):

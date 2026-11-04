@@ -15,6 +15,7 @@
 #include "lobby.pb.h"
 #include "lobby/AuthClient.h"
 #include "lobby/LobbyAuthority.h"
+#include "lobby/RoomClient.h"
 #include "lobby/StorageClient.h"
 
 namespace service::lobby
@@ -35,6 +36,8 @@ public:
         /// Independent role-bound remote dependencies.
         AuthClient::Config auth;
         StorageClient::Config storage;
+        /// Exact Room nodes; private worker journals remain separate.
+        RoomClient::Config rooms;
         /// Business jobs, including cancelled physical operations
         /// awaiting cleanup.
         std::size_t maxJobs{128};
@@ -62,7 +65,8 @@ public:
             stopping{false}, stopped{false};
         /// Includes fixed bounded background loans as well as
         /// business jobs.
-        std::size_t active{0}, authInflight{0}, storageInflight{0};
+        std::size_t active{0}, authInflight{0}, storageInflight{0},
+            roomInflight{0}, coordinatorPending{0};
         /// Last committed gauges; observations never prune or mutate
         /// authority.
         std::size_t onlineActive{0}, onlineRetained{0},
@@ -100,6 +104,17 @@ public:
         arena::internal_rpc::Context,
         Completion<arena::lobby::HeartbeatReply>
     );
+    /** @brief Starts an operations-authorized handoff and returns
+     * durable Prepare. */
+    Admission migrate(
+        arena::lobby::MigrationRequest,
+        arena::internal_rpc::Context,
+        Completion<arena::lobby::MigrationReply>
+    );
+    /** @brief Reads immutable migration facts without changing room
+     * state. */
+    Result<arena::lobby::MigrationReply>
+        migrationStatus(arena::lobby::MigrationStatusRequest) const;
     /** @brief Fences admission and drains actual child/WAL work
      * without blocking. */
     void stop() noexcept;

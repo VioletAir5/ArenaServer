@@ -54,6 +54,7 @@ function(arena_collect_tests)
     endif()
 endfunction()
 
+add_subdirectory(shared/persistence)
 add_subdirectory(shared/os)
 add_subdirectory(shared/concurrent)
 add_subdirectory(shared/protocol)

@@ -352,6 +352,7 @@ message CoreCheckpoint
     RegistryCheckpoint registry = 2;
     QueueCheckpoint queue = 3;
     RoomCheckpoint rooms = 4;
+    optional bool distributed_rooms = 5;
 }
 
 // Day34 coordinator records contain opaque worker values, not live RoomActor state.
@@ -366,6 +367,8 @@ message DirectoryImage
     uint64 checksum = 2;
     uint64 cursor = 3;
     bytes checkpoint = 4;
+    // Directory version two separates logical cutoffs from physical replay ticks.
+    uint64 logical_tick = 5;
 }
 message DirectoryOperation
 {
@@ -416,6 +419,7 @@ message DirectoryRoom
     repeated DirectoryReceipt receipts = 11;
     uint64 migration_watermark = 12;
     DirectoryHandoff handoff = 13;
+    uint32 lifecycle = 14;
 }
 message DirectoryReplay
 {

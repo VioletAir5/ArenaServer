@@ -115,7 +115,71 @@ async def storage_lifecycle(args):
                     await instance.close()
         return dict(name='repeated_cancel_stop_joins_probe_worker_pool', passed=True)
 
-    for test in (explicit_empty_config, cancelled_stop):
+    async def readiness_freshness():
+        from shared.runtime.config import ConfigSnapshot, ConfigStore
+        from shared.runtime.protocol import Protocol
+        protocol = Protocol(args.descriptor)
+        store = ConfigStore(ConfigSnapshot.parse(protocol, document()))
+        state = storage._RuntimeState(None, store, 'node-a')
+        now = time.monotonic()
+        require(not state.ready(), 'unprobed storage became ready')
+        state._dependency, state._dependency_version = True, 1
+        require(not state.ready(), 'readiness without a completion timestamp was accepted')
+        state._dependency_checked_at = now
+        with patch.object(storage.time, 'monotonic', return_value=now+.499):
+            require(state.ready(), 'current successful probe expired before500ms')
+        with patch.object(storage.time, 'monotonic', return_value=now+.5):
+            require(not state.ready(), 'a500ms-old result remained ready')
+        with patch.object(storage.time, 'monotonic', return_value=now-.001):
+            require(not state.ready(), 'future probe timestamp became fresh')
+        store.publish(ConfigSnapshot.parse(protocol, document(2)))
+        require(not state.ready(), 'an old-version probe satisfied a newer configuration')
+        state._dependency_version, state._dependency_checked_at = 2, time.monotonic()
+        require(state.ready(), 'fresh current-version state was rejected')
+        state._dependency = False
+        require(not state.ready(), 'failed probe was hidden by a recent timestamp')
+        state._dependency = True
+        store.publish(ConfigSnapshot.parse(protocol, document(3, desiredReady=False)))
+        state._dependency_version = 3
+        require(not state.ready(), 'operator not-ready was ignored')
+        store.publish(ConfigSnapshot.parse(protocol, document(4)))
+        state._dependency_version = 4
+        state.draining = True
+        require(not state.ready(), 'draining storage became ready')
+        return dict(name='storage_ready_predicate_version_freshness_boundaries', passed=True,
+            max_age_ms=500, actual_pg_evidence='StorageRpcAcceptance readiness isolation case')
+
+    async def busy_probe_preserves_timestamp():
+        from shared.runtime.config import ConfigSnapshot, ConfigStore
+        from shared.runtime.protocol import Protocol
+        from shared.runtime.rpc import RpcError, OVERLOADED
+        class BusyWorker:
+            calls = 0
+            async def run(self, operation, context):
+                context.check()
+                self.calls += 1
+                raise RpcError(OVERLOADED)
+        worker = BusyWorker()
+        protocol = Protocol(args.descriptor)
+        state = storage._RuntimeState(SimpleNamespace(worker=worker),
+            ConfigStore(ConfigSnapshot.parse(protocol, document())), 'node-a')
+        state._dependency, state._dependency_version = True, 1
+        checked = time.monotonic()-.1
+        state._dependency_checked_at = checked
+        task = asyncio.create_task(state._probe())
+        try:
+            await until(lambda:worker.calls == 1)
+            require(state._probe_error == str(OVERLOADED), 'probe admission classification was lost')
+            require(state._dependency and state.ready(), 'admission-only failure replaced the prior observation')
+            require(state._dependency_checked_at == checked, 'overload renewed the readiness timestamp')
+        finally:
+            state.draining = True
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return dict(name='storage_probe_admission_unit_keeps_existing_timestamp', passed=True,
+            actual_pg_evidence='StorageRpcAcceptance busy-probe SQL lock regression')
+
+    for test in (explicit_empty_config, cancelled_stop, readiness_freshness, busy_probe_preserves_timestamp):
         try:
             cases.append(await test())
         except Exception as error:

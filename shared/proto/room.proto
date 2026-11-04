@@ -1,0 +1,167 @@
+syntax = "proto3";
+package arena.room;
+
+// Private Lobby -> Room worker RPC; never exposed to Gateway clients.
+message Member { uint64 player_id = 1; uint64 session_id = 2; uint64 epoch = 3; }
+message Player {
+  Member member = 1;
+  sint32 x = 2; sint32 y = 3;
+  uint64 sequence = 4;
+  sint32 last_dx = 5; sint32 last_dy = 6;
+}
+message ActorPolicy {
+  uint32 max_members = 1; uint32 max_inputs_per_tick = 2;
+  uint32 history_ticks = 3; sint32 position_limit = 4;
+}
+message Policy {
+  ActorPolicy actor = 1; uint32 max_commands = 2;
+  uint64 battle_duration_ticks = 3; uint64 ready_timeout_ticks = 4;
+  sint64 result_retention_nanos = 5;
+}
+message Snapshot {
+  uint64 room_id = 1; uint64 incarnation = 2; uint64 tick = 3;
+  fixed64 checksum = 4; repeated Player players = 5;
+}
+message Authorization {
+  Member member = 1; uint64 session_epoch = 2; uint64 connection_handle = 3;
+  bool online = 4;
+}
+message Allocation {
+  uint64 match_id = 1; repeated Member members = 2;
+  repeated uint32 initial_mmr = 3;
+}
+enum Phase { FORMING = 0; READY = 1; PLAYING = 2; SETTLING = 3; FINISHED = 4; }
+enum Reason { COMPLETED = 0; MEMBER_UNAVAILABLE = 1; READY_TIMEOUT = 2; }
+message Settlement {
+  uint64 result_id = 1; uint64 match_id = 2; uint64 room_id = 3;
+  uint64 final_tick = 4; fixed64 final_checksum = 5; Reason reason = 6;
+  uint64 winner_player_id = 7; repeated Player players = 8;
+  uint64 created_unix_ms = 9; uint64 started_unix_ms = 10;
+  uint64 finished_unix_ms = 11; uint64 started_tick = 12; uint64 played_ticks = 13;
+}
+message Managed {
+  Allocation allocation = 1;
+  uint32 room_state = 2; uint64 room_revision = 3;
+  uint32 battle_state = 4; uint64 battle_revision = 5;
+  Phase phase = 6;
+  repeated bool ready = 7; repeated bool online = 8;
+  uint64 created_unix_ms = 9; uint64 started_unix_ms = 10;
+  uint64 waited_ticks = 11; uint64 started_tick = 12;
+  uint64 finished_tick = 13; uint64 played_ticks = 14;
+  optional Settlement result = 15; optional sint64 expires_at_nanos = 16;
+  bool persistence_blocked = 17;
+}
+message Counters {
+  uint64 ticks = 1; uint64 applied = 2; uint64 rejected = 3; uint64 duplicates = 4;
+  uint64 battles_started = 5; uint64 battles_completed = 6; uint64 battles_aborted = 7;
+  uint64 settlement_intents = 8; uint64 settlements_committed = 9;
+  uint64 settlements_failed = 10;
+}
+// Canonical complete state, with no callbacks, bindings or replay history.
+message RuntimeImage {
+  uint32 version = 1; Policy policy = 2; Snapshot actor = 3;
+  optional Managed managed = 4; Counters counters = 5; uint64 logical_cutoff = 6;
+  uint64 known_since_tick = 7; optional bool complete_counter_history = 8;
+}
+enum CommandKind {
+  SNAPSHOT = 0; INPUT = 1; SET_READY = 2; STATUS = 3;
+  SETTLEMENT = 4; SETTLEMENT_ACK = 5;
+}
+message Command {
+  uint32 version = 1; CommandKind kind = 2; optional Authorization caller = 3;
+  uint64 incarnation = 4; uint64 sequence = 5; uint64 match_id = 6;
+  sint32 dx = 7; sint32 dy = 8; bool ready = 9; bool committed = 10;
+}
+// Ordered commands live in separate operations, never inside the final cutoff.
+message Cutoff {
+  uint32 version = 1; repeated Authorization roster = 2;
+  repeated Authorization current_authorizations = 3;
+  sint64 now_nanos = 4; uint64 wall_millis = 5;
+}
+message InputAttempt { Member member = 1; uint64 sequence = 2; sint32 dx = 3; sint32 dy = 4; }
+message TickRecord {
+  uint32 version = 1; uint64 tick = 2; repeated Member members = 3;
+  repeated InputAttempt inputs = 4; fixed64 checksum = 5;
+}
+enum RuntimeError {
+  INVALID = 0; CAPACITY = 1; AUTHENTICATION = 2;
+  BUSINESS_FAILURE = 3; NOT_AVAILABLE = 4; INVALID_IMAGE = 5;
+}
+enum InputStatus {
+  APPLIED = 0; DUPLICATE = 1; GAP = 2; STALE = 3;
+  CONFLICTING = 4; NOT_MEMBER = 5; INVALID_INPUT = 6;
+}
+message CommandResult { optional RuntimeError error = 1; optional InputStatus input = 2; }
+// Fingerprint is SHA-256 lowercase hex of the documented v2 preimage.
+message Image {
+  uint32 version = 1; uint64 room_id = 2; uint64 incarnation = 3;
+  uint64 physical_tick = 4; fixed64 checksum = 5; uint64 cursor = 6;
+  uint64 logical_tick = 7; bytes opaque = 8; string fingerprint = 9;
+}
+message CreateRequest {
+  uint32 version = 1; string worker_id = 2; uint64 room_id = 3;
+  uint64 incarnation = 4; Policy policy = 5; optional Allocation allocation = 6;
+  uint64 created_wall_millis = 7;
+}
+message CreateReply { uint32 version = 1; string worker_id = 2; Image image = 3; }
+message StageRequest {
+  uint32 version = 1; string worker_id = 2; string transfer_id = 3;
+  uint64 owner_epoch = 4; Image image = 5; optional bytes legacy_replay = 6;
+}
+message StageReceipt {
+  uint32 version = 1; string worker_id = 2; string transfer_id = 3;
+  uint64 owner_epoch = 4; uint64 room_id = 5; uint64 incarnation = 6;
+  uint64 physical_tick = 7; fixed64 checksum = 8; uint64 cursor = 9;
+  uint64 logical_tick = 10; string fingerprint = 11;
+}
+message ActivateRequest {
+  uint32 version = 1; string worker_id = 2; uint64 owner_epoch = 3;
+  uint64 directory_revision = 4; Image image = 5; string transfer_id = 6;
+}
+message CacheReceipt {
+  uint32 version = 1; string worker_id = 2; uint64 owner_epoch = 3;
+  uint64 directory_revision = 4; uint64 room_id = 5; uint64 incarnation = 6;
+  uint64 cursor = 7; uint64 logical_tick = 8; string fingerprint = 9;
+  bool active = 10;
+}
+enum OperationKind { OP_UNSPECIFIED = 0; OP_COMMAND = 1; OP_TICK = 2; }
+message OrderedOperation {
+  uint64 cursor = 1; uint64 logical_tick = 2;
+  OperationKind kind = 3; bytes payload = 4;
+}
+message ExecuteRequest {
+  uint32 version = 1; string worker_id = 2; uint64 owner_epoch = 3;
+  Image base = 4; repeated OrderedOperation operations = 5;
+}
+message ExecuteReply {
+  uint32 version = 1; string worker_id = 2; uint64 owner_epoch = 3;
+  Image image = 4; repeated CommandResult results = 5;
+  optional bytes replay = 6; bool release_membership = 7; bool retire = 8;
+}
+message HintRequest {
+  uint32 version = 1; string worker_id = 2; uint64 owner_epoch = 3;
+  uint64 directory_revision = 4; uint64 room_id = 5; uint64 incarnation = 6;
+}
+message WorkerStats {
+  uint64 active_routes = 1; uint64 inactive_stages = 2; uint64 cache_bytes = 3;
+  uint64 journal_pending = 4; uint64 journal_file_bytes = 5;
+  uint64 active_jobs = 6; uint64 rpc_peers = 7; uint64 rpc_active = 8;
+  uint64 physical_descriptors = 9; bool journal_closed = 10; bool stopping = 11;
+}
+message HealthReply {
+  uint32 version = 1; string worker_id = 2; string node_id = 3;
+  bool ready = 4; WorkerStats stats = 5;
+}
+// Local cache records are typed too; they never authorize a Lobby publication.
+message CacheRecord {
+  uint32 version = 1; string worker_id = 2; uint64 owner_epoch = 3;
+  uint64 directory_revision = 4; Image image = 5;
+  string transfer_id = 6; bool active = 7;
+  uint64 room_id = 8; uint64 incarnation = 9; uint64 cursor = 10;
+  uint64 logical_tick = 11; string fingerprint = 12;
+}
+// Optional bounded legacy proof; canonical images never carry rolling history.
+message ReplayLog {
+  uint32 version = 1; ActorPolicy config = 2; Snapshot checkpoint = 3;
+  repeated TickRecord ticks = 4;
+}

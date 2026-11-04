@@ -18,6 +18,9 @@
 #include <gtest/gtest.h>
 
 #include "lobby/AuthorityCodec.h"
+#include "lobby_state.pb.h"
+#include "room/RoomRuntime.h"
+#include "room/RoomWire.h"
 
 namespace
 {
@@ -90,7 +93,7 @@ protected:
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    DurableStateStore::Snapshot image()
+    AtomicJournal::Snapshot image()
     {
         return {
             2,
@@ -111,10 +114,10 @@ protected:
         }
         return predicate();
     }
-    void append(DurableStateStore& store, const ReplayLog& log)
+    void append(AtomicJournal& store, const ReplayLog& log)
     {
         auto completion = std::make_shared<
-            std::optional<DurableStateStore::Result>>();
+            std::optional<AtomicJournal::Result>>();
         if (!store.commit(
                 store.snapshot()->revision,
                 {{key(log), encoded(log)}},
@@ -125,14 +128,14 @@ protected:
             !**completion)
             throw std::runtime_error("real journal commit failed");
     }
-    void stop(DurableStateStore& store)
+    void stop(AtomicJournal& store)
     {
         store.stop();
         if (!until([&] { return store.stats().closed; }))
             throw std::runtime_error("real journal did not close");
     }
     void invalid(
-        const DurableStateStore::Snapshot& snapshot,
+        const AtomicJournal::Snapshot& snapshot,
         ReplayArchiveErrorCode expected
     )
     {
@@ -147,21 +150,21 @@ TEST_F(
     RealJournalRestartAndExistingReplayFilePreserveEveryChecksumAndAttempt
 )
 {
-    DurableStateStore::Config journal;
+    AtomicJournal::Config journal;
     journal.directory = directory / "state";
     {
-        DurableStateStore store(context.get_executor(), journal);
+        AtomicJournal store(context.get_executor(), journal);
         append(store, first);
         stop(store);
     }
     {
-        DurableStateStore reopened(context.get_executor(), journal);
+        AtomicJournal reopened(context.get_executor(), journal);
         EXPECT_EQ(reopened.snapshot()->revision, 1u);
         append(reopened, second);
         stop(reopened);
     }
     {
-        DurableStateStore reopened(context.get_executor(), journal);
+        AtomicJournal reopened(context.get_executor(), journal);
         auto archives = assembleReplayArchives(*reopened.snapshot());
         ASSERT_TRUE(archives);
         ASSERT_EQ(archives->size(), 1u);
@@ -330,7 +333,7 @@ TEST_F(
     NumericOrderingPreservesTicksBeyondSingleDigitKeys
 )
 {
-    DurableStateStore::Snapshot snapshot;
+    AtomicJournal::Snapshot snapshot;
     Snapshot current{RoomId{7}, 9};
     {
         RoomActor initial(RoomId{7}, 9, config);
@@ -383,7 +386,7 @@ TEST(
     CallerKeyBudgetIncludesNonReplayRecordsWithoutWeakeningCodecLimits
 )
 {
-    DurableStateStore::Snapshot values;
+    AtomicJournal::Snapshot values;
     for (std::size_t index = 0; index <= authorityCodecMaxItems;
          ++index)
         values.values.emplace(
@@ -407,7 +410,7 @@ TEST(
          {std::size_t{0}, std::size_t{1000001}})
     {
         auto invalid = assembleReplayArchives(
-            DurableStateStore::Snapshot{},
+            AtomicJournal::Snapshot{},
             {},
             maximum
         );
@@ -419,4 +422,368 @@ TEST(
     }
 }
 
+namespace roomWire = service::room::wire;
+class DirectoryReplayArchiveTest : public ReplayArchiveTest
+{
+protected:
+    std::optional<RuntimeImage> initial, boundary, current;
+    RuntimeAuthorization authorization(std::uint64_t player)
+    {
+        return {
+            player == 1 ? alice : bob,
+            player + 20,
+            player + 1000,
+            true
+        };
+    }
+    RuntimeCommand control(
+        std::uint64_t player, std::uint64_t sequence, int dx, int dy
+    )
+    {
+        RuntimeCommand value;
+        value.kind = RuntimeCommandKind::Input;
+        value.caller = authorization(player);
+        value.incarnation = 9;
+        value.sequence = sequence;
+        value.dx = dx;
+        value.dy = dy;
+        return value;
+    }
+    TickRecord step(std::vector<RuntimeCommand> commands)
+    {
+        const RuntimeCutoff cutoff{
+            {authorization(1), authorization(2)},
+            {authorization(1), authorization(2)},
+            std::move(commands),
+            static_cast<std::int64_t>(
+                (current->logicalCutoff + 1) * 50'000'000
+            ),
+            100 + current->logicalCutoff * 50
+        };
+        auto proposal = RoomRuntime::step(*current, cutoff);
+        if (!proposal || !proposal->replay)
+            throw std::runtime_error(
+                "real archive runtime cutoff rejected"
+            );
+        current = std::move(proposal->image);
+        checksums.push_back(current->actor.checksum);
+        return std::move(*proposal->replay);
+    }
+    void SetUp() override
+    {
+        ReplayArchiveTest::SetUp();
+        checksums.clear();
+        RuntimePolicy policy;
+        policy.actor = config;
+        auto created = RoomRuntime::create(RoomId{7}, 9, policy);
+        if (!created)
+            throw std::runtime_error(
+                "real archive runtime creation rejected"
+            );
+        initial = *created;
+        current = *created;
+        first = {config, current->actor, {}};
+        first.ticks.push_back(step({control(1, 1, 1, 0)}));
+        first.ticks.push_back(
+            step({control(1, 1, 1, 0), control(1, 1, -1, 0)})
+        );
+        boundary = *current;
+        // Real restart reconstruction precedes the next physical
+        // segment.
+        const auto bytes = roomWire::encodeImage(*current);
+        if (!bytes)
+            throw std::runtime_error(
+                "real archive image encoding rejected"
+            );
+        const auto restored = roomWire::decodeImage(*bytes);
+        if (!restored || !RoomRuntime::validate(*restored))
+            throw std::runtime_error(
+                "real archive image restore rejected"
+            );
+        current = *restored;
+        second = {config, current->actor, {}};
+        second.ticks.push_back(step({control(1, 2, 0, 1)}));
+        second.ticks.push_back(step({control(2, 1, 1, 1)}));
+        final = current->actor;
+    }
+    std::string directoryKey(const ReplayLog& log)
+    {
+        return "room-directory/" + key(log);
+    }
+    std::string wrapper(const ReplayLog& log)
+    {
+        const auto payload = roomWire::encodeReplayLog(log);
+        if (!payload)
+            throw std::runtime_error(
+                "worker replay log encoding rejected"
+            );
+        arena::lobby_state::DirectoryReplay value;
+        value.set_version(2);
+        value.set_room_id(log.checkpoint.roomId.value());
+        value.set_incarnation(log.checkpoint.incarnation);
+        value.set_first_tick(log.ticks.front().tick);
+        value.set_last_tick(log.ticks.back().tick);
+        value.set_payload(*payload);
+        return value.SerializeAsString();
+    }
+    std::string metadata()
+    {
+        arena::lobby_state::DirectoryMeta value;
+        value.set_version(2);
+        value.set_boot_id("same-boot");
+        return value.SerializeAsString();
+    }
+    std::string route(const RuntimeImage& image, bool retired = false)
+    {
+        const auto checkpoint = roomWire::encodeImage(image);
+        if (!checkpoint)
+            throw std::runtime_error(
+                "worker archive anchor encoding rejected"
+            );
+        arena::lobby_state::DirectoryRoom value;
+        value.set_version(2);
+        value.set_room_id(image.actor.roomId.value());
+        value.set_incarnation(image.actor.incarnation);
+        value.set_owner("room-a");
+        value.set_owner_epoch(1);
+        value.set_next_sequence(7);
+        value.set_admitted_tick(image.logicalCutoff);
+        value.set_lifecycle(retired ? 2 : 0);
+        auto* imageValue = value.mutable_image();
+        imageValue->set_tick(image.actor.tick);
+        imageValue->set_checksum(image.actor.checksum);
+        imageValue->set_cursor(6);
+        imageValue->set_checkpoint(*checkpoint);
+        imageValue->set_logical_tick(image.logicalCutoff);
+        return value.SerializeAsString();
+    }
+    AtomicJournal::Snapshot directoryImage()
+    {
+        return {
+            2,
+            {{"room-directory/meta", metadata()},
+             {"room-directory/room/7/9", route(*current, true)},
+             {directoryKey(first), wrapper(first)},
+             {directoryKey(second), wrapper(second)}}
+        };
+    }
+    void write(
+        AtomicJournal& store,
+        std::vector<AtomicJournal::Mutation> mutations
+    )
+    {
+        auto completion = std::make_shared<
+            std::optional<AtomicJournal::Result>>();
+        if (!store.commit(
+                store.snapshot()->revision,
+                std::move(mutations),
+                [completion](auto result)
+                { *completion = std::move(result); }
+            ) ||
+            !until([&] { return completion->has_value(); }) ||
+            !**completion)
+            throw std::runtime_error(
+                "directory archive journal commit failed"
+            );
+    }
+};
+
+TEST_F(
+    DirectoryReplayArchiveTest,
+    RealRuntimeSegmentsRestartRetireAndExportEveryChecksum
+)
+{
+    AtomicJournal::Config journal;
+    journal.directory = directory / "state";
+    {
+        AtomicJournal store(context.get_executor(), journal);
+        write(
+            store,
+            {{"room-directory/meta", metadata()},
+             {"room-directory/room/7/9", route(*boundary)},
+             {directoryKey(first), wrapper(first)}}
+        );
+        stop(store);
+    }
+    {
+        AtomicJournal store(context.get_executor(), journal);
+        ASSERT_TRUE(inspectReplayArchives(*store.snapshot()));
+        write(
+            store,
+            {{"room-directory/room/7/9", route(*current, true)},
+             {directoryKey(second), wrapper(second)}}
+        );
+        stop(store);
+    }
+    {
+        AtomicJournal store(context.get_executor(), journal);
+        const auto inspected = inspectReplayArchives(
+            *store.snapshot()
+        );
+        ASSERT_TRUE(inspected);
+        ASSERT_EQ(inspected->size(), 1u);
+        EXPECT_EQ(inspected->front().lastTick, final.tick);
+        EXPECT_EQ(inspected->front().checksum, final.checksum);
+        const auto archives = assembleReplayArchives(
+            *store.snapshot()
+        );
+        ASSERT_TRUE(archives);
+        ASSERT_EQ(archives->size(), 1u);
+        EXPECT_EQ(archives->front().finalSnapshot, final);
+        EXPECT_EQ(
+            archives->front().log.ticks[1].inputs,
+            first.ticks[1].inputs
+        );
+        const auto path = directory / "directory.arena";
+        ASSERT_TRUE(writeReplayFile(path, archives->front().log));
+        const auto decoded = readReplayFile(path);
+        ASSERT_TRUE(decoded);
+        const auto replayed = RoomActor::replay(*decoded);
+        ASSERT_TRUE(replayed);
+        EXPECT_EQ(replayed->snapshot, final);
+        EXPECT_EQ(replayed->checksums, checksums);
+        stop(store);
+        EXPECT_TRUE(store.stats().writerStopped);
+        EXPECT_EQ(store.stats().pending, 0u);
+    }
+}
+
+TEST_F(
+    DirectoryReplayArchiveTest,
+    LegacyHistoryContinuesExactlyOnceIntoDirectoryHistory
+)
+{
+    auto snapshot = directoryImage();
+    snapshot.values.erase(directoryKey(first));
+    snapshot.values.emplace(key(first), encoded(first));
+    ASSERT_TRUE(inspectReplayArchives(snapshot));
+    const auto complete = assembleReplayArchives(snapshot);
+    ASSERT_TRUE(complete);
+    EXPECT_EQ(complete->front().finalSnapshot, final);
+    EXPECT_EQ(complete->front().log.ticks.size(), 4u);
+    auto atBoundary = snapshot;
+    atBoundary.values.erase(directoryKey(second));
+    atBoundary.values["room-directory/room/7/9"] = route(*boundary);
+    EXPECT_TRUE(inspectReplayArchives(atBoundary));
+    EXPECT_TRUE(assembleReplayArchives(atBoundary));
+    auto overlap = snapshot;
+    overlap.values.emplace(directoryKey(first), wrapper(first));
+    invalid(overlap, ReplayArchiveErrorCode::Invalid);
+    auto missing = snapshot;
+    missing.values.erase(key(first));
+    invalid(missing, ReplayArchiveErrorCode::Invalid);
+    auto backwards = directoryImage();
+    backwards.values.erase(directoryKey(second));
+    backwards.values.emplace(key(second), encoded(second));
+    invalid(backwards, ReplayArchiveErrorCode::Invalid);
+}
+
+TEST_F(
+    DirectoryReplayArchiveTest,
+    OnlineInspectionDoesNotEvaluatePhysicsButOfflineReportsDesyncTick
+)
+{
+    auto snapshot = directoryImage();
+    auto corrupt = second;
+    corrupt.ticks.front().checksum ^= 1;
+    snapshot.values[directoryKey(second)] = wrapper(corrupt);
+    const auto inspection = inspectReplayArchives(snapshot);
+    ASSERT_TRUE(inspection);
+    EXPECT_EQ(inspection->front().lastTick, final.tick);
+    const auto offline = assembleReplayArchives(snapshot);
+    ASSERT_FALSE(offline);
+    EXPECT_EQ(offline.error().code, ReplayArchiveErrorCode::Desync);
+    EXPECT_EQ(offline.error().tick, second.ticks.front().tick);
+
+    snapshot = directoryImage();
+    auto wrong = *current;
+    ++wrong.actor.players.front().x;
+    // Metadata still links; full worker-state identity is checked
+    // offline.
+    snapshot.values["room-directory/room/7/9"] = route(wrong, true);
+    EXPECT_TRUE(inspectReplayArchives(snapshot));
+    const auto wrongTail = assembleReplayArchives(snapshot);
+    ASSERT_FALSE(wrongTail);
+    EXPECT_EQ(
+        wrongTail.error().code,
+        ReplayArchiveErrorCode::Invalid
+    );
+}
+
+TEST_F(
+    DirectoryReplayArchiveTest,
+    CanonicalWrappersAnchorsAndTerminalMetadataAreRequired
+)
+{
+    const auto original = directoryImage();
+    auto wrong = original;
+    wrong.values.erase("room-directory/room/7/9");
+    invalid(wrong, ReplayArchiveErrorCode::Invalid);
+    wrong = original;
+    wrong.values.erase("room-directory/meta");
+    invalid(wrong, ReplayArchiveErrorCode::Invalid);
+    wrong = original;
+    wrong.values.emplace("room-directory/unknown", "opaque");
+    invalid(wrong, ReplayArchiveErrorCode::Invalid);
+    wrong = original;
+    const auto payload = wrong.values.extract(directoryKey(first))
+                             .mapped();
+    wrong.values.emplace("room-directory/replay/07/9/1", payload);
+    invalid(wrong, ReplayArchiveErrorCode::Invalid);
+    arena::lobby_state::DirectoryReplay record;
+    ASSERT_TRUE(record.ParseFromString(
+        original.values.at(directoryKey(second))
+    ));
+    record.set_last_tick(record.last_tick() + 1);
+    wrong = original;
+    wrong.values[directoryKey(second)] = record.SerializeAsString();
+    invalid(wrong, ReplayArchiveErrorCode::Invalid);
+    ASSERT_TRUE(record.ParseFromString(
+        original.values.at(directoryKey(second))
+    ));
+    record.GetReflection()->MutableUnknownFields(&record)->AddVarint(
+        99,
+        1
+    );
+    wrong.values[directoryKey(second)] = record.SerializeAsString();
+    invalid(wrong, ReplayArchiveErrorCode::Invalid);
+    auto image = *current;
+    image.actor.checksum ^= 1;
+    wrong = original;
+    wrong.values["room-directory/room/7/9"] = route(image, true);
+    EXPECT_FALSE(inspectReplayArchives(wrong));
+    ReplayFileLimits small;
+    small.maxTicks = 3;
+    EXPECT_FALSE(inspectReplayArchives(original, small));
+    EXPECT_FALSE(assembleReplayArchives(original, small));
+}
+
+TEST_F(
+    DirectoryReplayArchiveTest,
+    TickZeroExportsEmptyHistoryAndNonzeroTailCannotLoseHistory
+)
+{
+    AtomicJournal::Snapshot zero{
+        1,
+        {{"room-directory/meta", metadata()},
+         {"room-directory/room/7/9", route(*initial, true)}}
+    };
+    const auto inspected = inspectReplayArchives(zero);
+    ASSERT_TRUE(inspected);
+    ASSERT_EQ(inspected->size(), 1u);
+    EXPECT_EQ(inspected->front().firstTick, 0u);
+    EXPECT_EQ(inspected->front().lastTick, 0u);
+    const auto archives = assembleReplayArchives(zero);
+    ASSERT_TRUE(archives);
+    ASSERT_EQ(archives->size(), 1u);
+    EXPECT_TRUE(archives->front().log.ticks.empty());
+    const auto path = directory / "empty.arena";
+    ASSERT_TRUE(writeReplayFile(path, archives->front().log));
+    const auto file = readReplayFile(path);
+    ASSERT_TRUE(file);
+    EXPECT_TRUE(RoomActor::replay(*file));
+    zero.values["room-directory/room/7/9"] = route(*current, true);
+    EXPECT_FALSE(inspectReplayArchives(zero));
+    invalid(zero, ReplayArchiveErrorCode::Invalid);
+}
 } // namespace

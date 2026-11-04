@@ -316,7 +316,7 @@ if(ARENA_ENABLE_POSTGRES_TESTS)
             COMMAND_ERROR_IS_FATAL ANY)
     endif()
     set(application_arguments --repository-root "${PROJECT_SOURCE_DIR}"
-        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>"
+        --auth "$<TARGET_FILE:ArenaAuth>" --lobby "$<TARGET_FILE:ArenaLobby>" --room "$<TARGET_FILE:ArenaRoom>"
         --descriptor "${PROJECT_BINARY_DIR}/shared/generated/rpc.desc"
         --pg-bin "${application_pg_bin}")
     if(ARENA_POSTGRES_SHARE)

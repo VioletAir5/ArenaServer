@@ -129,6 +129,43 @@ def invalid_configuration(binary):
             assert "gateway runtime failed" in contents(log), contents(log)
 
 
+
+def startup_port_collisions(binary):
+    # These failures occur after the remote routes retain an executor-backed client.
+    for kind, business in (("health", "tcp"), ("health", "ws"),
+                           ("external", "tcp"), ("external", "ws")):
+        tcp_port, ws_port = ports()
+        with contextlib.ExitStack() as scope:
+            if kind == "external":
+                held = scope.enter_context(socket.socket())
+                held.bind(("127.0.0.1", 0))
+                held.listen(1)
+                occupied = held.getsockname()[1]
+                if business == "tcp":
+                    tcp_port = occupied
+                else:
+                    ws_port = occupied
+                health_port, unused_lobby = ports()
+                while health_port in (tcp_port, ws_port):
+                    health_port, unused_lobby = ports()
+            else:
+                health_port = tcp_port if business == "tcp" else ws_port
+                unused_lobby, _ = ports()
+            result = subprocess.run(
+                [binary, "asio", "handshake"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=8,
+                env=environment(tcp_port, ws_port, ARENA_HEALTH_PORT=str(health_port),
+                    ARENA_LOBBY_PORT=str(unused_lobby), ARENA_LOBBY_TOKEN="L" * 48))
+            output = result.stdout.decode(errors="replace")
+            assert result.returncode == 2, (kind, business, result.returncode, output)
+            assert "runtime error:" not in output and "AddressSanitizer" not in output, output
+            assert "GATEWAY_READY" not in output, output
+            if kind == "health":
+                assert "Invalid runtime control configuration" in output, output
+            else:
+                assert "gateway runtime failed" in output, output
+
+
 def websocket_upgrade(peer, port):
     key = base64.b64encode(os.urandom(16)).decode()
     request = (
@@ -321,6 +358,7 @@ def main():
     parser.add_argument("--repository-root", type=Path, default=Path(__file__).resolve().parents[3])
     for name in ("auth", "lobby", "descriptor", "pg-bin", "pg-share", "pg-lib", "report"):
         parser.add_argument("--" + name, type=Path)
+    parser.add_argument("--room", type=Path)
     args = parser.parse_args()
     for name, value in vars(args).items():
         if isinstance(value, Path):
@@ -330,6 +368,7 @@ def main():
         raw_shutdown(str(args.binary), args.scenario)
     elif args.scenario == "invalid":
         invalid_configuration(str(args.binary))
+        startup_port_collisions(str(args.binary))
     else:
         for name in ("auth", "lobby", "descriptor", "pg_bin", "report"):
             if getattr(args, name) is None:

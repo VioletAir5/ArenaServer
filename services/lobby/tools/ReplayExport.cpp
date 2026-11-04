@@ -20,7 +20,7 @@
 namespace
 {
 using namespace std::chrono_literals;
-using Store = service::lobby::DurableStateStore;
+using Store = service::lobby::AtomicJournal;
 struct Runtime
 {
     boost::asio::io_context context;
@@ -71,7 +71,10 @@ void quoted(std::ostream& out, std::string_view value)
     out << '"';
 }
 int error(
-    Runtime& runtime, std::string_view status, std::string_view reason
+    Runtime& runtime,
+    std::string_view status,
+    std::string_view reason,
+    const service::lobby::ReplayArchiveError* detail = nullptr
 )
 {
     const bool closed = runtime.close();
@@ -83,6 +86,16 @@ int error(
         closed ? reason
                : "journal worker exceeded shutdown polling budget"
     );
+    if (detail)
+    {
+        if (detail->roomId)
+            std::cout << ",\"room_id\":\"" << *detail->roomId << '\"';
+        if (detail->incarnation)
+            std::cout << ",\"incarnation\":\"" << *detail->incarnation
+                      << '\"';
+        if (detail->tick)
+            std::cout << ",\"tick\":\"" << *detail->tick << '\"';
+    }
     std::cout << "}\n";
     return 2;
 }
@@ -189,7 +202,8 @@ int run(int argc, char** argv)
             archives.error().code == Code::Capacity ? "limit"
             : archives.error().code == Code::Desync ? "desync"
                                                     : "invalid",
-            archives.error().reason
+            archives.error().reason,
+            &archives.error()
         );
     }
     std::filesystem::create_directories(output, failure);

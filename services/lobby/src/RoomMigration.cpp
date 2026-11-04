@@ -14,6 +14,7 @@
 #include <openssl/sha.h>
 
 #include "lobby_state.pb.h"
+#include "room/RoomWire.h"
 
 namespace service::lobby
 {
@@ -36,6 +37,19 @@ bool label(std::string_view value)
                value.begin(),
                value.end(),
                [](unsigned char c) { return c >= 33 && c <= 126; }
+           );
+}
+bool validImageProof(std::string_view value)
+{
+    return value.size() == 64 &&
+           std::all_of(
+               value.begin(),
+               value.end(),
+               [](char c)
+               {
+                   return (c >= '0' && c <= '9') ||
+                          (c >= 'a' && c <= 'f');
+               }
            );
 }
 bool identity(RoomIdentity id)
@@ -113,6 +127,7 @@ void encodeImage(
     out->set_tick(image.tick);
     out->set_checksum(image.checksum);
     out->set_cursor(image.cursor);
+    out->set_logical_tick(image.logicalTick);
     out->set_checkpoint(image.checkpoint);
 }
 RoomWorkerImage decodeImage(const wire::DirectoryImage& image)
@@ -121,7 +136,8 @@ RoomWorkerImage decodeImage(const wire::DirectoryImage& image)
         image.tick(),
         image.checksum(),
         image.cursor(),
-        image.checkpoint()
+        image.checkpoint(),
+        image.logical_tick()
     };
 }
 void encodeOperation(
@@ -159,7 +175,7 @@ std::string operationFingerprint(const RoomOperation& operation)
 std::string encodeRoom(const RoomRouteRecord& room)
 {
     wire::DirectoryRoom out;
-    out.set_version(1);
+    out.set_version(2);
     out.set_room_id(room.identity.room);
     out.set_incarnation(room.identity.incarnation);
     out.set_owner(room.owner);
@@ -168,6 +184,7 @@ std::string encodeRoom(const RoomRouteRecord& room)
     out.set_next_sequence(room.nextSequence);
     out.set_admitted_tick(room.admittedTick);
     out.set_initial_tick(room.initialTick);
+    out.set_lifecycle(static_cast<unsigned>(room.lifecycle));
     out.set_migration_watermark(room.migrationWatermark);
     for (const auto& input : room.inbox)
     {
@@ -205,7 +222,7 @@ std::string encodeRoom(const RoomRouteRecord& room)
 bool decodeRoom(std::string_view bytes, RoomRouteRecord& room)
 {
     wire::DirectoryRoom in;
-    if (!parse(bytes, in) || in.version() != 1 || !in.has_image())
+    if (!parse(bytes, in) || in.version() != 2 || !in.has_image())
         return false;
     room.identity = {in.room_id(), in.incarnation()};
     room.owner = in.owner();
@@ -214,6 +231,10 @@ bool decodeRoom(std::string_view bytes, RoomRouteRecord& room)
     room.nextSequence = in.next_sequence();
     room.admittedTick = in.admitted_tick();
     room.initialTick = in.initial_tick();
+    if (in.lifecycle() >
+        static_cast<unsigned>(RoomRouteLifecycle::Retired))
+        return false;
+    room.lifecycle = static_cast<RoomRouteLifecycle>(in.lifecycle());
     room.migrationWatermark = in.migration_watermark();
     for (const auto& row : in.inbox())
     {
@@ -294,9 +315,13 @@ bool validRoom(
         !room.nextSequence ||
         room.image.cursor >= room.nextSequence ||
         room.initialTick > room.image.tick ||
-        room.image.tick > room.admittedTick ||
+        room.image.logicalTick > room.admittedTick ||
         room.inbox.size() > limits.maxInbox ||
         room.receipts.size() > limits.maxReceipts ||
+        static_cast<unsigned>(room.lifecycle) >
+            static_cast<unsigned>(RoomRouteLifecycle::Retired) ||
+        (room.lifecycle == RoomRouteLifecycle::Retired &&
+         !room.inbox.empty()) ||
         room.nextSequence - room.image.cursor - 1 !=
             room.inbox.size())
         return false;
@@ -312,7 +337,7 @@ bool validRoom(
             (!r.applied && !r.response.empty()))
             return false;
     auto cursor = room.image.cursor;
-    auto tick = room.image.tick;
+    auto tick = room.image.logicalTick;
     for (const auto& input : room.inbox)
     {
         if (input.sequence != ++cursor ||
@@ -335,6 +360,9 @@ bool validRoom(
     if (!room.handoff)
         return room.migrationWatermark == 0;
     const auto& h = *room.handoff;
+    if (room.lifecycle != RoomRouteLifecycle::Active &&
+        !terminal(h.phase))
+        return false;
     if (!h.id || h.id != room.migrationWatermark ||
         !label(h.source) || !label(h.target) ||
         h.source == h.target || !h.sourceEpoch ||
@@ -347,12 +375,12 @@ bool validRoom(
         return room.owner == h.target &&
                room.ownerEpoch == h.targetEpoch &&
                room.image.cursor >= h.cutoff &&
-               h.frozenFingerprint.size() == SHA256_DIGEST_LENGTH;
+               validImageProof(h.frozenFingerprint);
     if (h.phase == RoomMigrationPhase::Aborted)
         return room.owner == h.source &&
                room.ownerEpoch == h.abortEpoch &&
                (h.frozenFingerprint.empty() ||
-                h.frozenFingerprint.size() == SHA256_DIGEST_LENGTH);
+                validImageProof(h.frozenFingerprint));
     if (room.owner != h.source || room.ownerEpoch != h.sourceEpoch)
         return false;
     if (h.phase == RoomMigrationPhase::Preparing)
@@ -368,7 +396,7 @@ std::string
 encodeReplay(RoomIdentity id, const RoomReplayExtent& extent)
 {
     wire::DirectoryReplay out;
-    out.set_version(1);
+    out.set_version(2);
     out.set_room_id(id.room);
     out.set_incarnation(id.incarnation);
     out.set_first_tick(extent.firstTick);
@@ -379,7 +407,7 @@ encodeReplay(RoomIdentity id, const RoomReplayExtent& extent)
 std::string metadata(std::string_view boot)
 {
     wire::DirectoryMeta out;
-    out.set_version(1);
+    out.set_version(2);
     out.set_boot_id(std::string(boot));
     return out.SerializeAsString();
 }
@@ -390,10 +418,15 @@ RoomMigration::Candidate::expectedRevision() const noexcept
 {
     return m_expected;
 }
-const std::vector<DurableStateStore::Mutation>&
+const std::vector<AtomicJournal::Mutation>&
 RoomMigration::Candidate::mutations() const noexcept
 {
     return m_mutations;
+}
+const RoomDirectory&
+RoomMigration::Candidate::planned() const noexcept
+{
+    return *m_planned;
 }
 RoomMigration::RoomMigration(
     RoomDirectoryLimits limits, std::string boot
@@ -406,7 +439,8 @@ RoomMigration::RoomMigration(
         !limits.maxReceipts || limits.maxInbox > limits.maxReceipts ||
         limits.maxReceipts > itemLimit || !limits.maxOperationBytes ||
         limits.maxOperationBytes > wireLimit ||
-        !limits.maxImageBytes || limits.maxImageBytes > wireLimit ||
+        !limits.maxImageBytes ||
+        limits.maxImageBytes > service::room::wire::kMaxImageBytes ||
         !limits.maxReplayBytes || limits.maxReplayBytes > wireLimit ||
         !limits.maxCommands || limits.maxCommands > itemLimit ||
         limits.receiptRetentionNanos <= 0 ||
@@ -426,7 +460,7 @@ RoomMigration::RoomMigration(
 std::expected<
     std::shared_ptr<const RoomDirectory>,
     RoomMigration::Error>
-RoomMigration::load(const DurableStateStore& store) const
+RoomMigration::load(const AtomicJournal& store) const
 {
     try
     {
@@ -437,6 +471,7 @@ RoomMigration::load(const DurableStateStore& store) const
         out->m_limits = m_limits;
         out->m_durable = store.snapshot();
         out->m_revision = out->m_durable->revision;
+        out->m_controlRevision = out->m_revision;
         const auto meta = out->m_durable->values.find(
             std::string(metaKey)
         );
@@ -462,12 +497,16 @@ RoomMigration::load(const DurableStateStore& store) const
                     return std::unexpected(Error::Invalid);
                 if (out->m_rooms.size() >= m_limits.maxRooms)
                     return std::unexpected(Error::Capacity);
-                const auto existing = out->m_rooms.lower_bound(
-                    RoomIdentity{record.identity.room, 0}
-                );
-                if (existing != out->m_rooms.end() &&
-                    existing->first.room == record.identity.room)
-                    return std::unexpected(Error::Invalid);
+                if (record.lifecycle != RoomRouteLifecycle::Retired)
+                    for (auto existing = out->m_rooms.lower_bound(
+                             RoomIdentity{record.identity.room, 0}
+                         );
+                         existing != out->m_rooms.end() &&
+                         existing->first.room == record.identity.room;
+                         ++existing)
+                        if (existing->second->lifecycle !=
+                            RoomRouteLifecycle::Retired)
+                            return std::unexpected(Error::Invalid);
                 auto saved = std::make_shared<const RoomRouteRecord>(
                     std::move(record)
                 );
@@ -478,7 +517,7 @@ RoomMigration::load(const DurableStateStore& store) const
             else if (key.starts_with(replayPrefix))
             {
                 wire::DirectoryReplay r;
-                if (!parse(bytes, r) || r.version() != 1 ||
+                if (!parse(bytes, r) || r.version() != 2 ||
                     !identity({r.room_id(), r.incarnation()}) ||
                     !r.first_tick() ||
                     r.last_tick() < r.first_tick() ||
@@ -502,7 +541,7 @@ RoomMigration::load(const DurableStateStore& store) const
         {
             wire::DirectoryMeta m;
             if (meta == out->m_durable->values.end() ||
-                !parse(meta->second, m) || m.version() != 1 ||
+                !parse(meta->second, m) || m.version() != 2 ||
                 !label(m.boot_id()))
                 return std::unexpected(Error::Invalid);
             if (m.boot_id() != m_boot)
@@ -525,6 +564,7 @@ RoomMigration::load(const DurableStateStore& store) const
             if (end != room->image.tick)
                 return std::unexpected(Error::Invalid);
         }
+        out->m_replayRecords = replayRecords;
         return out;
     }
     catch (const std::bad_alloc&)
@@ -547,7 +587,7 @@ RoomMigration::plan(
     if (base.m_boot != m_boot || base.m_limits != m_limits ||
         !base.m_durable || now < 0)
         return std::unexpected(Error::Invalid);
-    if (commands.empty() || commands.size() > m_limits.maxCommands ||
+    if (commands.size() > m_limits.maxCommands ||
         base.size() > m_limits.maxRooms)
         return std::unexpected(Error::Capacity);
     try
@@ -584,20 +624,26 @@ RoomMigration::plan(
                             c.image.cursor)
                             return reject(Error::Invalid);
                         if (room)
-                            return room->owner == c.owner &&
+                            return room->lifecycle ==
+                                               RoomRouteLifecycle::
+                                                   Active &&
+                                           room->owner == c.owner &&
                                            room->ownerEpoch == 1 &&
                                            room->image == c.image &&
                                            room->inbox.empty() &&
                                            !room->handoff
                                        ? std::expected<void, Error>{}
                                        : reject(Error::Conflict);
-                        const auto
-                            existing = next->m_rooms.lower_bound(
-                                RoomIdentity{id.room, 0}
-                            );
-                        if (existing != next->m_rooms.end() &&
-                            existing->first.room == id.room)
-                            return reject(Error::Conflict);
+                        for (auto existing =
+                                 next->m_rooms.lower_bound(
+                                     RoomIdentity{id.room, 0}
+                                 );
+                             existing != next->m_rooms.end() &&
+                             existing->first.room == id.room;
+                             ++existing)
+                            if (existing->second->lifecycle !=
+                                RoomRouteLifecycle::Retired)
+                                return reject(Error::Conflict);
                         if (next->size() >= m_limits.maxRooms)
                             return reject(Error::Capacity);
                         room = std::make_shared<RoomRouteRecord>();
@@ -605,7 +651,7 @@ RoomMigration::plan(
                         room->owner = c.owner;
                         room->image = c.image;
                         room->initialTick = c.image.tick;
-                        room->admittedTick = c.image.tick;
+                        room->admittedTick = c.image.logicalTick;
                         return {};
                     }
                     else
@@ -616,6 +662,13 @@ RoomMigration::plan(
                         {
                             if (c.epoch != room->ownerEpoch)
                                 return reject(Error::StaleEpoch);
+                            if (room->lifecycle ==
+                                    RoomRouteLifecycle::Retired ||
+                                (room->lifecycle ==
+                                     RoomRouteLifecycle::Closing &&
+                                 c.operation.kind !=
+                                     RoomIngressKind::Tick))
+                                return reject(Error::Phase);
                             if (!validOperation(
                                     c.operation,
                                     m_limits
@@ -682,6 +735,9 @@ RoomMigration::plan(
                             if (c.epoch != room->ownerEpoch ||
                                 c.owner != room->owner)
                                 return reject(Error::StaleEpoch);
+                            if (room->lifecycle ==
+                                RoomRouteLifecycle::Retired)
+                                return reject(Error::Phase);
                             if (!validImage(c.image, m_limits))
                                 return reject(Error::Invalid);
                             if (c.image == room->image)
@@ -768,7 +824,7 @@ RoomMigration::plan(
                             if (count > room->inbox.size() ||
                                 c.replies.size() != count)
                                 return reject(Error::Invalid);
-                            auto tick = room->image.tick;
+                            auto logical = room->image.logicalTick;
                             for (std::size_t i = 0; i < count; ++i)
                             {
                                 const auto& input = room->inbox[i];
@@ -780,16 +836,19 @@ RoomMigration::plan(
                                     return reject(Error::Invalid);
                                 if (input.operation.kind ==
                                     RoomIngressKind::Tick)
-                                    ++tick;
+                                    ++logical;
                                 auto& receipt = room->receipts.at(
                                     input.operation.id
                                 );
                                 receipt.applied = true;
                                 receipt.response = reply.response;
                             }
-                            if (c.image.tick != tick)
+                            if (c.image.logicalTick != logical ||
+                                c.image.tick < room->image.tick ||
+                                c.image.tick - room->image.tick >
+                                    logical - room->image.logicalTick)
                                 return reject(Error::Invalid);
-                            if (tick != room->image.tick)
+                            if (c.image.tick != room->image.tick)
                             {
                                 if (!c.replay ||
                                     c.replay->bytes.empty() ||
@@ -797,7 +856,8 @@ RoomMigration::plan(
                                         m_limits.maxReplayBytes ||
                                     c.replay->firstTick !=
                                         room->image.tick + 1 ||
-                                    c.replay->lastTick != tick)
+                                    c.replay->lastTick !=
+                                        c.image.tick)
                                     return reject(Error::Invalid);
                                 const auto key = replayKey(
                                     id,
@@ -827,6 +887,9 @@ RoomMigration::plan(
                             std::is_same_v<T, RoomPrepare>
                         )
                         {
+                            if (room->lifecycle !=
+                                RoomRouteLifecycle::Active)
+                                return reject(Error::Phase);
                             if (!c.migration || !label(c.target))
                                 return reject(Error::Invalid);
                             if (c.migration ==
@@ -874,6 +937,28 @@ RoomMigration::plan(
                             return {};
                         }
                         else if constexpr (
+                            std::is_same_v<T, RoomRetire>
+                        )
+                        {
+                            if (c.owner != room->owner ||
+                                c.epoch != room->ownerEpoch)
+                                return reject(Error::StaleEpoch);
+                            if (c.cursor != room->image.cursor ||
+                                c.fingerprint != roomImageFingerprint(
+                                                     id,
+                                                     room->image
+                                                 ))
+                                return reject(Error::Conflict);
+                            if (room->handoff &&
+                                !terminal(room->handoff->phase))
+                                return reject(Error::Phase);
+                            room->lifecycle =
+                                room->inbox.empty()
+                                    ? RoomRouteLifecycle::Retired
+                                    : RoomRouteLifecycle::Closing;
+                            return {};
+                        }
+                        else if constexpr (
                             std::is_same_v<T, RoomPruneReceipts>
                         )
                         {
@@ -890,6 +975,9 @@ RoomMigration::plan(
                         }
                         else
                         {
+                            // Closing and retired records can only
+                            // retain a terminal handoff, whose exact
+                            // retries stay no-ops.
                             if (!room->handoff ||
                                 c.migration != room->handoff->id)
                                 return reject(Error::Conflict);
@@ -1049,10 +1137,33 @@ RoomMigration::plan(
             else if (oldMeta->second != bytes)
                 return std::unexpected(Error::BootMismatch);
         }
-        std::size_t replayRecords = 0;
-        for (const auto& [key, value] : base.m_durable->values)
-            if (key.starts_with(replayPrefix))
-                ++replayRecords;
+        // Only final control facts invalidate scheduler cache
+        // disposal. Tick images, inboxes, receipts and unrelated
+        // authority CASes do not.
+        for (const auto& command : commands)
+        {
+            const auto id = std::visit(
+                [](const auto& value) { return value.room; },
+                command
+            );
+            const auto* before = base.find(id);
+            const auto* after = next->find(id);
+            if (!before || !after ||
+                before->identity != after->identity ||
+                before->owner != after->owner ||
+                before->ownerEpoch != after->ownerEpoch ||
+                before->lifecycle != after->lifecycle ||
+                before->handoff != after->handoff ||
+                before->migrationWatermark !=
+                    after->migrationWatermark)
+            {
+                next->m_controlRevision = next->m_revision;
+                break;
+            }
+        }
+        auto replayRecords = base.m_replayRecords;
+        if (replayRecords > itemLimit)
+            return std::unexpected(Error::Capacity);
         for (const auto& [key, value] : writes)
             if (key.starts_with(replayPrefix))
             {
@@ -1060,12 +1171,19 @@ RoomMigration::plan(
                     key
                 );
                 if (value && !existed)
+                {
+                    if (replayRecords == itemLimit)
+                        return std::unexpected(Error::Capacity);
                     ++replayRecords;
+                }
                 else if (!value && existed)
+                {
+                    if (!replayRecords)
+                        return std::unexpected(Error::Invalid);
                     --replayRecords;
+                }
             }
-        if (replayRecords > itemLimit)
-            return std::unexpected(Error::Capacity);
+        next->m_replayRecords = replayRecords;
         std::size_t total = 0;
         for (auto& [key, value] : writes)
         {
@@ -1096,7 +1214,7 @@ std::expected<
     RoomMigration::Error>
 RoomMigration::publish(
     Candidate&& candidate,
-    const DurableStateStore& store,
+    const AtomicJournal& store,
     std::uint64_t acknowledged
 ) const noexcept
 {
@@ -1114,50 +1232,16 @@ RoomMigration::publish(
     if (durable->revision != acknowledged ||
         (candidate.m_mutations.empty() ? !(same || next) : !next))
         return std::unexpected(Error::NotDurable);
-    const auto mutationFor = [&](
-                                 const std::string& key
-                             ) -> const DurableStateStore::Mutation*
-    {
-        const auto found = std::lower_bound(
-            candidate.m_mutations.begin(),
-            candidate.m_mutations.end(),
-            key,
-            [](const auto& mutation, const auto& name)
-            { return mutation.key < name; }
-        );
-        return found != candidate.m_mutations.end() &&
-                       found->key == key
-                   ? &*found
-                   : nullptr;
-    };
-    for (const auto& mutation : candidate.m_mutations)
-    {
-        const auto found = durable->values.find(mutation.key);
-        if (mutation.value ? found == durable->values.end() ||
-                                 found->second != *mutation.value
-                           : found != durable->values.end())
-            return std::unexpected(Error::NotDurable);
-    }
-    // Verify the complete owned namespace, including unchanged rooms
-    // and replay prefixes. Other authority keys may share this one
-    // CAS batch.
-    const auto& prior = candidate.m_planned->m_durable->values;
-    for (const auto& [key, bytes] : durable->values)
-    {
-        if (!key.starts_with(prefix) || mutationFor(key))
-            continue;
-        const auto found = prior.find(key);
-        if (found == prior.end() || found->second != bytes)
-            return std::unexpected(Error::NotDurable);
-    }
-    for (const auto& [key, bytes] : prior)
-    {
-        if (!key.starts_with(prefix) || mutationFor(key))
-            continue;
-        const auto found = durable->values.find(key);
-        if (found == durable->values.end() || found->second != bytes)
-            return std::unexpected(Error::NotDurable);
-    }
+    // Journal proves this exact durable transition, including the
+    // unchanged owned namespace. Verification scales with the
+    // admitted batch, not history.
+    if (!candidate.m_planned->m_durable ||
+        !durable->verifiesNamespaceTransition(
+            *candidate.m_planned->m_durable,
+            prefix,
+            candidate.m_mutations
+        ))
+        return std::unexpected(Error::NotDurable);
     // The directory, map nodes and immutable records were allocated
     // before WAL admission. After ACK this is only a noexcept
     // shared-pointer handoff.

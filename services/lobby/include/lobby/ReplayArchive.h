@@ -11,11 +11,12 @@
 #include <string>
 #include <vector>
 
-#include "lobby/DurableStateStore.h"
+#include "persistence/AtomicJournal.h"
 #include "room/ReplayFile.h"
 
 namespace service::lobby
 {
+using arena::persistence::AtomicJournal;
 enum class ReplayArchiveErrorCode
 {
     Invalid,
@@ -40,19 +41,42 @@ struct ReplayArchive
     /// writer.
     std::uint64_t fileBytes;
 };
+/** @brief Reports a structurally linked history without evaluating
+ * physics. */
+struct ReplayArchiveTail
+{
+    std::uint64_t roomId{0}, incarnation{0};
+    /// Zero for an empty tick-zero actor; otherwise the first
+    /// physical record.
+    std::uint64_t firstTick{0}, lastTick{0}, checksum{0};
+    service::room::ActorConfig config;
+};
+/** @brief Checks canonical records, physical tick/checksum links and
+ * Directory image metadata only. No RoomActor, runtime kernel, clock
+ * or file I/O runs. Complete player-state continuity is verified by
+ * workers or offline assembly.
+ */
+std::expected<std::vector<ReplayArchiveTail>, ReplayArchiveError>
+inspectReplayArchives(
+    const AtomicJournal::Snapshot&,
+    service::room::ReplayFileLimits limits = {},
+    std::size_t maxRecords = 65536
+);
 /** @brief Reassembles only canonical replay keys without reading
  * files or clocks.
  *
- * All segments must begin at tick zero and join through identical
- * complete checkpoints/configuration. Inputs and ticks retain their
- * original order. Limits bound aggregate output bytes/ticks as well
- * as each actor policy; codec limits separately bound each segment.
- * maxRecords bounds the complete source map and must be between one
- * and the durable store's supported maximum of 1,000,000 keys.
+ * Histories begin at tick zero and join through identical complete
+ * checkpoints/configuration. A legacy history may continue exactly
+ * once into worker Directory extents; retained routes anchor the
+ * final snapshot. Inputs and ticks retain their original order.
+ * Limits bound aggregate output bytes/ticks as well as each actor
+ * policy; codec limits separately bound each segment. maxRecords
+ * bounds the complete source map and must be between one and the
+ * durable store's supported maximum of 1,000,000 keys.
  */
 std::expected<std::vector<ReplayArchive>, ReplayArchiveError>
 assembleReplayArchives(
-    const DurableStateStore::Snapshot&,
+    const AtomicJournal::Snapshot&,
     service::room::ReplayFileLimits limits = {},
     std::size_t maxRecords = 65536
 );

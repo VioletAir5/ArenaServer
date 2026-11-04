@@ -12,12 +12,15 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <boost/asio/any_io_executor.hpp>
 
-namespace service::lobby
+namespace arena::persistence
 {
 /** @brief Owns a bounded journal and its single disk writer.
  *
@@ -33,8 +36,10 @@ namespace service::lobby
  * durability. OutcomeUnknown fences further writes; reopen and
  * inspect state to reconcile it.
  */
-class DurableStateStore final
+class AtomicJournal final
 {
+    struct State;
+
 public:
     struct Config
     {
@@ -54,8 +59,9 @@ public:
         /// Retained mutation capacities and estimated encoded
         /// buffers.
         std::size_t maxPendingBytes{16 * 1024 * 1024};
-        /// Bounds detached state copies independently of journal
-        /// growth.
+        /// Bounds detached key/value copies independently of journal
+        /// growth. The transition proof separately retains at most
+        /// maxPendingBytes of admitted mutation capacity.
         std::size_t maxStateBytes{32 * 1024 * 1024};
         /// Maximum live keys in a detached state snapshot.
         std::size_t maxKeys{65536};
@@ -78,6 +84,45 @@ public:
         /// Detached values; no worker-owned mutable map escapes
         /// publication.
         std::map<std::string, std::string> values;
+
+        Snapshot() = default;
+        Snapshot(
+            std::uint64_t initialRevision,
+            std::map<std::string, std::string> initialValues
+        )
+            : revision(initialRevision)
+            , values(std::move(initialValues))
+        {
+        }
+        /** @brief Verifies the complete result of one namespace
+         * transition.
+         * @param[in] base Exact published predecessor, not a copied
+         * revision.
+         * @param[in] prefix Nonempty binary namespace prefix.
+         * @param[in] expected Sorted, unique mutations belonging to
+         * the prefix. Unmentioned keys must remain unchanged.
+         * Unrelated namespaces and same-value writes are permitted.
+         * The identical snapshot verifies only an empty expected
+         * batch; recovered views have no predecessor. Checking costs
+         * depend on this write set, not retained history.
+         */
+        bool verifiesNamespaceTransition(
+            const Snapshot& base,
+            std::string_view prefix,
+            std::span<const Mutation> expected
+        ) const noexcept;
+
+    private:
+        friend struct AtomicJournal::State;
+        /// Weak provenance never retains an unbounded chain of old
+        /// snapshots.
+        std::weak_ptr<const Snapshot> m_predecessor;
+        /// Copies cannot reuse another published object's transition
+        /// proof.
+        std::weak_ptr<const Snapshot> m_identity;
+        /// Moved before I/O; retained capacity is bounded by
+        /// maxPendingBytes.
+        std::vector<Mutation> m_writes;
     };
 
     enum class Error
@@ -138,12 +183,12 @@ public:
 
     /** @brief Recovers one validated prefix and starts a private disk
      * worker. */
-    DurableStateStore(
+    AtomicJournal(
         boost::asio::any_io_executor executor, Config config
     );
-    ~DurableStateStore() noexcept;
-    DurableStateStore(const DurableStateStore&) = delete;
-    DurableStateStore& operator=(const DurableStateStore&) = delete;
+    ~AtomicJournal() noexcept;
+    AtomicJournal(const AtomicJournal&) = delete;
+    AtomicJournal& operator=(const AtomicJournal&) = delete;
 
     /** @brief Returns one immutable durable version from any thread.
      */
@@ -165,9 +210,8 @@ public:
     Stats stats() const noexcept;
 
 private:
-    struct State;
     /// The worker and queued owner deliveries retain state
     /// independently of callers.
     std::shared_ptr<State> m_state;
 };
-} // namespace service::lobby
+} // namespace arena::persistence

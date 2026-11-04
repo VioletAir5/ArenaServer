@@ -27,6 +27,9 @@ from .settlement import SettlementCommand, Reward
 from .transactions import RetryBudget, StorageError
 from .worker import Worker
 
+READINESS_PROBE_SECONDS = .25
+READINESS_MAX_AGE_SECONDS = .5
+
 _ID_NAMESPACE = UUID("98e4ecb1-df9f-4588-9554-378c79291c25")
 
 
@@ -163,7 +166,7 @@ class StorageService:
         self.publisher = OutboxPump(database) if publish else None
         self._projections = set()
         self._close_task = None
-        self._runtime_intent = None
+        self._runtime_readiness = None
         self.projection_rejected = self.projection_failed = 0
         self.handlers = {}
         for method, request, handler in (
@@ -197,8 +200,11 @@ class StorageService:
     async def _ready(self, payload, context):
         if payload:
             raise RpcError(INVALID_ARGUMENT)
-        if self._runtime_intent is not None and not self._runtime_intent():
-            raise RpcError(UNAVAILABLE, retryable=True)
+        context.check()
+        if self._runtime_readiness is not None:
+            if not self._runtime_readiness():
+                raise RpcError(UNAVAILABLE, retryable=True)
+            return b""
         try:
             await self.worker.run(lambda work: work.accounts.get(1), context)
         except StorageError as error:
@@ -385,6 +391,7 @@ class _RuntimeState:
         self.draining = False
         self._dependency = False
         self._dependency_version = -1
+        self._dependency_checked_at = None
         self._probe_task = self._close_task = None
         self._sequence = 0
         self._probe_error = None
@@ -396,25 +403,34 @@ class _RuntimeState:
         snapshot = self.snapshot()
         return snapshot.version if snapshot is not None else 0
 
-    def operator_ready(self):
-        snapshot = self.snapshot()
+    def _operator_ready(self, snapshot):
         if self.draining or snapshot is not None and not snapshot.desired_ready:
             return False
         own_node = next((node for node in snapshot.nodes
             if node.service=='storage' and node.id==self.node_id),None) if snapshot is not None else None
         return own_node is None or own_node.ready
 
+    def operator_ready(self):
+        return self._operator_ready(self.snapshot())
+
+    def _ready_for(self, snapshot):
+        version = snapshot.version if snapshot is not None else 0
+        checked = self._dependency_checked_at
+        return (self._operator_ready(snapshot) and self._dependency
+            and self._dependency_version == version and checked is not None
+            and 0 <= time.monotonic()-checked < READINESS_MAX_AGE_SECONDS)
+
     def ready(self):
-        return self.operator_ready() and self._dependency and self._dependency_version == self.version()
+        return self._ready_for(self.snapshot())
 
     def admit(self, method):
         return method == 'health.ready' or self.ready()
 
     def status(self):
         snapshot = self.snapshot()
-        return dict(service='storage',node_id=self.node_id,config_version=self.version(),
+        return dict(service='storage',node_id=self.node_id,config_version=snapshot.version if snapshot is not None else 0,
             desired_ready=snapshot.desired_ready if snapshot is not None else True,
-            draining=self.draining,ready=self.ready(),alive=True,
+            draining=self.draining,ready=self._ready_for(snapshot),alive=True,
             inflight=self.server.inflight,worker=self.service.worker.stats,pool=self.service.database.stats,
             methods=dict(self.server.method_calls),completions=dict(self.server.method_completed),
             admission_rejected=self.server.admission_rejected,
@@ -427,21 +443,26 @@ class _RuntimeState:
             started = time.monotonic()
             version = self.version()
             self._sequence += 1
-            context = Context(self._sequence,'storage-readiness',time.monotonic()+.25,'')
+            context = Context(self._sequence,'storage-readiness',time.monotonic()+READINESS_PROBE_SECONDS,'')
             healthy = False
+            publish_result = True
             try:
                 await self.service.worker.run(lambda work:work.accounts.get(1),context)
                 healthy = True
             except (StorageError,RpcError) as error:
                 self._probe_error = error.category if isinstance(error,StorageError) else str(error.status)
+                # Full local admission did not observe a database failure.
+                # Keep the last observation's original version and hard expiry.
+                publish_result = not (isinstance(error,RpcError) and error.status == OVERLOADED)
             except Exception:
                 self._probe_error = 'internal'
             # A result for an old publication cannot make the new version ready.
-            if version == self.version():
+            if publish_result and version == self.version():
                 self._dependency,self._dependency_version = healthy,version
+                self._dependency_checked_at = time.monotonic()
                 if healthy:
                     self._probe_error = None
-            await asyncio.sleep(max(0,.25-(time.monotonic()-started)))
+            await asyncio.sleep(max(0,READINESS_PROBE_SECONDS-(time.monotonic()-started)))
 
     def request_reload(self):
         return self.reloader.request_reload() if self.reloader is not None else False
@@ -514,7 +535,7 @@ async def run_server(args):
     health = HealthServer(runtime.status) if runtime is not None else None
     if runtime is not None:
         runtime.server = server
-        service._runtime_intent = runtime.operator_ready
+        service._runtime_readiness = runtime.ready
         if config_path is not None:
             runtime.reloader = ConfigReloader(protocol,config_path,store)
     stopped = asyncio.Event()

@@ -6,18 +6,10 @@
 
 #include <stdexcept>
 
-#include <openssl/sha.h>
+#include "room/RoomWire.h"
 
 namespace service::lobby
 {
-namespace
-{
-void appendNumber(std::string& out, std::uint64_t value)
-{
-    for (int shift = 56; shift >= 0; shift -= 8)
-        out.push_back(static_cast<char>((value >> shift) & 255));
-}
-} // namespace
 std::uint64_t RoomDirectory::revision() const noexcept
 {
     return m_revision;
@@ -32,26 +24,30 @@ RoomDirectory::find(RoomIdentity id) const noexcept
     const auto found = m_rooms.find(id);
     return found == m_rooms.end() ? nullptr : found->second.get();
 }
+std::vector<RoomIdentity> RoomDirectory::ids() const
+{
+    std::vector<RoomIdentity> out;
+    out.reserve(m_rooms.size());
+    for (const auto& [id, room] : m_rooms)
+        out.push_back(id);
+    return out;
+}
 std::string
 roomImageFingerprint(RoomIdentity id, const RoomWorkerImage& image)
 {
-    // Fixed-width network-order metadata precedes the opaque payload.
-    std::string canonical = "arena-room-image/v1";
-    appendNumber(canonical, id.room);
-    appendNumber(canonical, id.incarnation);
-    appendNumber(canonical, image.tick);
-    appendNumber(canonical, image.checksum);
-    appendNumber(canonical, image.cursor);
-    canonical += image.checkpoint;
-    std::string digest(SHA256_DIGEST_LENGTH, '\0');
-    if (!SHA256(
-            reinterpret_cast<const unsigned char*>(canonical.data()),
-            canonical.size(),
-            reinterpret_cast<unsigned char*>(digest.data())
-        ))
+    const auto proof = service::room::wire::imageFingerprint(
+        {id.room,
+         id.incarnation,
+         image.tick,
+         image.checksum,
+         image.cursor,
+         image.logicalTick},
+        image.checkpoint
+    );
+    if (!proof)
         throw std::runtime_error(
             "room image fingerprint unavailable"
         );
-    return digest;
+    return *proof;
 }
 } // namespace service::lobby

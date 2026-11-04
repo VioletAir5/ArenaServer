@@ -394,12 +394,15 @@ try
     // inherit masks.
     std::optional<ShutdownSignalMask> signalMask;
     std::shared_ptr<arena::runtime::ConfigStore> runtimeConfig;
+    // The executor must outlive every passive client and
+    // control/route callback, including early configuration failures
+    // and exception unwinding.
+    std::unique_ptr<GatewayLobbyRuntime> remoteRuntime;
     std::shared_ptr<arena::runtime::RuntimeControl> control;
     std::shared_ptr<const MessageRegistry> handshakeRegistry;
     AdmissionController::Limits admissionLimits{};
     auto listenersReady = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<AdmissionController> admission;
-    std::unique_ptr<GatewayLobbyRuntime> remoteRuntime;
     std::shared_ptr<LobbyClient> lobby;
     std::uint16_t tcpPort = 8888;
     std::uint16_t wsPort = 8889;

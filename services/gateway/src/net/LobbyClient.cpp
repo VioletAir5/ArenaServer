@@ -284,25 +284,41 @@ struct LobbyClient::State : std::enable_shared_from_this<State>
                         }
                     } done{self->probeActive};
                     ResponseCleanup cleanup{response};
-                    self->dependencyReady = false;
-                    if (self->stopping.load())
-                        return;
-                    const auto current = self->route();
-                    if (response.status() == arena::rpc::OK &&
-                        response.protocol_version() ==
-                            arena::internal_rpc::protocolVersion &&
-                        response.payload().empty() && current &&
-                        *current == selected)
+                    // Qualify the entire reply before publishing
+                    // readiness. Readers on Gateway reactors must not
+                    // see a temporary false on success.
+                    bool qualified = false;
+                    try
                     {
+                        if (!self->stopping.load())
+                        {
+                            const auto current = self->route();
+                            qualified = response.status() ==
+                                            arena::rpc::OK &&
+                                        response.protocol_version() ==
+                                            arena::internal_rpc::
+                                                protocolVersion &&
+                                        response.payload().empty() &&
+                                        current &&
+                                        *current == selected;
+                        }
+                    }
+                    catch (...)
+                    {
+                        // Resolver/allocation failures must revoke
+                        // the prior result.
+                        qualified = false;
+                    }
+                    qualified = qualified && !self->stopping.load();
+                    if (qualified)
                         self->probeVersion.store(
                             selected.version,
                             std::memory_order_release
                         );
-                        self->dependencyReady.store(
-                            true,
-                            std::memory_order_release
-                        );
-                    }
+                    self->dependencyReady.store(
+                        qualified,
+                        std::memory_order_release
+                    );
                 }
             );
             if (!accepted)

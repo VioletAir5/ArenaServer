@@ -39,6 +39,9 @@ struct CoreCheckpoint
     service::match::QueueCheckpoint queue;
     /// Complete room kernel snapshots and managed lifecycle facts.
     RoomCheckpoint rooms;
+    /// True after all remaining legacy rooms have moved to worker
+    /// ownership.
+    bool distributedRooms{false};
 };
 
 /** @brief Encodes schema version one; this function never reads

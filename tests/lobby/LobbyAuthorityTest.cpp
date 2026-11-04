@@ -23,6 +23,11 @@
 #include <boost/asio/io_context.hpp>
 #include <gtest/gtest.h>
 
+#include "lobby/LegacyRoomImport.h"
+#include "lobby/ReplayArchive.h"
+#include "lobby_state.pb.h"
+#include "room/RoomRuntime.h"
+#include "room/RoomWire.h"
 #include "storage.pb.h"
 
 namespace
@@ -324,6 +329,443 @@ protected:
             );
         return reply;
     }
+    service::room::RuntimePolicy workerPolicy() const
+    {
+        return {
+            config.rooms.actor,
+            config.rooms.maxPendingPerRoom,
+            config.rooms.battleDurationTicks,
+            config.rooms.readyTimeoutTicks,
+            config.rooms.resultRetention.count() * 1'000'000
+        };
+    }
+    RoomWorkerImage workerImage(
+        const service::room::RuntimeImage& image, std::uint64_t cursor
+    )
+    {
+        const auto opaque = service::room::wire::encodeImage(image);
+        if (!opaque)
+            throw std::runtime_error("worker image encoding failed");
+        return {
+            image.actor.tick,
+            image.actor.checksum,
+            cursor,
+            *opaque,
+            image.logicalCutoff
+        };
+    }
+    RoomIdentity
+    createPending(const arena::lobby_meta::PendingRoom& reservation)
+    {
+        std::optional<service::room::RuntimeAllocation> allocation;
+        if (reservation.match_id())
+        {
+            const auto snapshot = authority->snapshot();
+            const auto found = std::find_if(
+                snapshot->core.registry.rooms.begin(),
+                snapshot->core.registry.rooms.end(),
+                [&](const auto& room)
+                {
+                    return room.roomId.value() ==
+                           reservation.room_id();
+                }
+            );
+            if (found == snapshot->core.registry.rooms.end() ||
+                !found->managed)
+                throw std::runtime_error("missing reserved cohort");
+            const auto& a = found->managed->members[0];
+            const auto& b = found->managed->members[1];
+            allocation = service::room::RuntimeAllocation{
+                reservation.match_id(),
+                {{{a.playerId, a.sessionId, a.roomEpoch},
+                  {b.playerId, b.sessionId, b.roomEpoch}}},
+                {a.initialMmr, b.initialMmr}
+            };
+        }
+        auto image = service::room::RoomRuntime::create(
+            RoomId{reservation.room_id()},
+            reservation.incarnation(),
+            workerPolicy(),
+            allocation,
+            reservation.created_unix_ms()
+        );
+        if (!image)
+            throw std::runtime_error(
+                "real worker initialization failed"
+            );
+        const RoomIdentity id{
+            reservation.room_id(),
+            reservation.incarnation()
+        };
+        const auto value = workerImage(*image, 0);
+        call(
+            [id, value, reservation](auto& work, auto capture)
+            {
+                work.roomChanges.push_back(
+                    RoomCreate{id, "worker-a", value}
+                );
+                if (reservation.match_id() &&
+                    !work.queue->release(
+                        reservation.match_id(),
+                        work.now,
+                        RoomId{id.room}
+                    ))
+                    throw std::runtime_error(
+                        "assignment pin release failed"
+                    );
+                auto* pending = work.meta.mutable_pending_rooms();
+                for (int i = pending->size(); i-- > 0;)
+                    if (pending->Get(i).room_id() == id.room)
+                        pending->DeleteSubrange(i, 1);
+                capture(pong());
+            }
+        );
+        return id;
+    }
+    RoomIdentity manual(std::uint64_t room = 55)
+    {
+        auto reserved = call(
+            [room](auto& work, auto capture)
+            {
+                auto* pending = work.meta.add_pending_rooms();
+                pending->set_room_id(room);
+                pending->set_incarnation(
+                    work.meta.incarnation_high_water() + 1
+                );
+                work.meta.set_incarnation_high_water(
+                    pending->incarnation()
+                );
+                pending->set_created_unix_ms(
+                    static_cast<std::uint64_t>(work.wallNow) * 1000
+                );
+                pending->set_deadline_nanos(
+                    work.now.time_since_epoch().count() +
+                    10'000'000'000LL
+                );
+                capture(pong());
+            }
+        );
+        return createPending(
+            reserved.committed->meta.pending_rooms(0)
+        );
+    }
+    RoomIdentity match()
+    {
+        const auto first = login(7), second = login(8);
+        call(
+            [first, second](auto& work, auto capture)
+            {
+                work.meta.set_ticket_next(10);
+                work.meta.set_ticket_last(1000);
+                if (!work.queue->join(
+                        PlayerId{7},
+                        arena::domain::SessionId{first.session_id()},
+                        1,
+                        1000,
+                        work.now
+                    ) ||
+                    !work.queue->join(
+                        PlayerId{8},
+                        arena::domain::SessionId{second.session_id()},
+                        1,
+                        1000,
+                        work.now
+                    ))
+                    throw std::runtime_error(
+                        "matching admission failed"
+                    );
+                capture(pong());
+            }
+        );
+        milliseconds += 50;
+        authority->requestTick();
+        if (!until(
+                [&]
+                {
+                    return authority->snapshot()
+                               ->meta.pending_rooms_size() == 1;
+                }
+            ))
+            throw std::runtime_error("durable pending room missing");
+        if (!authority->snapshot()->core.rooms.actors.empty() ||
+            !authority->snapshot()->roomImages.empty() ||
+            authority->snapshot()
+                    ->core.queue.metrics.assignedPlayers != 2)
+            throw std::runtime_error(
+                "pending match ran a local kernel or lost its pin"
+            );
+        return createPending(
+            authority->snapshot()->meta.pending_rooms(0)
+        );
+    }
+    service::room::RuntimeCommand workerCommand(
+        RoomIdentity id,
+        service::room::RuntimeCommandKind kind,
+        std::uint64_t player
+    )
+    {
+        service::room::RuntimeCommand command;
+        command.kind = kind;
+        command.incarnation = id.incarnation;
+        const auto snapshot = authority->snapshot();
+        for (const auto& entry : snapshot->core.registry.entries)
+            if (entry.snapshot.playerId.value() == player)
+                command.caller = service::room::RuntimeAuthorization{
+                    {entry.snapshot.playerId,
+                     entry.snapshot.sessionId,
+                     entry.snapshot.roomEpoch},
+                    entry.snapshot.epoch,
+                    entry.snapshot.connectionId,
+                    entry.snapshot.presence == Presence::Online
+                };
+        return command;
+    }
+    Authority::CommitReply workerStep(
+        RoomIdentity id,
+        std::vector<service::room::RuntimeCommand> commands = {},
+        bool retire = false,
+        bool blockSettlement = false
+    )
+    {
+        const auto base = authority->snapshot();
+        const auto* route = base->directory->find(id);
+        const auto image = base->roomImages.at(id);
+        service::room::RuntimeCutoff cutoff;
+        milliseconds += 50;
+        cutoff.nowNanos = milliseconds.load() * 1'000'000;
+        cutoff.wallMillis = static_cast<std::uint64_t>(wall.load()) *
+                            1000;
+        for (const auto& entry : base->core.registry.entries)
+        {
+            const auto& v = entry.snapshot;
+            service::room::RuntimeAuthorization auth{
+                {v.playerId, v.sessionId, v.roomEpoch},
+                v.epoch,
+                v.connectionId,
+                v.presence == Presence::Online
+            };
+            cutoff.currentAuthorizations.push_back(auth);
+            if (v.roomId && v.roomId->value() == id.room)
+                cutoff.roster.push_back(auth);
+        }
+        std::vector<RoomDirectoryCommand> accept;
+        for (std::size_t i = 0; i != commands.size(); ++i)
+        {
+            auto bytes = service::room::wire::encodeCommand(
+                commands[i]
+            );
+            if (!bytes)
+                throw std::runtime_error(
+                    "worker command encoding failed"
+                );
+            accept.push_back(
+                RoomAccept{
+                    id,
+                    route->ownerEpoch,
+                    {"op/" +
+                         std::to_string(image->logicalCutoff + 1) +
+                         "/" + std::to_string(i),
+                     commands[i].kind ==
+                             service::room::RuntimeCommandKind::Ready
+                         ? RoomIngressKind::Ready
+                     : commands[i].kind ==
+                             service::room::RuntimeCommandKind::
+                                 SettlementAck
+                         ? RoomIngressKind::Settlement
+                         : RoomIngressKind::Input,
+                     0,
+                     std::move(*bytes)}
+                }
+            );
+        }
+        auto context = service::room::wire::encodeCutoff(cutoff);
+        if (!context)
+            throw std::runtime_error("worker cutoff encoding failed");
+        accept.push_back(
+            RoomAccept{
+                id,
+                route->ownerEpoch,
+                {"tick/" + std::to_string(image->logicalCutoff + 1),
+                 RoomIngressKind::Tick,
+                 image->logicalCutoff + 1,
+                 std::move(*context)}
+            }
+        );
+        call(
+            [accept](auto& work, auto capture)
+            {
+                work.roomChanges.insert(
+                    work.roomChanges.end(),
+                    accept.begin(),
+                    accept.end()
+                );
+                capture(pong());
+            }
+        );
+        if (authority->snapshot()->roomImages.at(id) != image)
+            throw std::runtime_error(
+                "ingress replaced an unchanged immutable view"
+            );
+        cutoff.commands = std::move(commands);
+        auto proposal = service::room::RoomRuntime::step(
+            *image,
+            cutoff
+        );
+        if (!proposal)
+            throw std::runtime_error("real worker cutoff failed");
+        const auto cursor = route->nextSequence + accept.size() - 1;
+        const auto value = workerImage(proposal->image, cursor);
+        std::vector<RoomAppliedReply> replies;
+        for (std::size_t i = 0; i != accept.size(); ++i)
+            replies.push_back(
+                {route->nextSequence + i,
+                 i + 1 == accept.size()
+                     ? std::string{}
+                     : pong(proposal->image.actor.checksum)
+                           .SerializeAsString()}
+            );
+        std::optional<RoomReplayExtent> replay;
+        if (proposal->replay)
+        {
+            auto bytes = service::room::wire::encodeReplayLog(
+                {image->policy.actor,
+                 image->actor,
+                 {*proposal->replay}}
+            );
+            if (!bytes)
+                throw std::runtime_error(
+                    "worker replay encoding failed"
+                );
+            replay = RoomReplayExtent{
+                proposal->replay->tick,
+                proposal->replay->tick,
+                std::move(*bytes)
+            };
+        }
+        const auto release = proposal->releaseMembership;
+        const auto matchId = proposal->image.managed
+                                 ? proposal->image.managed->allocation
+                                       .matchId
+                                 : 0;
+        return call(
+            [id,
+             owner = route->owner,
+             epoch = route->ownerEpoch,
+             value,
+             replies,
+             replay,
+             release,
+             retire,
+             blockSettlement,
+             matchId](auto& work, auto capture)
+            {
+                work.roomChanges.push_back(
+                    RoomApply{
+                        id,
+                        owner,
+                        epoch,
+                        value,
+                        replies,
+                        replay
+                    }
+                );
+                if (release && !work.online->finishMatch(
+                                   RoomId{id.room},
+                                   matchId
+                               ))
+                    throw std::runtime_error(
+                        "membership release failed"
+                    );
+                if (retire)
+                {
+                    const auto registry = work.online->checkpoint();
+                    for (const auto& entry : registry.entries)
+                        if (entry.snapshot.roomId &&
+                            entry.snapshot.roomId->value() == id.room)
+                            work.online->leaveRoom(entry.binding);
+                    work.roomChanges.push_back(
+                        RoomRetire{
+                            id,
+                            owner,
+                            epoch,
+                            value.cursor,
+                            roomImageFingerprint(id, value)
+                        }
+                    );
+                }
+                if (blockSettlement)
+                    work.meta.mutable_settlements(0)->set_phase(
+                        arena::lobby_meta::SettlementDelivery::BLOCKED
+                    );
+                capture(pong(value.checksum));
+            }
+        );
+    }
+    void ready(RoomIdentity id)
+    {
+        auto a = workerCommand(
+            id,
+            service::room::RuntimeCommandKind::Ready,
+            7
+        );
+        auto b = workerCommand(
+            id,
+            service::room::RuntimeCommandKind::Ready,
+            8
+        );
+        a.ready = b.ready = true;
+        workerStep(id, {a, b});
+        workerStep(id);
+    }
+    void settlementIntent(RoomIdentity id)
+    {
+        const auto image = authority->snapshot()->roomImages.at(id);
+        const auto& match = *image->managed;
+        arena::storage::SaveResultRequest request;
+        auto* record = request.mutable_match();
+        record->set_match_id(match.allocation.matchId);
+        record->set_room_id(id.room);
+        record->set_result_version(1);
+        record->set_state("completed");
+        record->set_finish_reason("completed");
+        record->set_final_tick(match.result->finalTick);
+        record->set_final_checksum(match.result->finalChecksum);
+        for (std::size_t i = 0; i != 2; ++i)
+        {
+            auto* member = record->add_participants();
+            member->set_player_id(
+                match.allocation.members[i].playerId.value()
+            );
+            member->set_session_id(
+                match.allocation.members[i].sessionId.value()
+            );
+            member->set_membership_epoch(
+                match.allocation.members[i].epoch
+            );
+            member->set_initial_mmr(match.allocation.initialMmr[i]);
+            member->set_slot(i + 1);
+        }
+        call(
+            [request](auto& work, auto capture)
+            {
+                const auto now = work.now.time_since_epoch().count();
+                auto* delivery = work.meta.add_settlements();
+                delivery->set_match_id(request.match().match_id());
+                delivery->set_stable_idempotency_key(
+                    "settlement/" +
+                    std::to_string(request.match().match_id())
+                );
+                delivery->set_max_attempts(8);
+                delivery->set_first_attempt_nanos(now);
+                delivery->set_deadline_nanos(now + 1'000'000'000);
+                delivery->set_next_attempt_nanos(now);
+                delivery->set_retry_base_ms(10);
+                delivery->set_retry_max_ms(100);
+                delivery->set_request(request.SerializeAsString());
+                capture(pong());
+            }
+        );
+    }
     SessionBinding binding(std::uint64_t player)
     {
         for (const auto& entry :
@@ -376,8 +818,31 @@ TEST_F(
     config.maxPending = 1;
     open();
     login(7);
-    const auto old = authority->snapshot();
     const auto current = binding(7);
+    auto reserved = call(
+        [](auto& work, auto capture)
+        {
+            auto* pending = work.meta.add_pending_rooms();
+            pending->set_room_id(55);
+            pending->set_incarnation(1);
+            pending->set_created_unix_ms(
+                static_cast<std::uint64_t>(work.wallNow) * 1000
+            );
+            pending->set_deadline_nanos(10'000'000'000LL);
+            work.meta.set_incarnation_high_water(1);
+            capture(pong());
+        }
+    );
+    const auto created = service::room::RoomRuntime::create(
+        RoomId{55},
+        1,
+        workerPolicy()
+    );
+    ASSERT_TRUE(created);
+    const auto value = workerImage(*created, 0);
+    const RoomIdentity id{55, 1};
+    const auto old = authority->snapshot();
+    ASSERT_TRUE(old->roomImages.empty());
     {
         std::lock_guard lock(syncMutex);
         releaseSync = false;
@@ -385,8 +850,12 @@ TEST_F(
         holdNextSync = true;
     }
     auto pending = submit(
-        [current](auto& candidate, auto capture)
+        [current, id, value](auto& candidate, auto capture)
         {
+            candidate.roomChanges.push_back(
+                RoomCreate{id, "worker-a", value}
+            );
+            candidate.meta.clear_pending_rooms();
             if (!candidate.online->joinRoom(current, RoomId{55}))
                 throw std::runtime_error("join failed");
             capture(pong());
@@ -412,6 +881,17 @@ TEST_F(
     auto result = await(pending);
     ASSERT_TRUE(result);
     EXPECT_EQ(result->committed->revision, old->revision + 1);
+    EXPECT_TRUE(old->roomImages.empty());
+    EXPECT_EQ(
+        result->committed->roomImages.at(id)->actor,
+        created->actor
+    );
+    EXPECT_NE(result->committed->directory, old->directory);
+    EXPECT_EQ(
+        result->committed->directory->revision(),
+        result->committed->revision
+    );
+    EXPECT_TRUE(result->committed->core.rooms.actors.empty());
     EXPECT_EQ(
         result->committed->core.registry.entries.front()
             .snapshot.roomId,
@@ -535,268 +1015,84 @@ TEST_F(
 
 TEST_F(
     LobbyAuthorityTest,
-    TwoPlayersMatchReadyAndOneHundredRandomCutoffsRecoverTheSameChecksums
+    TwoPlayersMatchReadyAndOneHundredWorkerCutoffsRecoverTheSameChecksums
 )
 {
     open();
-    const auto alice = login(7), bob = login(8);
-    call(
-        [alice, bob](auto& candidate, auto capture)
-        {
-            candidate.meta.set_ticket_next(10);
-            candidate.meta.set_ticket_last(1000);
-            if (!candidate.queue->join(
-                    PlayerId{7},
-                    arena::domain::SessionId{alice.session_id()},
-                    1,
-                    1000,
-                    candidate.now
-                ) ||
-                !candidate.queue->join(
-                    PlayerId{8},
-                    arena::domain::SessionId{bob.session_id()},
-                    1,
-                    1010,
-                    candidate.now
-                ))
-                throw std::runtime_error(
-                    "real queue admission failed"
-                );
-            capture(pong());
-        }
-    );
-    milliseconds = 50;
-    authority->requestTick();
-    ASSERT_TRUE(until(
-        [&]
-        { return !authority->snapshot()->core.rooms.matches.empty(); }
-    ));
-    auto current = authority->snapshot();
-    ASSERT_EQ(current->core.rooms.actors.size(), 1u);
-    const auto actor = current->core.rooms.actors.front();
-    const auto room = actor.roomId;
-    const auto firstBinding = binding(7), secondBinding = binding(8);
-    call(
-        [alice, bob, firstBinding, secondBinding, actor](
-            auto& candidate,
-            auto capture
-        )
-        {
-            auto pending = std::make_shared<unsigned>(2);
-            auto failed = std::make_shared<bool>(false);
-            auto complete = [pending, failed, capture](
-                                RoomService::StatusResult status
-                            )
-            {
-                *failed = *failed || !status;
-                if (--*pending == 0)
-                {
-                    if (*failed)
-                        capture(
-                            std::unexpected(
-                                arena::protocol::ERR_INTERNAL
-                            )
-                        );
-                    else
-                        capture(pong());
-                }
-            };
-            const auto entries = candidate.online->checkpoint()
-                                     .entries;
-            if (!candidate.rooms->ready(
-                    firstBinding,
-                    arena::domain::SessionId{alice.session_id()},
-                    actor.roomId,
-                    actor.incarnation,
-                    entries[0].snapshot.roomEpoch,
-                    true,
-                    complete
-                ) ||
-                !candidate.rooms->ready(
-                    secondBinding,
-                    arena::domain::SessionId{bob.session_id()},
-                    actor.roomId,
-                    actor.incarnation,
-                    entries[1].snapshot.roomEpoch,
-                    true,
-                    complete
-                ))
-                throw std::runtime_error(
-                    "readiness mailbox rejected"
-                );
-        },
-        true
-    );
-    for (unsigned i = 0;
-         i < 4 &&
-         authority->snapshot()->core.rooms.matches.front().phase !=
-             RoomPhase::Playing;
-         ++i)
-    {
-        const auto revision = authority->snapshot()->revision;
-        milliseconds += 50;
-        authority->requestTick();
-        ASSERT_TRUE(until(
-            [&] { return authority->snapshot()->revision > revision; }
-        ));
-    }
+    const auto id = match();
+    ready(id);
     ASSERT_EQ(
-        authority->snapshot()->core.rooms.matches.front().phase,
-        RoomPhase::Playing
+        authority->snapshot()->roomImages.at(id)->managed->phase,
+        service::room::RuntimePhase::Playing
     );
     auto reference = service::room::RoomActor::restore(
-        authority->snapshot()->core.rooms.actors.front(),
+        authority->snapshot()->roomImages.at(id)->actor,
         config.rooms.actor
     );
     ASSERT_TRUE(reference);
     std::mt19937 random(0xA11CEu);
     for (std::uint64_t sequence = 1; sequence <= 100; ++sequence)
     {
-        const auto dx = static_cast<std::int32_t>(random() % 3) - 1;
-        const auto dy = static_cast<std::int32_t>(random() % 3) - 1;
         const auto before = (*reference)->snapshot();
         std::vector<service::room::Member> members;
         for (const auto& player : before.players)
             members.push_back(player.member);
-        const auto member = before.players.front().member;
+        const auto dx = static_cast<std::int32_t>(random() % 3) - 1;
+        const auto dy = static_cast<std::int32_t>(random() % 3) - 1;
         const auto expected = (*reference)
                                   ->step(
                                       members,
-                                      {{member, sequence, dx, dy}}
+                                      {{before.players.front().member,
+                                        sequence,
+                                        dx,
+                                        dy}}
                                   )
                                   .snapshot;
-        auto committed = call(
-            [firstBinding,
-             alice,
-             room,
-             actor,
-             member,
-             sequence,
-             dx,
-             dy](auto& candidate, auto capture)
-            {
-                auto metadata = candidate.metadataHandle();
-                const auto
-                    expiry = std::chrono::duration_cast<
-                                 std::chrono::nanoseconds>(
-                                 candidate.now.time_since_epoch() + 1h
-                    )
-                                 .count();
-                if (!candidate.rooms->input(
-                        firstBinding,
-                        arena::domain::SessionId{alice.session_id()},
-                        room,
-                        actor.incarnation,
-                        member.epoch,
-                        sequence,
-                        dx,
-                        dy,
-                        [metadata,
-                         capture,
-                         member,
-                         firstBinding,
-                         expiry,
-                         sequence](RoomService::InputResult result)
-                        {
-                            if (!result)
-                            {
-                                capture(
-                                    std::unexpected(result.error())
-                                );
-                                return;
-                            }
-                            auto reply = pong(
-                                result->snapshot.checksum
-                            );
-                            auto* receipt = metadata->add_receipts();
-                            receipt->set_key(
-                                "input-" + std::to_string(sequence)
-                            );
-                            receipt->set_method(
-                                arena::protocol::
-                                    MSG_ROOM_INPUT_REQUEST
-                            );
-                            receipt->set_request_fingerprint(
-                                std::string(32, 'f')
-                            );
-                            receipt->set_player_id(
-                                member.playerId.value()
-                            );
-                            receipt->set_session_id(
-                                member.sessionId.value()
-                            );
-                            receipt->set_epoch(firstBinding.epoch);
-                            receipt->set_expires_nanos(expiry);
-                            receipt->set_reply(
-                                reply.SerializeAsString()
-                            );
-                            capture(std::move(reply));
-                        }
-                    ))
-                    throw std::runtime_error(
-                        "input mailbox rejected"
-                    );
-            },
-            true
+        auto command = workerCommand(
+            id,
+            service::room::RuntimeCommandKind::Input,
+            7
         );
-        ASSERT_TRUE(committed.reply);
+        command.sequence = sequence;
+        command.dx = dx;
+        command.dy = dy;
+        const auto committed = workerStep(id, {command});
         EXPECT_EQ(
-            committed.committed->core.rooms.actors.front(),
+            committed.committed->roomImages.at(id)->actor,
             expected
         );
         EXPECT_EQ(committed.reply->request_id(), expected.checksum);
+        EXPECT_TRUE(committed.committed->core.rooms.actors.empty());
+        EXPECT_TRUE(committed.committed->core.distributedRooms);
         EXPECT_EQ(
-            committed.committed->meta.receipts_size(),
-            static_cast<int>(sequence)
+            committed.committed->directory->revision(),
+            committed.committed->revision
         );
         if (sequence % 10 == 0)
         {
-            const auto revision = committed.committed->revision;
             close();
             open();
-            EXPECT_EQ(authority->snapshot()->revision, revision);
             EXPECT_EQ(
-                authority->snapshot()->core.rooms.actors.front(),
+                authority->snapshot()->roomImages.at(id)->actor,
                 expected
             );
-            EXPECT_EQ(
-                authority->snapshot()->meta.receipts_size(),
-                static_cast<int>(sequence)
-            );
         }
     }
-    const auto final = authority->snapshot()
-                           ->core.rooms.actors.front();
+    const auto
+        final = authority->snapshot()->roomImages.at(id)->actor;
     close();
-    DurableStateStore store(context.get_executor(), config.journal);
-    std::map<std::uint64_t, service::room::ReplayLog> segments;
-    for (const auto& [key, value] : store.snapshot()->values)
-        if (key.starts_with("replay/"))
-        {
-            auto decoded = decodeReplayLog(value);
-            ASSERT_TRUE(decoded);
-            segments.emplace(
-                decoded->ticks.front().tick,
-                std::move(*decoded)
-            );
-        }
-    std::optional<service::room::Snapshot> replayed;
-    for (const auto& [tick, log] : segments)
-    {
-        (void)tick;
-        if (replayed)
-        {
-            EXPECT_EQ(log.checkpoint, *replayed);
-        }
-        auto replay = service::room::RoomActor::replay(log);
-        ASSERT_TRUE(replay);
-        replayed = replay->snapshot;
-    }
-    ASSERT_TRUE(replayed);
-    EXPECT_EQ(*replayed, final);
-    EXPECT_GE(segments.size(), 100u);
-    store.stop();
-    ASSERT_TRUE(until([&] { return store.stats().closed; }));
+    AtomicJournal journal(context.get_executor(), config.journal);
+    const auto archives = assembleReplayArchives(
+        *journal.snapshot(),
+        {},
+        config.journal.maxKeys
+    );
+    ASSERT_TRUE(archives);
+    ASSERT_EQ(archives->size(), 1u);
+    EXPECT_EQ(archives->front().finalSnapshot, final);
+    EXPECT_GE(archives->front().log.ticks.size(), 100u);
+    journal.stop();
+    ASSERT_TRUE(until([&] { return journal.stats().closed; }));
 }
 
 TEST_F(
@@ -806,162 +1102,22 @@ TEST_F(
 {
     config.rooms.battleDurationTicks = 1;
     open();
-    const auto alice = login(7), bob = login(8);
-    const auto a = binding(7), b = binding(8);
-    call(
-        [alice, bob](auto& candidate, auto capture)
-        {
-            candidate.meta.set_ticket_next(1);
-            candidate.meta.set_ticket_last(100);
-            if (!candidate.queue->join(
-                    PlayerId{7},
-                    arena::domain::SessionId{alice.session_id()},
-                    1,
-                    1000,
-                    candidate.now
-                ) ||
-                !candidate.queue->join(
-                    PlayerId{8},
-                    arena::domain::SessionId{bob.session_id()},
-                    1,
-                    1000,
-                    candidate.now
-                ))
-                throw std::runtime_error("queue admission failed");
-            capture(pong());
-        }
-    );
-    milliseconds = 50;
-    authority->requestTick();
-    ASSERT_TRUE(until(
-        [&]
-        { return !authority->snapshot()->core.rooms.matches.empty(); }
-    ));
-    const auto initial = authority->snapshot();
-    const auto actor = initial->core.rooms.actors.front();
-    call(
-        [a, b, alice, bob, actor](auto& candidate, auto capture)
-        {
-            const auto entries = candidate.online->checkpoint()
-                                     .entries;
-            auto remaining = std::make_shared<unsigned>(2);
-            auto complete =
-                [remaining, capture](RoomService::StatusResult status)
-            {
-                if (!status)
-                    throw std::runtime_error("ready cutoff rejected");
-                if (--*remaining == 0)
-                    capture(pong());
-            };
-            if (!candidate.rooms->ready(
-                    a,
-                    arena::domain::SessionId{alice.session_id()},
-                    actor.roomId,
-                    actor.incarnation,
-                    entries[0].snapshot.roomEpoch,
-                    true,
-                    complete
-                ) ||
-                !candidate.rooms->ready(
-                    b,
-                    arena::domain::SessionId{bob.session_id()},
-                    actor.roomId,
-                    actor.incarnation,
-                    entries[1].snapshot.roomEpoch,
-                    true,
-                    complete
-                ))
-                throw std::runtime_error("ready mailbox rejected");
-        },
-        true
-    );
-    for (unsigned attempt = 0;
-         attempt < 8 &&
-         authority->snapshot()->core.rooms.matches.front().phase !=
-             RoomPhase::Settling;
-         ++attempt)
-    {
-        const auto revision = authority->snapshot()->revision;
-        milliseconds += 50;
-        authority->requestTick();
-        ASSERT_TRUE(until(
-            [&] { return authority->snapshot()->revision > revision; }
-        ));
-    }
+    const auto id = match();
+    ready(id);
+    const auto image = authority->snapshot()->roomImages.at(id);
     ASSERT_EQ(
-        authority->snapshot()->core.rooms.matches.front().phase,
-        RoomPhase::Settling
+        image->managed->phase,
+        service::room::RuntimePhase::Settling
     );
-    const auto match = authority->snapshot()
-                           ->core.rooms.matches.front();
-    ASSERT_TRUE(match.result);
-    arena::storage::SaveResultRequest request;
-    auto* record = request.mutable_match();
-    record->set_match_id(match.allocation.matchId);
-    record->set_room_id(match.allocation.roomId.value());
-    record->set_result_version(1);
-    record->set_state("completed");
-    record->set_finish_reason("completed");
-    record->set_final_tick(match.result->finalTick);
-    record->set_final_checksum(match.result->finalChecksum);
-    for (std::size_t index = 0;
-         index < match.allocation.members.size();
-         ++index)
-    {
-        const auto& member = match.allocation.members[index];
-        auto* participant = record->add_participants();
-        participant->set_player_id(member.playerId.value());
-        participant->set_session_id(member.sessionId.value());
-        participant->set_membership_epoch(member.roomEpoch);
-        participant->set_initial_mmr(member.initialMmr);
-        participant->set_slot(static_cast<unsigned>(index + 1));
-    }
-    call(
-        [request](auto& candidate, auto capture)
-        {
-            const auto first = std::chrono::duration_cast<
-                                   std::chrono::nanoseconds>(
-                                   candidate.now.time_since_epoch()
-            )
-                                   .count();
-            auto* delivery = candidate.meta.add_settlements();
-            delivery->set_match_id(request.match().match_id());
-            delivery->set_stable_idempotency_key(
-                "settlement/" +
-                std::to_string(request.match().match_id())
-            );
-            delivery->set_max_attempts(8);
-            delivery->set_first_attempt_nanos(first);
-            delivery->set_deadline_nanos(first + 1000000000);
-            delivery->set_next_attempt_nanos(first);
-            delivery->set_retry_base_ms(10);
-            delivery->set_retry_max_ms(100);
-            delivery->set_request(request.SerializeAsString());
-            capture(pong());
-        }
-    );
+    const auto& match = *image->managed;
+    settlementIntent(id);
     const auto original = authority->snapshot()->meta.settlements(0);
     milliseconds += 1000;
-    call(
-        [match](auto& candidate, auto capture)
-        {
-            candidate.meta.mutable_settlements(0)->set_phase(
-                arena::lobby_meta::SettlementDelivery::BLOCKED
-            );
-            if (!candidate.rooms->acknowledgeSettlement(
-                    match.allocation.matchId,
-                    false
-                ))
-                throw std::runtime_error(
-                    "blocked settlement acknowledgement failed"
-                );
-            capture(pong());
-        }
-    );
-    EXPECT_EQ(
-        authority->snapshot()->meta.settlements(0).attempts(),
-        0u
-    );
+    service::room::RuntimeCommand failed;
+    failed.kind = service::room::RuntimeCommandKind::SettlementAck;
+    failed.matchId = match.allocation.matchId;
+    failed.committed = false;
+    workerStep(id, {failed}, false, true);
     close();
     open();
     const auto restored = authority->snapshot()->meta.settlements(0);
@@ -970,34 +1126,540 @@ TEST_F(
         arena::lobby_meta::SettlementDelivery::BLOCKED
     );
     EXPECT_EQ(restored.attempts(), 0u);
-    EXPECT_EQ(
-        restored.first_attempt_nanos(),
-        original.first_attempt_nanos()
-    );
     EXPECT_EQ(restored.deadline_nanos(), original.deadline_nanos());
-    const auto saved = authority->snapshot();
+    const auto before = authority->snapshot();
     auto reset = submit(
-        [](auto& candidate, auto capture)
+        [](auto& work, auto capture)
         {
-            candidate.meta.mutable_settlements(0)->set_deadline_nanos(
-                candidate.meta.settlements(0).deadline_nanos() + 1
+            work.meta.mutable_settlements(0)->set_deadline_nanos(
+                work.meta.settlements(0).deadline_nanos() + 1
             );
             capture(pong());
         }
     );
-    auto resetResult = await(reset);
-    ASSERT_FALSE(resetResult);
-    EXPECT_EQ(resetResult.error(), Authority::Error::InvalidState);
-    EXPECT_EQ(authority->snapshot(), saved);
+    ASSERT_FALSE(await(reset));
+    EXPECT_EQ(authority->snapshot(), before);
     auto dropped = submit(
-        [](auto& candidate, auto capture)
+        [](auto& work, auto capture)
         {
-            candidate.meta.clear_settlements();
+            work.meta.clear_settlements();
             capture(pong());
         }
     );
     EXPECT_FALSE(await(dropped));
-    EXPECT_EQ(authority->snapshot(), saved);
+    EXPECT_EQ(authority->snapshot(), before);
+}
+
+TEST_F(
+    LobbyAuthorityTest,
+    DurableSettlementAckMayPrecedeWorkerFinishAndSurvivesReopen
+)
+{
+    config.rooms.battleDurationTicks = 1;
+    open();
+    const auto id = match();
+    ready(id);
+    settlementIntent(id);
+    service::room::RuntimeCommand ack;
+    ack.kind = service::room::RuntimeCommandKind::SettlementAck;
+    ack.matchId = authority->snapshot()
+                      ->roomImages.at(id)
+                      ->managed->allocation.matchId;
+    ack.committed = true;
+    const auto bytes = service::room::wire::encodeCommand(ack);
+    ASSERT_TRUE(bytes);
+    const auto before = authority->snapshot();
+    auto forged = submit(
+        [](auto& work, auto capture)
+        {
+            auto* intent = work.meta.mutable_settlements(0);
+            intent->set_attempts(1);
+            intent->set_phase(
+                arena::lobby_meta::SettlementDelivery::ACKNOWLEDGED
+            );
+            capture(pong());
+        }
+    );
+    EXPECT_FALSE(await(forged));
+    EXPECT_EQ(authority->snapshot(), before);
+    call(
+        [id, payload = *bytes](auto& work, auto capture)
+        {
+            auto* intent = work.meta.mutable_settlements(0);
+            intent->set_attempts(1);
+            intent->set_phase(
+                arena::lobby_meta::SettlementDelivery::ACKNOWLEDGED
+            );
+            intent->set_retention_deadline_nanos(
+                work.now.time_since_epoch().count() + 30'000'000'000LL
+            );
+            work.roomChanges.push_back(
+                RoomAccept{
+                    id,
+                    1,
+                    {"ack", RoomIngressKind::Settlement, 0, payload}
+                }
+            );
+            capture(pong());
+        }
+    );
+    EXPECT_EQ(
+        authority->snapshot()->roomImages.at(id)->managed->phase,
+        service::room::RuntimePhase::Settling
+    );
+    close();
+    open();
+    EXPECT_EQ(
+        authority->snapshot()->meta.settlements(0).phase(),
+        arena::lobby_meta::SettlementDelivery::ACKNOWLEDGED
+    );
+    call([](auto&, auto capture) { capture(pong()); }, true);
+    const auto snapshot = authority->snapshot();
+    const auto* route = snapshot->directory->find(id);
+    ASSERT_EQ(route->inbox.size(), 2u);
+    auto cutoff = service::room::wire::decodeCutoff(
+        route->inbox.back().operation.payload
+    );
+    ASSERT_TRUE(cutoff);
+    cutoff->commands.push_back(ack);
+    const auto proposal = service::room::RoomRuntime::step(
+        *snapshot->roomImages.at(id),
+        *cutoff
+    );
+    ASSERT_TRUE(proposal);
+    ASSERT_TRUE(proposal->releaseMembership);
+    ASSERT_FALSE(proposal->replay);
+    const auto value = workerImage(
+        proposal->image,
+        route->inbox.back().sequence
+    );
+    const std::vector<RoomAppliedReply> replies{
+        {route->inbox[0].sequence, {}},
+        {route->inbox[1].sequence, {}}
+    };
+    call(
+        [id,
+         value,
+         replies,
+         match = ack.matchId](auto& work, auto capture)
+        {
+            work.roomChanges.push_back(
+                RoomApply{id, "worker-a", 1, value, replies, {}}
+            );
+            if (!work.online->finishMatch(RoomId{id.room}, match))
+                throw std::runtime_error("finish failed");
+            capture(pong());
+        }
+    );
+    EXPECT_EQ(
+        authority->snapshot()->roomImages.at(id)->managed->phase,
+        service::room::RuntimePhase::Finished
+    );
+    EXPECT_TRUE(authority->snapshot()->core.registry.rooms.empty());
+    close();
+    open();
+    EXPECT_EQ(
+        authority->snapshot()->roomImages.at(id)->managed->phase,
+        service::room::RuntimePhase::Finished
+    );
+}
+
+TEST_F(
+    LobbyAuthorityTest,
+    FinalApplyAndRetireMoveKnownCountersExactlyOnce
+)
+{
+    open();
+    login(7, 55);
+    const auto id = manual();
+    auto input = workerCommand(
+        id,
+        service::room::RuntimeCommandKind::Input,
+        7
+    );
+    input.sequence = 1;
+    input.dx = 1;
+    workerStep(id, {input}, true);
+    const auto snapshot = authority->snapshot();
+    EXPECT_TRUE(snapshot->roomImages.empty());
+    EXPECT_EQ(snapshot->core.rooms.unattributedCounters.ticks, 1u);
+    EXPECT_EQ(snapshot->core.rooms.unattributedCounters.applied, 1u);
+    const auto route = *snapshot->directory->find(id);
+    ASSERT_EQ(route.lifecycle, RoomRouteLifecycle::Retired);
+    call(
+        [id, route](auto& work, auto capture)
+        {
+            work.roomChanges.push_back(
+                RoomRetire{
+                    id,
+                    route.owner,
+                    route.ownerEpoch,
+                    route.image.cursor,
+                    roomImageFingerprint(id, route.image)
+                }
+            );
+            capture(pong());
+        }
+    );
+    EXPECT_EQ(
+        authority->snapshot()->core.rooms.unattributedCounters.ticks,
+        1u
+    );
+    EXPECT_EQ(
+        authority->snapshot()
+            ->core.rooms.unattributedCounters.applied,
+        1u
+    );
+    close();
+    open();
+    EXPECT_EQ(
+        authority->snapshot()
+            ->core.rooms.unattributedCounters.applied,
+        1u
+    );
+    EXPECT_TRUE(authority->snapshot()->roomImages.empty());
+}
+
+TEST_F(
+    LobbyAuthorityTest,
+    PendingRoomReservationCannotRenewOrPublishWithoutItsDurableIdentity
+)
+{
+    open();
+    login(7);
+    call(
+        [](auto& work, auto capture)
+        {
+            auto* p = work.meta.add_pending_rooms();
+            p->set_room_id(55);
+            p->set_incarnation(1);
+            p->set_created_unix_ms(1700000000000);
+            p->set_deadline_nanos(10'000'000'000LL);
+            work.meta.set_incarnation_high_water(1);
+            capture(pong());
+        }
+    );
+    const auto before = authority->snapshot();
+    auto renewed = submit(
+        [](auto& work, auto capture)
+        {
+            work.meta.mutable_pending_rooms(0)->set_deadline_nanos(
+                11'000'000'000LL
+            );
+            capture(pong());
+        }
+    );
+    EXPECT_FALSE(await(renewed));
+    EXPECT_EQ(authority->snapshot(), before);
+    const RoomIdentity id{55, 1};
+    const auto created = service::room::RoomRuntime::create(
+        RoomId{55},
+        1,
+        workerPolicy()
+    );
+    ASSERT_TRUE(created);
+    const auto value = workerImage(*created, 0);
+    call(
+        [id, value](auto& work, auto capture)
+        {
+            work.roomChanges.push_back(
+                RoomCreate{id, "worker-a", value}
+            );
+            capture(pong());
+        }
+    );
+    call([](auto&, auto capture) { capture(pong()); }, true);
+    EXPECT_TRUE(
+        authority->snapshot()->directory->find(id)->inbox.empty()
+    );
+    EXPECT_EQ(
+        authority->snapshot()->roomImages.at(id)->logicalCutoff,
+        0u
+    );
+    EXPECT_EQ(authority->snapshot()->meta.pending_rooms_size(), 1);
+    const auto current = binding(7);
+    call(
+        [current](auto& work, auto capture)
+        {
+            if (!work.online->joinRoom(current, RoomId{55}))
+                throw std::runtime_error("final join failed");
+            work.meta.clear_pending_rooms();
+            capture(pong());
+        }
+    );
+    call([](auto&, auto capture) { capture(pong()); }, true);
+    ASSERT_EQ(
+        authority->snapshot()->directory->find(id)->inbox.size(),
+        1u
+    );
+    EXPECT_EQ(
+        authority->snapshot()
+            ->directory->find(id)
+            ->inbox.front()
+            .operation.kind,
+        RoomIngressKind::Tick
+    );
+    EXPECT_TRUE(authority->snapshot()->meta.pending_rooms().empty());
+    EXPECT_TRUE(authority->snapshot()->core.rooms.actors.empty());
+}
+
+TEST_F(
+    LobbyAuthorityTest,
+    PureValueCutoffsAreBoundedFairAndDoNotDuplicatePendingTicks
+)
+{
+    config.directoryLimits.maxCommands = 2;
+    open();
+    const std::array ids{manual(55), manual(56), manual(57)};
+    const auto tick = [&]
+    {
+        const auto revision = authority->snapshot()->revision;
+        milliseconds += 50;
+        authority->requestTick();
+        ASSERT_TRUE(until(
+            [&] { return authority->snapshot()->revision > revision; }
+        ));
+    };
+    tick();
+    std::size_t admitted = 0;
+    for (const auto id : ids)
+        admitted += !authority->snapshot()
+                         ->directory->find(id)
+                         ->inbox.empty();
+    EXPECT_EQ(admitted, 2u);
+    tick();
+    for (const auto id : ids)
+    {
+        const auto* route = authority->snapshot()->directory->find(
+            id
+        );
+        ASSERT_EQ(route->inbox.size(), 1u);
+        EXPECT_EQ(
+            route->inbox[0].operation.kind,
+            RoomIngressKind::Tick
+        );
+        EXPECT_EQ(route->inbox[0].operation.tick, 1u);
+        EXPECT_EQ(
+            authority->snapshot()->roomImages.at(id)->logicalCutoff,
+            0u
+        );
+        EXPECT_EQ(
+            authority->snapshot()->roomImages.at(id)->actor.tick,
+            0u
+        );
+    }
+    tick();
+    for (const auto id : ids)
+        EXPECT_EQ(
+            authority->snapshot()->directory->find(id)->inbox.size(),
+            1u
+        );
+}
+
+TEST_F(
+    LobbyAuthorityTest,
+    CutoffSamplesCurrentAuthorizationAfterMembershipChanges
+)
+{
+    open();
+    login(7, 55);
+    const auto id = manual();
+    auto command = workerCommand(
+        id,
+        service::room::RuntimeCommandKind::Snapshot,
+        7
+    );
+    const auto encoded = service::room::wire::encodeCommand(command);
+    ASSERT_TRUE(encoded);
+    const auto current = binding(7);
+    call(
+        [id, current, bytes = *encoded](auto& work, auto capture)
+        {
+            work.roomChanges.push_back(
+                RoomAccept{
+                    id,
+                    1,
+                    {"query", RoomIngressKind::Input, 0, bytes}
+                }
+            );
+            if (!work.online->leaveRoom(current))
+                throw std::runtime_error("leave failed");
+            capture(pong());
+        },
+        true
+    );
+    const auto snapshot = authority->snapshot();
+    const auto* route = snapshot->directory->find(id);
+    ASSERT_EQ(route->inbox.size(), 2u);
+    EXPECT_EQ(
+        route->inbox.back().operation.kind,
+        RoomIngressKind::Tick
+    );
+    auto cutoff = service::room::wire::decodeCutoff(
+        route->inbox.back().operation.payload
+    );
+    ASSERT_TRUE(cutoff);
+    EXPECT_TRUE(cutoff->roster.empty());
+    ASSERT_EQ(cutoff->currentAuthorizations.size(), 1u);
+    EXPECT_EQ(
+        cutoff->currentAuthorizations[0].member.playerId,
+        PlayerId{7}
+    );
+    EXPECT_EQ(
+        cutoff->currentAuthorizations[0].connectionHandle,
+        current.connectionId
+    );
+    cutoff->commands.push_back(command);
+    const auto proposal = service::room::RoomRuntime::step(
+        *snapshot->roomImages.at(id),
+        *cutoff
+    );
+    ASSERT_TRUE(proposal);
+    ASSERT_EQ(proposal->results.size(), 1u);
+    EXPECT_EQ(
+        proposal->results[0].error,
+        service::room::RuntimeError::BusinessFailure
+    );
+    EXPECT_EQ(snapshot->roomImages.at(id)->logicalCutoff, 0u);
+}
+
+TEST_F(
+    LobbyAuthorityTest,
+    LegacyV1IsAdoptedAsExactValuesWithoutLobbyKernelExecution
+)
+{
+    open();
+    login(7, 55);
+    const auto saved = authority->snapshot();
+    const auto current = binding(7);
+    auto online = OnlineRegistry::restore(
+        saved->core.registry,
+        config.registry,
+        [this] { return wall.load(); },
+        [](SessionBinding) { return [] {}; }
+    );
+    ASSERT_TRUE(online);
+    auto oldConfig = config.rooms;
+    oldConfig.externalTicks = oldConfig.externalSettlement = true;
+    oldConfig.incarnationSource = [] { return 1u; };
+    oldConfig.now = [this]
+    {
+        return Authority::Clock::time_point{} +
+               std::chrono::milliseconds(milliseconds.load());
+    };
+    oldConfig.wallNow = [this]
+    {
+        return std::chrono::system_clock::time_point{
+            std::chrono::seconds(wall.load())
+        };
+    };
+    RoomService legacy(*online, oldConfig);
+    legacy.start({});
+    ASSERT_TRUE(legacy.snapshot(
+        current,
+        saved->core.registry.entries.front().snapshot.sessionId,
+        RoomId{55},
+        [](auto) {}
+    ));
+    ASSERT_TRUE(legacy.advance());
+    const auto checkpoint = legacy.checkpoint();
+    const auto history = legacy.replayLog(RoomId{55});
+    ASSERT_TRUE(checkpoint);
+    ASSERT_TRUE(history);
+    const auto imported = splitLegacyRooms(*checkpoint);
+    ASSERT_TRUE(imported);
+    ASSERT_EQ(imported->images.size(), 1u);
+    // Only this fixture executes the old kernel. The online owner
+    // sees the v1 bytes below.
+    legacy.stop();
+    online->reset();
+    auto core = saved->core;
+    core.rooms = *checkpoint;
+    core.distributedRooms = false;
+    auto coreBytes = encodeCoreCheckpoint(core);
+    ASSERT_TRUE(coreBytes);
+    arena::lobby_state::CoreCheckpoint v1;
+    ASSERT_TRUE(v1.ParseFromString(*coreBytes));
+    v1.set_version(1);
+    v1.clear_distributed_rooms();
+    auto meta = saved->meta;
+    meta.set_incarnation_high_water(1);
+    auto replay = encodeReplayLog(*history);
+    ASSERT_TRUE(replay);
+    close();
+    {
+        AtomicJournal journal(context.get_executor(), config.journal);
+        std::optional<AtomicJournal::Result> result;
+        ASSERT_TRUE(journal.commit(
+            journal.snapshot()->revision,
+            {{"authority/core", v1.SerializeAsString()},
+             {"authority/meta", meta.SerializeAsString()},
+             {"replay/55/1/1", *replay}},
+            [&](auto value) { result = value; }
+        ));
+        ASSERT_TRUE(until([&] { return result.has_value(); }));
+        ASSERT_TRUE(*result);
+        journal.stop();
+        ASSERT_TRUE(until([&] { return journal.stats().closed; }));
+    }
+    open();
+    ASSERT_EQ(authority->snapshot()->core.rooms.actors.size(), 1u);
+    EXPECT_TRUE(authority->snapshot()->roomImages.empty());
+    const auto staged = imported->images.front();
+    ASSERT_TRUE(service::room::RoomRuntime::validate(staged));
+    const RoomIdentity id{55, 1};
+    const auto value = workerImage(staged, 0);
+    call(
+        [id, value](auto& work, auto capture)
+        {
+            work.roomChanges.push_back(
+                RoomCreate{id, "worker-a", value}
+            );
+            work.legacyRooms.actors.clear();
+            work.legacyRooms.matches.clear();
+            work.legacyRooms.roomCounters.clear();
+            capture(pong());
+        }
+    );
+    EXPECT_TRUE(authority->snapshot()->core.distributedRooms);
+    EXPECT_TRUE(authority->snapshot()->core.rooms.actors.empty());
+    EXPECT_EQ(
+        authority->snapshot()->roomImages.at(id)->actor,
+        staged.actor
+    );
+    EXPECT_EQ(
+        authority->snapshot()->roomImages.at(id)->counters,
+        staged.counters
+    );
+    close();
+    open();
+    EXPECT_EQ(
+        authority->snapshot()->roomImages.at(id)->actor,
+        staged.actor
+    );
+    auto input = workerCommand(
+        id,
+        service::room::RuntimeCommandKind::Input,
+        7
+    );
+    input.sequence = 1;
+    input.dx = 1;
+    workerStep(id, {input});
+    const auto
+        final = authority->snapshot()->roomImages.at(id)->actor;
+    close();
+    AtomicJournal journal(context.get_executor(), config.journal);
+    const auto archives = assembleReplayArchives(
+        *journal.snapshot(),
+        {},
+        config.journal.maxKeys
+    );
+    ASSERT_TRUE(archives);
+    ASSERT_EQ(archives->size(), 1u);
+    EXPECT_EQ(archives->front().finalSnapshot, final);
+    EXPECT_EQ(archives->front().log.ticks.size(), 2u);
+    journal.stop();
+    ASSERT_TRUE(until([&] { return journal.stats().closed; }));
 }
 
 TEST_F(
@@ -1142,6 +1804,7 @@ TEST_F(
 {
     open();
     login(7);
+    login(8);
     const auto old = authority->snapshot();
     auto noReply = submit(
         [](auto& candidate, auto)
@@ -1177,6 +1840,23 @@ TEST_F(
         }
     );
     EXPECT_FALSE(await(reset));
+    EXPECT_EQ(authority->snapshot(), old);
+    auto orphan = submit(
+        [](auto& candidate, auto capture)
+        {
+            const auto a = candidate.online->snapshot(PlayerId{7});
+            const auto b = candidate.online->snapshot(PlayerId{8});
+            if (!a || !b ||
+                !candidate.online->allocateMatch(
+                    77,
+                    {{{a->playerId, a->sessionId, 1500},
+                      {b->playerId, b->sessionId, 1500}}}
+                ))
+                throw std::runtime_error("allocation fixture failed");
+            capture(pong());
+        }
+    );
+    EXPECT_FALSE(await(orphan));
     EXPECT_EQ(authority->snapshot(), old);
 }
 
